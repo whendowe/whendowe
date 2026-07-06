@@ -1,0 +1,24 @@
+# Nightly long-budget property/simulation run (DESIGN.md §9 gate-vs-soak split).
+# Any failure found here gets its shrunken counterexample pinned as a regression
+# test that then runs in the fast gate (AGENTS.md).
+name: Soak
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  soak:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run soak

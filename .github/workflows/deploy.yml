@@ -1,0 +1,41 @@
+# Publish, not deploy (DESIGN.md §18): this repo's CI never deploys — it publishes
+# versioned artifacts. main → ghcr image tagged with the branch/sha; tag v* →
+# release-tagged image. Deployment happens exclusively from the private
+# whendowe/deployments registry, which pins these artifacts.
+# (Named deploy.yml per the §8 skeleton; its semantics are §18's publish step.)
+name: Publish
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish-image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=sha
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/node/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
