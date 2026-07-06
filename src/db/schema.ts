@@ -1,0 +1,147 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+import { sql } from "drizzle-orm";
+import { check, index, integer, sqliteTable, text, unique } from "drizzle-orm/sqlite-core";
+
+// DESIGN.md §10, transcribed. One SQLite dialect, two homes (D1 + SQLite file).
+// Conventions: text PKs holding UUIDv7 generated in app code; enums as text + CHECK;
+// time columns ISO-8601 text (instants UTC with Z; RFC 5545 wall-clock fields zone-less);
+// JSON in text columns; booleans integer 0/1; created_at/updated_at set by app code.
+// Note: §10 writes change_log.id as `bigserial` (a Postgres-ism); the SQLite-dialect
+// rendering is INTEGER PRIMARY KEY AUTOINCREMENT — flagged for a design-deviation PR.
+
+export const calendarConnection = sqliteTable(
+  "calendar_connection",
+  {
+    id: text("id").primaryKey(),
+    ownerId: text("owner_id").notNull(),
+    provider: text("provider").notNull().default("google"),
+    accountEmail: text("account_email").notNull(),
+    calendarId: text("calendar_id").notNull(),
+    accessTokenEnc: text("access_token_enc").notNull(),
+    refreshTokenEnc: text("refresh_token_enc").notNull(),
+    tokenExpiry: text("token_expiry"),
+    syncToken: text("sync_token"),
+    watchChannel: text("watch_channel"),
+    // auth_error: revoked/expired grant (§12); worker skips its projections until reconnected.
+    status: text("status").notNull().default("active"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (t) => [
+    // One connection per target calendar; a duplicate would double-mirror every event.
+    unique("calendar_connection_target_uq").on(t.ownerId, t.provider, t.calendarId),
+    check(
+      "calendar_connection_status_chk",
+      sql`${t.status} IN ('active', 'auth_error', 'disconnected')`,
+    ),
+  ],
+);
+
+export const canonicalEvent = sqliteTable(
+  "canonical_event",
+  {
+    id: text("id").primaryKey(),
+    revision: integer("revision").notNull().default(1),
+    origin: text("origin").notNull(),
+    ownerId: text("owner_id").notNull(),
+    title: text("title").notNull(),
+    description: text("description"),
+    location: text("location"),
+    // RFC 5545-native time model: wall-clock + TZID is AUTHORITATIVE;
+    // UTC instants are derived, never stored as truth.
+    startLocal: text("start_local").notNull(),
+    endLocal: text("end_local").notNull(),
+    tzid: text("tzid"), // IANA TZID; NULL only when all_day
+    allDay: integer("all_day").notNull().default(0),
+    rrule: text("rrule"), // verbatim RFC 5545 RRULE (validated subset at the zod boundary)
+    exdates: text("exdates").notNull().default("[]"), // MVP: stays empty (seam)
+    status: text("status").notNull().default("active"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (t) => [
+    check(
+      "canonical_event_origin_chk",
+      sql`${t.origin} IN ('user_edit', 'imported_from_calendar')`,
+    ),
+    check("canonical_event_status_chk", sql`${t.status} IN ('active', 'cancelled')`),
+    check("canonical_event_all_day_chk", sql`${t.allDay} IN (0, 1)`),
+  ],
+);
+
+// RFC 5545 override components (RECURRENCE-ID). MVP: table EXISTS but stays EMPTY
+// (seam, §5/§16) — no code path writes it yet. Phase 3 fills it; schema never moves.
+export const eventOverride = sqliteTable(
+  "event_override",
+  {
+    id: text("id").primaryKey(),
+    canonicalEventId: text("canonical_event_id")
+      .notNull()
+      .references(() => canonicalEvent.id, { onDelete: "cascade" }),
+    recurrenceId: text("recurrence_id").notNull(), // original occurrence DTSTART, wall-clock in parent tzid
+    fieldOverrides: text("field_overrides").notNull(), // sparse {field: value}
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (t) => [unique("event_override_occurrence_uq").on(t.canonicalEventId, t.recurrenceId)],
+);
+
+export const projection = sqliteTable(
+  "projection",
+  {
+    id: text("id").primaryKey(),
+    canonicalEventId: text("canonical_event_id")
+      .notNull()
+      .references(() => canonicalEvent.id, { onDelete: "cascade" }),
+    calendarConnectionId: text("calendar_connection_id")
+      .notNull()
+      .references(() => calendarConnection.id, { onDelete: "cascade" }),
+    visibilityProfile: text("visibility_profile").notNull().default("FULL"),
+    providerEventId: text("provider_event_id"), // null until first create
+    providerEtag: text("provider_etag"),
+    lastPushedHash: text("last_pushed_hash"), // hash of the FILTERED fieldset we last pushed
+    recentWriteNonces: text("recent_write_nonces").notNull().default("[]"), // ring of last ~5 (§11)
+    baseRevision: integer("base_revision"), // canonical revision last synced to this mirror
+    state: text("state").notNull().default("pending_create"),
+    lastError: text("last_error"),
+    retryAt: text("retry_at"), // next retry for 'error' rows (capped backoff, §12)
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (t) => [
+    unique("projection_target_uq").on(t.canonicalEventId, t.calendarConnectionId),
+    index("projection_state_idx").on(t.state), // worker scans by state
+    index("projection_event_idx").on(t.canonicalEventId),
+    check(
+      "projection_state_chk",
+      sql`${t.state} IN ('pending_create', 'synced', 'pending_update', 'pending_delete', 'deleted', 'error')`,
+    ),
+  ],
+);
+
+// Append-only; the UNIQUE (event, revision) makes the log a true serialization of history.
+export const changeLog = sqliteTable(
+  "change_log",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    canonicalEventId: text("canonical_event_id")
+      .notNull()
+      .references(() => canonicalEvent.id, { onDelete: "cascade" }),
+    revision: integer("revision").notNull(),
+    actor: text("actor").notNull(), // connection id / user id / 'system'
+    source: text("source").notNull(), // 'ui' | 'inbound_sync'
+    diff: text("diff").notNull(), // {field: {before, after}}
+    createdAt: text("created_at").notNull(),
+  },
+  (t) => [
+    unique("change_log_revision_uq").on(t.canonicalEventId, t.revision),
+    index("change_log_event_idx").on(t.canonicalEventId, t.revision),
+    check("change_log_source_chk", sql`${t.source} IN ('ui', 'inbound_sync')`),
+  ],
+);
+
+export type CalendarConnectionRow = typeof calendarConnection.$inferSelect;
+export type CanonicalEventRow = typeof canonicalEvent.$inferSelect;
+export type EventOverrideRow = typeof eventOverride.$inferSelect;
+export type ProjectionRow = typeof projection.$inferSelect;
+export type ChangeLogRow = typeof changeLog.$inferSelect;

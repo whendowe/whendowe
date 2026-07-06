@@ -1,0 +1,14 @@
+{
+  "name": "whendowe",
+  "image": "mcr.microsoft.com/devcontainers/typescript-node:22-bookworm",
+  "postCreateCommand": "npm ci",
+  "customizations": {
+    "vscode": {
+      "extensions": ["biomejs.biome"],
+      "settings": {
+        "editor.defaultFormatter": "biomejs.biome",
+        "editor.formatOnSave": true
+      }
+    }
+  }
+}

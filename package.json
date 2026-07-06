@@ -1,0 +1,44 @@
+{
+  "name": "whendowe",
+  "version": "0.0.1",
+  "description": "One canonical event, projected into many calendars — with attribution.",
+  "license": "AGPL-3.0-or-later",
+  "private": true,
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/whendowe/whendowe.git"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "check": "biome check . && npm run typecheck && vitest run --project unit --project property --project contract && vitest run --project workers",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p deploy/cloudflare/tsconfig.json && tsc --noEmit -p tests/workers/tsconfig.json",
+    "soak": "SOAK=1 vitest run --project property",
+    "dev:cf": "wrangler dev -c deploy/cloudflare/wrangler.jsonc",
+    "dev:node": "tsx watch deploy/node/server.ts",
+    "build:node": "tsc -p deploy/node/tsconfig.build.json",
+    "migrate:new": "drizzle-kit generate --name",
+    "migrate:node": "tsx deploy/node/migrate.ts"
+  },
+  "dependencies": {
+    "@hono/node-server": "^2.0.8",
+    "@libsql/client": "^0.17.4",
+    "drizzle-orm": "^0.45.2",
+    "hono": "^4.12.28",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.2",
+    "@cloudflare/vitest-pool-workers": "^0.18.0",
+    "@cloudflare/workers-types": "^4.20260702.1",
+    "@hegeldev/hegel": "~0.3.1",
+    "@types/node": "^22.10.0",
+    "drizzle-kit": "^0.31.10",
+    "tsx": "^4.23.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.10",
+    "wrangler": "^4.107.0"
+  }
+}

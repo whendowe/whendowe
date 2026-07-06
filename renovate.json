@@ -1,0 +1,32 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended", ":semanticCommits"],
+  "minimumReleaseAge": "7 days",
+  "packageRules": [
+    {
+      "description": "Group non-gate dependency updates into one weekly PR",
+      "matchPackageNames": ["*"],
+      "groupName": "dependencies",
+      "schedule": ["before 6am on monday"]
+    },
+    {
+      "description": "Gate-relevant packages get individual PRs (CODEOWNERS-reviewed, DESIGN.md §18)",
+      "matchPackageNames": [
+        "@hegeldev/hegel",
+        "vitest",
+        "@cloudflare/vitest-pool-workers",
+        "wrangler",
+        "drizzle-orm",
+        "drizzle-kit",
+        "@biomejs/biome",
+        "typescript"
+      ],
+      "groupName": null
+    },
+    {
+      "description": "Hegel is beta with semver-shifted versioning — pin the minor (DESIGN.md §6)",
+      "matchPackageNames": ["@hegeldev/hegel"],
+      "rangeStrategy": "in-range-only"
+    }
+  ]
+}

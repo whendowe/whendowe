@@ -1,0 +1,43 @@
+// Cloudflare deployment adapter — TEMPLATE ONLY (DESIGN.md §18).
+// This repo publishes; it never deploys. Instance identity (real database_id,
+// routes, zones, secrets) lives in the private whendowe/deployments registry.
+// The placeholder id below is enough for `wrangler dev` and vitest-pool-workers,
+// both of which run locally in miniflare.
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "whendowe",
+  "main": "worker.ts",
+  "compatibility_date": "2026-06-01",
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "whendowe",
+      // Placeholder — instance-specific ids belong in the deployments repo, never here.
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "../../migrations"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "CONNECTION_DO",
+        "class_name": "ConnectionDO"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      // SQLite-backed DOs: required on the free tier. The DO still holds no domain
+      // data (§16) — serialization + retry alarms only; all state lives in D1.
+      "new_sqlite_classes": ["ConnectionDO"]
+    }
+  ],
+  "triggers": {
+    // Regular reconcile ticks are cron fan-out; DO alarms are retry backoff ONLY (§11).
+    "crons": ["* * * * *"]
+  },
+  "observability": {
+    "enabled": true
+  }
+}

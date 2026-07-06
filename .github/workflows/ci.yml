@@ -1,0 +1,36 @@
+# The gate (DESIGN.md §9): biome + tsc + vitest (unit/property/contract vs the
+# sqlite driver) + vitest-pool-workers (contract vs D1 in workerd). The contract
+# suite running against BOTH storage drivers is the matrix that stops the two
+# deployment adapters drifting apart silently.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+
+  gitleaks:
+    # Secret scanning in CI from day one (DESIGN.md §18).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

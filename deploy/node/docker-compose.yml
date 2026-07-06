@@ -1,0 +1,21 @@
+# Self-host deployment (DESIGN.md §6/§18). Self-hosters pin a published image:
+#   image: ghcr.io/whendowe/whendowe:<tag>
+# The build: block below is for local development of the image itself.
+# TODO(M2+): litestream sidecar for SQLite backup, per §8.
+services:
+  whendowe:
+    build:
+      context: ../..
+      dockerfile: deploy/node/Dockerfile
+    image: ghcr.io/whendowe/whendowe:dev
+    ports:
+      - "8080:8080"
+    environment:
+      DATABASE_URL: "file:/data/whendowe.db"
+      PORT: "8080"
+    volumes:
+      - whendowe-data:/data
+    restart: unless-stopped
+
+volumes:
+  whendowe-data:

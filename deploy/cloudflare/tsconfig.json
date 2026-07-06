@@ -1,0 +1,11 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["@cloudflare/workers-types"]
+  },
+  "include": ["./**/*.ts", "../../src/**/*.ts"],
+  "exclude": [
+    // Node-only storage driver; the CF adapter uses src/db/d1.ts instead.
+    "../../src/db/sqlite.ts"
+  ]
+}
