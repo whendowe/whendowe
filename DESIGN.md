@@ -1,6 +1,6 @@
 # WhenDoWe — Design & Agent Bootstrap Brief
 
-> **Status:** v1.0-rc4 (rc3 + security hardening: token-link semantics, ICS/HTML injection, OAuth state/PKCE, supply-chain cooldown & ignore-scripts, agent privilege model, backup-tail deletion promise) (v0.9 + artifact-store port seam for feeds/pages; v0.7 + scheduling economics: cron fan-out vs DO alarms; v0.6 + platform pivot: TypeScript intersection contract — one codebase targeting Cloudflare Workers/D1/Durable Objects free tier *and* Node/Docker self-host; SQLite dialect; Hegel-based verification; earlier history in companions/git). **Name:** WhenDoWe — repo `github.com/whendowe/whendowe`, domain `whendowe.org` (Cloudflare-registered), package name `whendowe`.
+> **Status:** v1.0-rc5 (rc4 + M0 as-built corrections: change_log id in SQLite dialect, fake provider filename, publish-not-deploy workflow comment, Hegel FFI mechanism) (rc3 + security hardening: token-link semantics, ICS/HTML injection, OAuth state/PKCE, supply-chain cooldown & ignore-scripts, agent privilege model, backup-tail deletion promise) (v0.9 + artifact-store port seam for feeds/pages; v0.7 + scheduling economics: cron fan-out vs DO alarms; v0.6 + platform pivot: TypeScript intersection contract — one codebase targeting Cloudflare Workers/D1/Durable Objects free tier *and* Node/Docker self-host; SQLite dialect; Hegel-based verification; earlier history in companions/git). **Name:** WhenDoWe — repo `github.com/whendowe/whendowe`, domain `whendowe.org` (Cloudflare-registered), package name `whendowe`.
 > **Audience:** the coding agent bootstrapping this repo, and future human contributors.
 
 ---
@@ -104,7 +104,7 @@ Domain code imports neither `wrangler`/binding APIs nor Node APIs directly; the 
 **Verification toolchain (the gate — §9):**
 - **tsc `--noEmit`** — blocking type gate. The `Action` ADT is a discriminated union checked with `never`-exhaustiveness (arguably stronger than the Python equivalent).
 - **Biome** — lint + format, one fast tool.
-- **vitest** — test runner. **Hegel (`@hegeldev/hegel`)** for property-based testing: Hypothesis internals (choice-sequence generation and shrinking) exposed over the Hegel protocol. Beta with semver-shifted versioning — **pin the minor**. `hegel-core` runs out-of-process over Unix sockets: Linux/macOS dev + CI only; Windows contributors use the devcontainer. **fast-check is the documented fallback** — only tests may depend on the PBT library, never domain code, so swapping costs a test directory, not the core.
+- **vitest** — test runner. **Hegel (`@hegeldev/hegel`)** for property-based testing: Hypothesis internals (choice-sequence generation and shrinking) exposed over the Hegel protocol. Beta with semver-shifted versioning — **pin the minor**. As-built (verified at M0): the native Rust core (`libhegel`) is driven **in-process via FFI**, with prebuilt binaries bundled in the npm package (Linux amd64/arm64, macOS arm64, Windows amd64/arm64) — nothing downloaded or compiled at install time, which also keeps it compatible with `ignore-scripts=true` (§18). The devcontainer remains the canonical environment for contributors and agents. **fast-check is the documented fallback** — only tests may depend on the PBT library, never domain code, so swapping costs a test directory, not the core.
 - **@cloudflare/vitest-pool-workers** — adapter/contract tests against real D1/DO bindings inside workerd. Hegel cannot run there (native core); pure-core tests don't need to.
 
 Rationale: free hosting (CF) and `docker compose up` self-hosting are both first-class from one codebase. TypeScript is the price of the intersection; it is paid back by exhaustiveness-checked ADTs and by Hegel retaining Hypothesis-quality shrinking — the two pillars of the verification strategy.
@@ -132,7 +132,8 @@ whendowe/
   CODEOWNERS                   # owner review required: tests/property/**, .github/**, migrations/**, *.md design docs, AGENTS.md
   .github/workflows/
     ci.yml                     # npm run check (both-driver contract matrix)
-    deploy.yml                 # main -> staging; tag v* -> production (Environment approval)
+    deploy.yml                 # PUBLISHES artifacts (§18): ghcr image on main; release on tag v*.
+                               # Never deploys — promotion lives in whendowe/deployments.
     soak.yml                   # nightly npm run soak
   .devcontainer/               # identical env for owner, contributors, cloud agents (Hegel needs Linux)
   DESIGN.md                    # this document
@@ -217,7 +218,7 @@ CI runs the storage-port **contract suite against both drivers** (sqlite locally
 - *Time-model round-trip:* canonical → provider/ICS representation → canonical is the identity on the supported RRULE subset.
 - *Steady-state zero-write:* a reconcile tick over fully-synced projections issues no storage writes (no `updated_at` churn). Correctness twin of *Idempotency*; economically load-bearing on D1's free write budget (§6).
 
-**Fake provider:** `providers/fake.py` implements the `CalendarProvider` port in memory. All reconcile/property tests run against it — fast, deterministic, and they never touch the real Google API. (This is a second payoff of the port abstraction.)
+**Fake provider:** `providers/fake.ts` implements the `CalendarProvider` port in memory. All reconcile/property tests run against it — fast, deterministic, and they never touch the real Google API. (This is a second payoff of the port abstraction.)
 
 **Deterministic simulation harness — catching distributed-systems bugs in-process.** The failure modes that matter here (duplicate-create crash window, stale-echo oscillation — §11) live in *interleavings* of crashes, delayed notifications, and reordering. They are made testable by construction:
 
@@ -348,7 +349,8 @@ CREATE INDEX projection_event_idx ON projection(canonical_event_id);
 --    event ids are fine — identity is the canonical UID (§3.4), not the provider id.
 
 CREATE TABLE change_log (                                -- append-only
-    id                 bigserial PRIMARY KEY,
+    id                 integer PRIMARY KEY AUTOINCREMENT, -- (bigserial was a Postgres-ism;
+                                                          --  this is the §6 SQLite dialect)
     canonical_event_id text NOT NULL REFERENCES canonical_event(id) ON DELETE CASCADE,
     revision           integer NOT NULL,
     actor              text NOT NULL,                    -- connection id / user id / 'system'
