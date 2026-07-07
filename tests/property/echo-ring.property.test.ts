@@ -3,6 +3,7 @@ import * as hegel from "@hegeldev/hegel";
 import * as gs from "@hegeldev/hegel/generators";
 import { test } from "vitest";
 import { isEcho, NONCE_RING_SIZE, pushNonce } from "../../src/reconcile/echo.js";
+import { propertySettings } from "./budget.js";
 
 // M0 scope: these properties prove the Hegel harness is wired and pin the nonce-ring
 // behaviour that the §9 stale-echo-suppression property depends on. The full
@@ -24,7 +25,7 @@ test("nonce ring is bounded and keeps exactly the newest nonces, in order", () =
     if (JSON.stringify(ring) !== JSON.stringify(expected)) {
       throw new Error(`ring ${JSON.stringify(ring)} != newest ${JSON.stringify(expected)}`);
     }
-  }));
+  }, propertySettings));
 
 test("any of the last RING_SIZE written nonces is still recognized as an echo", () =>
   hegel.test((tc) => {
@@ -47,4 +48,4 @@ test("any of the last RING_SIZE written nonces is still recognized as an echo", 
         throw new Error(`stale echo not suppressed for recent nonce ${recent}`);
       }
     }
-  }));
+  }, propertySettings));
