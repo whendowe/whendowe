@@ -13,7 +13,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "check": "biome check . && npm run typecheck && vitest run --project unit --project property --project contract && vitest run --project workers",
+    "check": "biome check . && npm run typecheck && vitest run --coverage --project unit --project property --project contract && vitest run --project workers",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p deploy/cloudflare/tsconfig.json && tsc --noEmit -p tests/workers/tsconfig.json",
     "soak": "SOAK=1 vitest run --project property",
     "dev:cf": "wrangler dev -c deploy/cloudflare/wrangler.jsonc",
@@ -37,6 +37,7 @@
     "@cloudflare/workers-types": "^4.20260702.1",
     "@hegeldev/hegel": "~0.3.1",
     "@types/node": "^22.10.0",
+    "@vitest/coverage-v8": "^4.1.10",
     "drizzle-kit": "^0.31.10",
     "tsx": "^4.23.0",
     "typescript": "^5.9.3",
