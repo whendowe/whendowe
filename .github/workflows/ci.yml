@@ -23,6 +23,14 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run check
+      # Coverage visibility (PR graphs/comments). The GATE is the vitest
+      # thresholds above — this upload is informational and skipped until the
+      # CODECOV_TOKEN secret exists.
+      - uses: codecov/codecov-action@v5
+        if: ${{ secrets.CODECOV_TOKEN != '' }}
+        with:
+          files: coverage/lcov.info
+          token: ${{ secrets.CODECOV_TOKEN }}
 
   gitleaks:
     # Secret scanning in CI from day one (DESIGN.md §18).
