@@ -33,7 +33,22 @@ export default defineConfig({
         test: { name: "unit", include: ["tests/unit/**/*.test.ts"] },
       },
       {
-        test: { name: "property", include: ["tests/property/**/*.test.ts"] },
+        test: {
+          name: "property",
+          include: ["tests/property/**/*.test.ts"],
+          // Gate vs soak (DESIGN.md §9). `npm run soak` sets SOAK=1, which raises
+          // Hegel's budget to 5000 cases (tests/property/budget.ts) — at that
+          // budget the DST wall-clock property needs ~15s, so vitest's 5s default
+          // killed it before it could finish. The soak had therefore never once
+          // passed since it was written; it reported a timeout, not a property
+          // violation, every night.
+          //
+          // This is NOT loosening the verifier: the gate keeps the 5s default
+          // (pinned explicitly below), and the property budget is untouched in
+          // both modes. Only the nightly long run gets a clock long enough to
+          // actually reach the budget it was configured with.
+          testTimeout: process.env.SOAK === undefined ? 5_000 : 300_000,
+        },
       },
       {
         test: { name: "contract", include: ["tests/contract/**/*.test.ts"] },
