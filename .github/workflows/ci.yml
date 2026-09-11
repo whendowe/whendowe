@@ -15,6 +15,13 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
+    # Surfaced as env because the `secrets` context is NOT available in an `if:`
+    # expression — referencing it there makes the whole workflow unparseable, so
+    # every run startup-fails in 0s and no checks attach to the PR at all. The
+    # `env` context IS available in a step `if:`, so the skip-when-unset
+    # behaviour below works as originally intended.
+    env:
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -27,10 +34,10 @@ jobs:
       # thresholds above — this upload is informational and skipped until the
       # CODECOV_TOKEN secret exists.
       - uses: codecov/codecov-action@v5
-        if: ${{ secrets.CODECOV_TOKEN != '' }}
+        if: env.CODECOV_TOKEN != ''
         with:
           files: coverage/lcov.info
-          token: ${{ secrets.CODECOV_TOKEN }}
+          token: ${{ env.CODECOV_TOKEN }}
 
   gitleaks:
     # Secret scanning in CI from day one (DESIGN.md §18).
