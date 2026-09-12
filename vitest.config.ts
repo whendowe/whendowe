@@ -37,17 +37,26 @@ export default defineConfig({
           name: "property",
           include: ["tests/property/**/*.test.ts"],
           // Gate vs soak (DESIGN.md §9). `npm run soak` sets SOAK=1, which raises
-          // Hegel's budget to 5000 cases (tests/property/budget.ts) — at that
-          // budget the DST wall-clock property needs ~15s, so vitest's 5s default
-          // killed it before it could finish. The soak had therefore never once
-          // passed since it was written; it reported a timeout, not a property
-          // violation, every night.
+          // Hegel's budget to 5000 cases (tests/property/budget.ts). Neither mode
+          // could previously finish inside vitest's 5s default:
           //
-          // This is NOT loosening the verifier: the gate keeps the 5s default
-          // (pinned explicitly below), and the property budget is untouched in
-          // both modes. Only the nightly long run gets a clock long enough to
-          // actually reach the budget it was configured with.
-          testTimeout: process.env.SOAK === undefined ? 5_000 : 300_000,
+          //   soak  — the DST wall-clock property needs ~85s at 5000 cases, so it
+          //           was killed mid-run. The nightly had therefore never once
+          //           passed since it was written: a timeout, not a property
+          //           violation, 60 nights running.
+          //   gate  — at the gate budget the same property measures 996ms on a CI
+          //           runner but 4.5–5.8s on slow hardware once v8 coverage
+          //           instrumentation and parallel projects are in play. Observed
+          //           locally: 5784ms fail, then 4984ms pass with 16ms to spare.
+          //           A verifier that fails at random on the machine you actually
+          //           develop on is one you learn to ignore.
+          //
+          // Neither number loosens the verifier. The case BUDGET — what the
+          // properties actually explore — is untouched in both modes, and a
+          // timeout is a hang-detector, not an assertion. 30s still catches a
+          // genuine runaway at gate budget (30x the CI measurement) while leaving
+          // slow hardware ~5x headroom.
+          testTimeout: process.env.SOAK === undefined ? 30_000 : 300_000,
         },
       },
       {
