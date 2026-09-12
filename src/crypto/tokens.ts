@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+import { base64ToBytes, bytesToBase64 } from "./base64.js";
 
 // OAuth token encryption at rest (DESIGN.md §13). The refresh tokens are the
 // crown jewels: whoever can read them can read every user's calendar, so they
@@ -43,23 +44,6 @@ export interface TokenCipher {
   encrypt(plaintext: string): Promise<string>;
   /** Decrypt a value written under any key in the ring. */
   decrypt(envelope: string): Promise<string>;
-}
-
-function bytesToBase64(bytes: Uint8Array): string {
-  let binary = "";
-  for (let i = 0; i < bytes.length; i += 1) {
-    binary += String.fromCharCode(bytes[i] ?? 0);
-  }
-  return btoa(binary);
-}
-
-function base64ToBytes(value: string): Uint8Array {
-  const binary = atob(value);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i += 1) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-  return bytes;
 }
 
 async function importKey(material: string, keyId: number): Promise<SubtleKey> {
