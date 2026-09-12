@@ -71,6 +71,23 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
 export type GoogleOAuthConfig = z.infer<typeof googleOAuthSchema>;
 
 /**
+ * Whether this instance has *any* Google OAuth setting.
+ *
+ * Lets an adapter distinguish "not configured, run without the connect flow" from
+ * "half configured, fail loudly": pair it with requireGoogleOAuth(), which throws
+ * on the partial case. A deployment missing one of four secrets is a mistake, not
+ * a mode.
+ */
+export function anyGoogleOAuthConfigured(config: Config): boolean {
+  return (
+    config.GOOGLE_CLIENT_ID !== undefined ||
+    config.GOOGLE_CLIENT_SECRET !== undefined ||
+    config.GOOGLE_REDIRECT_URI !== undefined ||
+    config.TOKEN_ENCRYPTION_KEY !== undefined
+  );
+}
+
+/**
  * Narrow a Config to the credentials the OAuth flow needs, or throw naming every
  * offending key at once. The message carries key names only — never the values
  * and never zod's received-value echo (§13/§14: secrets stay out of logs).

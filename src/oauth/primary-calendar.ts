@@ -24,11 +24,14 @@ import { defaultFetch, type FetchLike, requestJson } from "./http.js";
 export const GOOGLE_PRIMARY_CALENDAR_URL =
   "https://www.googleapis.com/calendar/v3/users/me/calendarList/primary";
 
+// `nullish`, not `optional`: an external API may express "no value" as either an
+// omitted key or an explicit null, and only `id` is load-bearing enough to require.
+// Being strict about the difference would fail a connect over a cosmetic field.
 const primaryCalendarSchema = z.object({
   id: z.string().min(1),
-  summary: z.string().optional(),
-  timeZone: z.string().optional(),
-  accessRole: z.string().optional(),
+  summary: z.string().nullish(),
+  timeZone: z.string().nullish(),
+  accessRole: z.string().nullish(),
 });
 
 export interface PrimaryCalendar {

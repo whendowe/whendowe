@@ -74,6 +74,21 @@ it("nulls optional fields Google omitted", async () => {
   });
 });
 
+it("accepts explicit nulls as well as omitted fields", async () => {
+  // Google normally omits absent fields, but an explicit null is a legitimate way
+  // for an API to say the same thing and must not fail a connect.
+  const { impl } = fakeFetch(
+    200,
+    JSON.stringify({ id: "someone@example.com", summary: null, timeZone: null }),
+  );
+  expect(await fetchPrimaryCalendar(ACCESS_TOKEN, impl)).toEqual({
+    id: "someone@example.com",
+    summary: null,
+    timeZone: null,
+    accessRole: null,
+  });
+});
+
 it("requires an id", async () => {
   // account_email and calendar_id are both NOT NULL in §10's schema, and this call
   // is where both come from — an id-less response cannot produce a valid row.
