@@ -61,6 +61,24 @@ function describeErrorBody(body: string): string {
 }
 
 /**
+ * A non-2xx response, carrying the status so callers can branch on it.
+ *
+ * Needed because some statuses are protocol, not failure: Google answers an
+ * expired sync cursor with 410 GONE, which means "start a full resync" (§12), not
+ * "something broke". The message still carries only the status and Google's own
+ * error code.
+ */
+export class HttpError extends Error {
+  readonly status: number;
+
+  constructor(status: number, context: string, detail: string) {
+    super(`${context} failed: HTTP ${status} (${detail})`);
+    this.name = "HttpError";
+    this.status = status;
+  }
+}
+
+/**
  * Make a request and validate the JSON response against `schema`.
  *
  * `context` labels errors (e.g. "token exchange"). Errors carry the HTTP status
@@ -78,7 +96,7 @@ export async function requestJson<T>(
   const body = await response.text();
 
   if (!response.ok) {
-    throw new Error(`${context} failed: HTTP ${response.status} (${describeErrorBody(body)})`);
+    throw new HttpError(response.status, context, describeErrorBody(body));
   }
 
   let parsed: unknown;
