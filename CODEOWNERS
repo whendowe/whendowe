@@ -1,11 +1,11 @@
 # Protect the verifier, delegate the doer (DESIGN.md §18).
 # Changes to these paths require the owner's review; everything else merges on green CI.
-/tests/property/    @whendowe-owner
-/.github/           @whendowe-owner
-/migrations/        @whendowe-owner
-/AGENTS.md          @whendowe-owner
-/CLAUDE.md          @whendowe-owner
-/CODEOWNERS         @whendowe-owner
-/DESIGN.md          @whendowe-owner
-/WORKFLOWS.md       @whendowe-owner
-/BUSINESS.md        @whendowe-owner
+/tests/property/    @AdamSaleh
+/.github/           @AdamSaleh
+/migrations/        @AdamSaleh
+/AGENTS.md          @AdamSaleh
+/CLAUDE.md          @AdamSaleh
+/CODEOWNERS         @AdamSaleh
+/DESIGN.md          @AdamSaleh
+/WORKFLOWS.md       @AdamSaleh
+/BUSINESS.md        @AdamSaleh
