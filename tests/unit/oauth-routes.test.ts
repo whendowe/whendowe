@@ -10,7 +10,7 @@ import type { FetchLike } from "../../src/oauth/http.js";
 import { GOOGLE_PRIMARY_CALENDAR_URL } from "../../src/oauth/primary-calendar.js";
 import { GOOGLE_TOKEN_ENDPOINT } from "../../src/oauth/token-exchange.js";
 import { createApp } from "../../src/web/app.js";
-import { CALLBACK_PATH, CONNECT_PATH, type OAuthRouteDeps } from "../../src/web/oauth-routes.js";
+import { CALLBACK_PATH, CONNECT_PATH, type OAuthRouteDeps } from "../../src/web/routes/oauth.js";
 import { loadMigrationSql } from "../conftest.js";
 
 // Route-level tests against a real in-memory SQLite database and a fake fetch, so

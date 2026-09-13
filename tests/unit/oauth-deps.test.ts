@@ -2,7 +2,7 @@
 import { expect, it } from "vitest";
 import { anyGoogleOAuthConfigured, loadConfig } from "../../src/config.js";
 import type { StoragePort } from "../../src/db/port.js";
-import { buildOAuthDeps, SINGLE_USER_OWNER_ID } from "../../src/web/oauth-deps.js";
+import { buildOAuthDeps, SINGLE_USER_OWNER_ID } from "../../src/web/routes/oauth-deps.js";
 
 // buildOAuthDeps is the config → dependencies mapping both deploy adapters go
 // through. A swap here (client id for client secret, say) would typecheck fine and

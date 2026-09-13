@@ -1,6 +1,6 @@
 # WhenDoWe — Design & Agent Bootstrap Brief
 
-> **Status:** v1.0-rc5 (rc4 + M0 as-built corrections: change_log id in SQLite dialect, fake provider filename, publish-not-deploy workflow comment, Hegel FFI mechanism) (rc3 + security hardening: token-link semantics, ICS/HTML injection, OAuth state/PKCE, supply-chain cooldown & ignore-scripts, agent privilege model, backup-tail deletion promise) (v0.9 + artifact-store port seam for feeds/pages; v0.7 + scheduling economics: cron fan-out vs DO alarms; v0.6 + platform pivot: TypeScript intersection contract — one codebase targeting Cloudflare Workers/D1/Durable Objects free tier *and* Node/Docker self-host; SQLite dialect; Hegel-based verification; earlier history in companions/git). **Name:** WhenDoWe — repo `github.com/whendowe/whendowe`, domain `whendowe.org` (Cloudflare-registered), package name `whendowe`.
+> **Status:** v1.0-rc6 (rc5 + M1 as-built corrections to §8: `src/crypto/` and `src/oauth/` were introduced during M1 but never documented; `src/web/routes/` contents named; `src/web/escape.ts`; `src/providers/google-event.ts`; `src/recurrence.ts` — undocumented since the M1 recurrence spike; and a `scripts/` directory) (rc4 + M0 as-built corrections: change_log id in SQLite dialect, fake provider filename, publish-not-deploy workflow comment, Hegel FFI mechanism) (rc3 + security hardening: token-link semantics, ICS/HTML injection, OAuth state/PKCE, supply-chain cooldown & ignore-scripts, agent privilege model, backup-tail deletion promise) (v0.9 + artifact-store port seam for feeds/pages; v0.7 + scheduling economics: cron fan-out vs DO alarms; v0.6 + platform pivot: TypeScript intersection contract — one codebase targeting Cloudflare Workers/D1/Durable Objects free tier *and* Node/Docker self-host; SQLite dialect; Hegel-based verification; earlier history in companions/git). **Name:** WhenDoWe — repo `github.com/whendowe/whendowe`, domain `whendowe.org` (Cloudflare-registered), package name `whendowe`.
 > **Audience:** the coding agent bootstrapping this repo, and future human contributors.
 
 ---
@@ -146,16 +146,30 @@ whendowe/
   drizzle.config.ts
   .env.example                 # config keys, no secrets
   migrations/                  # plain .sql — applied by wrangler d1 migrations OR the node runner
+  scripts/                     # developer/agent helpers; never part of the build or the gate
+    watch-pr-checks.sh         # stream PR check results until they settle (gh + jq)
   src/
     config.ts                  # zod-parsed env
+    recurrence.ts              # validated RRULE subset + occurrence expansion (rrule-floating + temporal)
+    crypto/
+      base64.ts                # base64 / base64url over the btoa/atob globals (platform-blind)
+      tokens.ts                # AES-GCM cipher for the *_enc columns; key-id prefix = rotation without migration (§13)
     db/
       schema.ts                # Drizzle schema (SQLite dialect)
       port.ts                  # async storage port (query/batch) — the ONLY way domain code touches storage
       d1.ts                    # driver: D1 binding
       sqlite.ts                # driver: better-sqlite3 (async-wrapped) / libsql
+    oauth/
+      pkce.ts                  # RFC 7636 verifier/challenge (S256 only) + state nonce (§13)
+      authorize.ts             # Google authorization request URL (§12)
+      flow-cookie.ts           # in-flight flow: an ENCRYPTED COOKIE, not an oauth_state table (§13)
+      http.ts                  # minimal fetch surface + zod-validated JSON — no SDK (§6)
+      token-exchange.ts        # authorization code -> tokens
+      primary-calendar.ts      # account/calendar identity for a new connection (§10)
     providers/
       base.ts                  # CalendarProvider port
       google.ts                # REST via fetch
+      google-event.ts          # Google event resource -> ProviderEvent (pure mapping, §12)
       fake.ts                  # fault-injecting simulator (§9)
     reconcile/
       actions.ts               # Action ADT — discriminated union (§9 functional core)
@@ -167,7 +181,10 @@ whendowe/
       tick.ts                  # one chunked reconcile tick — orchestration over the ports
     web/
       app.ts                   # Hono app (shared by both deployments)
+      escape.ts                # HTML escaping — provider/event text is untrusted input (§13)
       routes/                  # OAuth, events UI (HTMX)
+        oauth.ts               # POST connect (GET never mutates) + GET callback: state, PKCE, store
+        oauth-deps.ts          # config + storage port -> route dependencies
     changelog.ts               # append + diff
     mail/
       port.ts                  # HTTPS mail port (invites, token links — M3)

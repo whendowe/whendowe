@@ -4,8 +4,8 @@ import { createClient } from "@libsql/client";
 import { anyGoogleOAuthConfigured, loadConfig } from "../../src/config.js";
 import { sqliteStoragePort } from "../../src/db/sqlite.js";
 import { createApp } from "../../src/web/app.js";
-import { buildOAuthDeps } from "../../src/web/oauth-deps.js";
-import type { OAuthRouteDeps } from "../../src/web/oauth-routes.js";
+import type { OAuthRouteDeps } from "../../src/web/routes/oauth.js";
+import { buildOAuthDeps } from "../../src/web/routes/oauth-deps.js";
 
 // Node entry (DESIGN.md §8): the same Hono app object as the Cloudflare worker,
 // served by @hono/node-server. The in-process scheduler (the Node twin of cron

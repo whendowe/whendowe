@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import { type Config, requireGoogleOAuth } from "../config.js";
-import { createTokenCipher } from "../crypto/tokens.js";
-import type { StoragePort } from "../db/port.js";
-import type { OAuthRouteDeps } from "./oauth-routes.js";
+import { type Config, requireGoogleOAuth } from "../../config.js";
+import { createTokenCipher } from "../../crypto/tokens.js";
+import type { StoragePort } from "../../db/port.js";
+import type { OAuthRouteDeps } from "./oauth.js";
 
 // Assembles the OAuth route dependencies from config + a storage port. Lives here
 // rather than in deploy/ because none of it is platform-specific: the two adapters

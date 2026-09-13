@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { Hono } from "hono";
 import { z } from "zod";
-import { CONNECT_PATH, type OAuthRouteDeps, registerOAuthRoutes } from "./oauth-routes.js";
+import { CONNECT_PATH, type OAuthRouteDeps, registerOAuthRoutes } from "./routes/oauth.js";
 
 // The Hono app is shared verbatim by both deployments (DESIGN.md §6): workerd mounts
 // it in deploy/cloudflare/worker.ts, Node in deploy/node/server.ts. Views render

@@ -3,7 +3,7 @@ import type { Hono } from "hono";
 import { anyGoogleOAuthConfigured, loadConfig } from "../../src/config.js";
 import { d1StoragePort } from "../../src/db/d1.js";
 import { createApp } from "../../src/web/app.js";
-import { buildOAuthDeps } from "../../src/web/oauth-deps.js";
+import { buildOAuthDeps } from "../../src/web/routes/oauth-deps.js";
 
 export { ConnectionDO } from "./connection-do.js";
 

@@ -1,22 +1,22 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import type { Hono } from "hono";
 import { z } from "zod";
-import type { TokenCipher } from "../crypto/tokens.js";
-import type { StoragePort } from "../db/port.js";
-import { stmt } from "../db/port.js";
-import { buildAuthorizeUrl } from "../oauth/authorize.js";
+import type { TokenCipher } from "../../crypto/tokens.js";
+import type { StoragePort } from "../../db/port.js";
+import { stmt } from "../../db/port.js";
+import { buildAuthorizeUrl } from "../../oauth/authorize.js";
 import {
   buildFlowClearCookie,
   buildFlowSetCookie,
   readFlowCookie,
   sealFlow,
   unsealFlow,
-} from "../oauth/flow-cookie.js";
-import type { FetchLike } from "../oauth/http.js";
-import { createPkcePair, createState, timingSafeEqual } from "../oauth/pkce.js";
-import { fetchPrimaryCalendar } from "../oauth/primary-calendar.js";
-import { exchangeAuthorizationCode } from "../oauth/token-exchange.js";
-import { escapeHtml } from "./escape.js";
+} from "../../oauth/flow-cookie.js";
+import type { FetchLike } from "../../oauth/http.js";
+import { createPkcePair, createState, timingSafeEqual } from "../../oauth/pkce.js";
+import { fetchPrimaryCalendar } from "../../oauth/primary-calendar.js";
+import { exchangeAuthorizationCode } from "../../oauth/token-exchange.js";
+import { escapeHtml } from "../escape.js";
 
 // The Google connect flow (DESIGN.md §12/§13). Platform-blind: everything that
 // touches a platform — storage driver, clock, id generation, fetch — arrives as a
