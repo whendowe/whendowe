@@ -243,6 +243,37 @@ export const groupMember = sqliteTable(
   ],
 );
 
+// --- Group invites (MVP-1 slice D2) ----------------------------------------------
+// An invite is ALSO a sign-in: the link was sent to that address, so following it
+// proves ownership exactly as a magic link does. Token stored as a hash only (§13).
+export const groupInvite = sqliteTable(
+  "group_invite",
+  {
+    id: text("id").primaryKey(),
+    groupId: text("group_id")
+      .notNull()
+      .references(() => personGroup.id, { onDelete: "cascade" }),
+    email: text("email").notNull(),
+    tokenHash: text("token_hash").notNull().unique(),
+    invitedBy: text("invited_by")
+      .notNull()
+      .references(() => person.id, { onDelete: "cascade" }),
+    editTier: text("edit_tier").notNull(),
+    visibility: text("visibility").notNull(),
+    expiresAt: text("expires_at").notNull(),
+    acceptedAt: text("accepted_at"),
+    createdAt: text("created_at").notNull(),
+  },
+  (t) => [
+    index("group_invite_group_idx").on(t.groupId, t.createdAt),
+    check("group_invite_edit_tier_chk", sql`${t.editTier} IN ('edit', 'propose', 'view')`),
+    check(
+      "group_invite_visibility_chk",
+      sql`${t.visibility} IN ('FULL', 'DETAILS', 'BUSY', 'HIDDEN')`,
+    ),
+  ],
+);
+
 export type CalendarConnectionRow = typeof calendarConnection.$inferSelect;
 export type CanonicalEventRow = typeof canonicalEvent.$inferSelect;
 export type EventOverrideRow = typeof eventOverride.$inferSelect;

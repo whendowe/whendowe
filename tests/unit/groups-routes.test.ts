@@ -131,3 +131,126 @@ it("shows a helpful empty state before the first group", async () => {
   const page = await (await h.app.request(GROUPS_PATH, { headers: { cookie: me.cookie } })).text();
   expect(page).toContain("No groups yet.");
 });
+
+// --- invites (slice D2) -----------------------------------------------------------
+
+async function inviteVia(
+  h: H,
+  me: { cookie: string; csrf: string },
+  groupPath: string,
+  email: string,
+  extra: Record<string, string> = {},
+) {
+  return h.app.request(
+    `${groupPath}/invites`,
+    post({ csrf: me.csrf, email, editTier: "view", visibility: "FULL", ...extra }, me.cookie),
+  );
+}
+
+function inviteLink(h: H): URL {
+  return new URL(
+    /https?:\/\/\S+\/invite\?t=\S+/.exec(h.sent.at(-1)?.text ?? "")?.[0] ?? "http://x/invalid",
+  );
+}
+
+it("an organizer sees the invite form; the invite email links to PUBLIC_BASE_URL", async () => {
+  const h = await harness();
+  const dm = await signIn(h, "inv-dm@example.org");
+  const group = await createGroupVia(h, dm, "Thursday Table");
+  expect(await (await h.app.request(group, { headers: { cookie: dm.cookie } })).text()).toContain(
+    "Invite someone",
+  );
+  const res = await inviteVia(h, dm, group, "Player@Example.org", { host: "evil.example" });
+  expect(res.status).toBe(200);
+  expect(h.sent.at(-1)?.to).toBe("player@example.org");
+  expect(inviteLink(h).origin).toBe("https://whendowe.example");
+});
+
+it("the invitee joins with one click, is signed in, and sees the group — but cannot invite", async () => {
+  const h = await harness();
+  const dm = await signIn(h, "inv-dm2@example.org");
+  const group = await createGroupVia(h, dm, "Thursday Table");
+  await inviteVia(h, dm, group, "player2@example.org");
+  const link = inviteLink(h);
+
+  // GET (a scanner, or the person reading) names group, inviter and account; uses nothing.
+  const preview = await h.app.request(`${link.pathname}${link.search}`);
+  expect(preview.headers.get("referrer-policy")).toBe("no-referrer");
+  const body = await preview.text();
+  expect(body).toContain("Join “Thursday Table”?");
+  expect(body).toContain("inv-dm2@example.org");
+
+  const joined = await h.app.request("/invite", post({ t: link.searchParams.get("t") ?? "" }));
+  expect(joined.status).toBe(303);
+  expect(joined.headers.get("location")).toBe(group);
+  const cookie = (joined.headers.get("set-cookie") ?? "").split(";")[0] ?? "";
+  const page = await (await h.app.request(group, { headers: { cookie } })).text();
+  expect(page).toContain("player2@example.org (you)");
+  expect(page).not.toContain("Invite someone");
+
+  // A member who tries the organizer's invite action anyway is refused.
+  const home = await (await h.app.request("/", { headers: { cookie } })).text();
+  const csrf = /name="csrf" value="([^"]+)"/.exec(home)?.[1] ?? "";
+  expect((await inviteVia(h, { cookie, csrf }, group, "friend@example.org")).status).toBe(403);
+});
+
+it("an invite works once", async () => {
+  const h = await harness();
+  const dm = await signIn(h, "inv-dm3@example.org");
+  const group = await createGroupVia(h, dm, "G");
+  await inviteVia(h, dm, group, "once3@example.org");
+  const t = inviteLink(h).searchParams.get("t") ?? "";
+  expect((await h.app.request("/invite", post({ t }))).status).toBe(303);
+  expect((await h.app.request("/invite", post({ t }))).status).toBe(400);
+});
+
+it("joining while signed in as someone else switches accounts and kills the old session", async () => {
+  const h = await harness();
+  const dm = await signIn(h, "inv-dm4@example.org");
+  const group = await createGroupVia(h, dm, "G");
+  await inviteVia(h, dm, group, "newbie4@example.org");
+  const link = inviteLink(h);
+
+  // The DM opens the link in their own browser by mistake: the page warns.
+  const preview = await (
+    await h.app.request(`${link.pathname}${link.search}`, { headers: { cookie: dm.cookie } })
+  ).text();
+  expect(preview).toContain("You're signed in as inv-dm4@example.org");
+
+  const joined = await h.app.request(
+    "/invite",
+    post({ t: link.searchParams.get("t") ?? "" }, dm.cookie),
+  );
+  const newCookie = (joined.headers.get("set-cookie") ?? "").split(";")[0] ?? "";
+  expect(newCookie).not.toBe(dm.cookie);
+  // The DM's old session is revoked server-side, not merely replaced in this browser.
+  expect(await (await h.app.request("/", { headers: { cookie: dm.cookie } })).text()).not.toContain(
+    "Signed in as",
+  );
+});
+
+it("refuses an invite without CSRF, from a non-member, or to an existing member", async () => {
+  const h = await harness();
+  const dm = await signIn(h, "inv-dm5@example.org");
+  const group = await createGroupVia(h, dm, "G");
+  expect(
+    (
+      await h.app.request(
+        `${group}/invites`,
+        post({ email: "a@example.org", editTier: "view", visibility: "FULL" }, dm.cookie),
+      )
+    ).status,
+  ).toBe(403);
+  const stranger = await signIn(h, "inv-stranger@example.org");
+  expect((await inviteVia(h, stranger, group, "b@example.org")).status).toBe(404);
+  expect((await inviteVia(h, dm, group, "inv-dm5@example.org")).status).toBe(409);
+});
+
+it("rejects tiers that aren't on the list", async () => {
+  const h = await harness();
+  const dm = await signIn(h, "inv-dm6@example.org");
+  const group = await createGroupVia(h, dm, "G");
+  expect((await inviteVia(h, dm, group, "c@example.org", { editTier: "superuser" })).status).toBe(
+    400,
+  );
+});

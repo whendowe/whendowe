@@ -29,6 +29,13 @@
       "when": 1792184191036,
       "tag": "0003_groups",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1792184626269,
+      "tag": "0004_group_invites",
+      "breakpoints": true
     }
   ]
 }
