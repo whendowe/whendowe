@@ -37,6 +37,8 @@ const CLOCK_SKEW_TOLERANCE_SECONDS = 60;
 const flowPayloadSchema = z.object({
   state: z.string().min(1),
   verifier: z.string().min(1),
+  /** The signed-in person who started the flow; the callback requires the same one. */
+  personId: z.string().min(1),
   /** Seconds since the epoch, for a server-side expiry check. */
   issuedAt: z.number().int().nonnegative(),
 });

@@ -4,33 +4,45 @@ import { expect, it } from "vitest";
 import { base64ToBytes, bytesToBase64 } from "../../src/crypto/base64.js";
 import { createTokenCipher, type TokenCipher } from "../../src/crypto/tokens.js";
 import { sqliteStoragePort } from "../../src/db/sqlite.js";
+import { UUIDV7_PATTERN } from "../../src/ids.js";
+import type { MailMessage } from "../../src/mail/port.js";
 import { GOOGLE_AUTHORIZE_ENDPOINT } from "../../src/oauth/authorize.js";
 import { FLOW_COOKIE_NAME } from "../../src/oauth/flow-cookie.js";
 import type { FetchLike } from "../../src/oauth/http.js";
 import { GOOGLE_PRIMARY_CALENDAR_URL } from "../../src/oauth/primary-calendar.js";
 import { GOOGLE_TOKEN_ENDPOINT } from "../../src/oauth/token-exchange.js";
 import { createApp } from "../../src/web/app.js";
-import { CALLBACK_PATH, CONNECT_PATH, type OAuthRouteDeps } from "../../src/web/routes/oauth.js";
+import { CONFIRM_PATH, SIGN_IN_PATH } from "../../src/web/routes/auth.js";
+import { CALLBACK_PATH, CONNECT_PATH } from "../../src/web/routes/oauth.js";
 import { loadMigrationSql } from "../conftest.js";
 
 // Route-level tests against a real in-memory SQLite database and a fake fetch, so
-// the whole connect flow runs end to end without network. The routes touch storage
-// only through the port, which tests/contract already proves on both drivers, so
-// these do not need to run in workerd as well.
+// the whole connect flow runs end to end without network. Since MVP-1 E every flow
+// belongs to a signed-in person: the harness signs one in, and callback() sends that
+// session cookie alongside whatever flow cookie a test supplies.
 
 const KEY = { id: 1, material: `${"A".repeat(43)}=` };
-const OWNER = "owner-1";
+const OWNER_EMAIL = "owner@example.org";
 const REDIRECT_URI = "http://localhost:8080/oauth/google/callback";
 const NOW = "2026-09-12T12:00:00.000Z";
 
 const ACCESS_TOKEN = "ya29.access-token-value";
 const REFRESH_TOKEN = "1//refresh-token-value";
 
+interface Session {
+  cookie: string;
+  csrf: string;
+}
+
 interface Harness {
   app: ReturnType<typeof createApp>;
   cipher: TokenCipher;
-  storage: Awaited<ReturnType<typeof makeStorage>>;
+  storage: ReturnType<typeof sqliteStoragePort>;
   now: { value: string };
+  sent: MailMessage[];
+  /** The signed-in owner every flow runs as, unless a test says otherwise. */
+  session: Session;
+  personId: string;
 }
 
 async function makeStorage() {
@@ -90,29 +102,74 @@ function googleFake(options: GoogleFakeOptions = {}): FetchLike {
   };
 }
 
+function form(fields: Record<string, string>, cookie?: string): RequestInit {
+  return {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      ...(cookie === undefined ? {} : { cookie }),
+    },
+    body: new URLSearchParams(fields).toString(),
+  };
+}
+
+async function signIn(h: Pick<Harness, "app" | "sent">, email: string): Promise<Session> {
+  await h.app.request(SIGN_IN_PATH, form({ email }));
+  const t =
+    new URL(/https?:\/\/\S+/.exec(h.sent.at(-1)?.text ?? "")?.[0] ?? "").searchParams.get("t") ??
+    "";
+  const res = await h.app.request(CONFIRM_PATH, form({ t }));
+  const cookie = (res.headers.get("set-cookie") ?? "").split(";")[0] ?? "";
+  const home = await (await h.app.request("/", { headers: { cookie } })).text();
+  return { cookie, csrf: /name="csrf" value="([^"]+)"/.exec(home)?.[1] ?? "" };
+}
+
 async function harness(fetchImpl: FetchLike = googleFake()): Promise<Harness> {
   const storage = await makeStorage();
   const cipher = await createTokenCipher([KEY], 1);
   const now = { value: NOW };
+  const sent: MailMessage[] = [];
   let counter = 0;
-  const deps: OAuthRouteDeps = {
-    storage,
-    cipher,
-    clientId: "cid.apps.googleusercontent.com",
-    clientSecret: "client-secret",
-    redirectUri: REDIRECT_URI,
-    ownerId: OWNER,
-    now: () => now.value,
-    newId: () => `conn-${++counter}`,
-    fetchImpl,
-    secureCookies: false,
-  };
-  return { app: createApp({ oauth: deps }), cipher, storage, now };
+  const app = createApp({
+    auth: {
+      storage,
+      mail: {
+        send: (m) => {
+          sent.push(m);
+          return Promise.resolve();
+        },
+      },
+      publicBaseUrl: "http://localhost:8080",
+      secureCookies: false,
+      // Sessions must outlive the scenario clock jumps below, so they use real time.
+      now: () => new Date().toISOString(),
+    },
+    oauth: {
+      storage,
+      cipher,
+      clientId: "cid.apps.googleusercontent.com",
+      clientSecret: "client-secret",
+      redirectUri: REDIRECT_URI,
+      now: () => now.value,
+      newId: () => `conn-${++counter}`,
+      fetchImpl,
+      secureCookies: false,
+    },
+  });
+  const session = await signIn({ app, sent }, OWNER_EMAIL);
+  const rows = await storage.query({
+    sql: "SELECT id FROM person WHERE email = ?",
+    params: [OWNER_EMAIL],
+  });
+  return { app, cipher, storage, now, sent, session, personId: String(rows[0]?.id) };
 }
 
-/** Run the connect leg and return what the browser would carry into the callback. */
-async function startFlow(h: Harness): Promise<{ cookie: string; state: string }> {
-  const response = await h.app.request(CONNECT_PATH, { method: "POST" });
+/** Run the connect leg as the harness owner; returns the flow cookie and state. */
+async function startFlow(
+  h: Harness,
+  as: Session = h.session,
+): Promise<{ cookie: string; state: string }> {
+  const response = await h.app.request(CONNECT_PATH, form({ csrf: as.csrf }, as.cookie));
   expect(response.status).toBe(303);
 
   const setCookie = response.headers.get("set-cookie") ?? "";
@@ -124,9 +181,16 @@ async function startFlow(h: Harness): Promise<{ cookie: string; state: string }>
   return { cookie, state };
 }
 
-async function callback(h: Harness, query: string, cookie?: string): Promise<Response> {
+/** The callback as a browser would send it: the flow cookie plus a session cookie. */
+async function callback(
+  h: Harness,
+  query: string,
+  flowCookie?: string,
+  as: Session | null = h.session,
+): Promise<Response> {
+  const cookies = [as?.cookie, flowCookie].filter((c): c is string => c !== undefined && c !== "");
   return h.app.request(`${CALLBACK_PATH}?${query}`, {
-    headers: cookie === undefined ? {} : { cookie },
+    headers: cookies.length === 0 ? {} : { cookie: cookies.join("; ") },
   });
 }
 
@@ -141,7 +205,10 @@ async function connections(h: Harness) {
 
 it("redirects to Google with the PKCE challenge and sets the flow cookie", async () => {
   const h = await harness();
-  const response = await h.app.request(CONNECT_PATH, { method: "POST" });
+  const response = await h.app.request(
+    CONNECT_PATH,
+    form({ csrf: h.session.csrf }, h.session.cookie),
+  );
 
   expect(response.status).toBe(303);
   const location = new URL(response.headers.get("location") ?? "");
@@ -159,7 +226,10 @@ it("redirects to Google with the PKCE challenge and sets the flow cookie", async
 
 it("never puts the PKCE verifier in the redirect URL", async () => {
   const h = await harness();
-  const response = await h.app.request(CONNECT_PATH, { method: "POST" });
+  const response = await h.app.request(
+    CONNECT_PATH,
+    form({ csrf: h.session.csrf }, h.session.cookie),
+  );
   const location = response.headers.get("location") ?? "";
   // Only the challenge may travel to Google; the verifier stays in the cookie.
   expect(location).not.toContain("code_verifier");
@@ -171,13 +241,101 @@ it("does not start a flow on GET", async () => {
   expect((await h.app.request(CONNECT_PATH)).status).toBe(404);
 });
 
-it("offers the connect button only when configured", async () => {
+it("offers the connect button only to a signed-in person, carrying their CSRF token", async () => {
   const h = await harness();
-  expect(await (await h.app.request("/")).text()).toContain(CONNECT_PATH);
-  const bare = createApp();
-  const html = await (await bare.request("/")).text();
-  expect(html).not.toContain(CONNECT_PATH);
-  expect(html).toContain("not configured");
+  const signedIn = await (
+    await h.app.request("/", { headers: { cookie: h.session.cookie } })
+  ).text();
+  expect(signedIn).toContain(CONNECT_PATH);
+  expect(signedIn).toContain(`name="csrf" value="${h.session.csrf}"`);
+  expect(await (await h.app.request("/")).text()).not.toContain(CONNECT_PATH);
+  const bare = await (await createApp().request("/")).text();
+  expect(bare).not.toContain(CONNECT_PATH);
+  expect(bare).toContain("not configured");
+});
+
+// --- ownership (MVP-1 E) -----------------------------------------------------------
+
+it("requires sign-in to start connecting a calendar", async () => {
+  const h = await harness();
+  const res = await h.app.request(CONNECT_PATH, form({}));
+  expect(res.status).toBe(303);
+  expect(res.headers.get("location")).toBe(SIGN_IN_PATH);
+  expect(res.headers.get("set-cookie") ?? "").not.toContain(FLOW_COOKIE_NAME);
+});
+
+it("refuses to start a flow without this session's CSRF token", async () => {
+  // The gap M1 documented: with no session there was nothing to bind a token to.
+  const h = await harness();
+  const res = await h.app.request(CONNECT_PATH, form({}, h.session.cookie));
+  expect(res.status).toBe(403);
+  expect(res.headers.get("set-cookie") ?? "").not.toContain(FLOW_COOKIE_NAME);
+});
+
+it("stores the connection under the person who connected it, with a UUIDv7 id by default", async () => {
+  const storage = await makeStorage();
+  const sent: MailMessage[] = [];
+  const app = createApp({
+    auth: {
+      storage,
+      mail: {
+        send: (m) => {
+          sent.push(m);
+          return Promise.resolve();
+        },
+      },
+      publicBaseUrl: "http://localhost:8080",
+      secureCookies: false,
+      now: () => new Date().toISOString(),
+    },
+    oauth: {
+      storage,
+      cipher: await createTokenCipher([KEY], 1),
+      clientId: "cid",
+      clientSecret: "secret",
+      redirectUri: REDIRECT_URI,
+      now: () => new Date().toISOString(),
+      fetchImpl: googleFake(),
+      secureCookies: false,
+    },
+  });
+  const me = await signIn({ app, sent }, "mine@example.org");
+  const start = await app.request(CONNECT_PATH, form({ csrf: me.csrf }, me.cookie));
+  const flowCookie = (start.headers.get("set-cookie") ?? "").split(";")[0] ?? "";
+  const state = new URL(start.headers.get("location") ?? "").searchParams.get("state") ?? "";
+  const done = await app.request(`${CALLBACK_PATH}?code=c&state=${encodeURIComponent(state)}`, {
+    headers: { cookie: `${me.cookie}; ${flowCookie}` },
+  });
+  expect(done.status).toBe(200);
+  const [row] = await storage.query({
+    sql: "SELECT id, owner_id FROM calendar_connection",
+    params: [],
+  });
+  const [person] = await storage.query({
+    sql: "SELECT id FROM person WHERE email = ?",
+    params: ["mine@example.org"],
+  });
+  expect(row?.owner_id).toBe(person?.id);
+  expect(row?.owner_id).not.toBe("self");
+  expect(String(row?.id)).toMatch(UUIDV7_PATTERN);
+});
+
+it("refuses the callback if a different person is signed in by then", async () => {
+  // Sign out and in as someone else mid-flow: the calendar must not attach to them.
+  const h = await harness();
+  const { cookie, state } = await startFlow(h);
+  const other = await signIn(h, "someone-else@example.org");
+  const res = await callback(h, `code=c&state=${encodeURIComponent(state)}`, cookie, other);
+  expect(res.status).toBe(403);
+  expect(await connections(h)).toHaveLength(0);
+});
+
+it("refuses the callback if nobody is signed in by then", async () => {
+  const h = await harness();
+  const { cookie, state } = await startFlow(h);
+  const res = await callback(h, `code=c&state=${encodeURIComponent(state)}`, cookie, null);
+  expect(res.status).toBe(403);
+  expect(await connections(h)).toHaveLength(0);
 });
 
 // --- the callback leg, happy path ---
@@ -192,7 +350,7 @@ it("completes the flow and stores an encrypted connection", async () => {
   const rows = await connections(h);
   expect(rows).toHaveLength(1);
   const row = rows[0];
-  expect(row?.owner_id).toBe(OWNER);
+  expect(row?.owner_id).toBe(h.personId);
   expect(row?.provider).toBe("google");
   expect(row?.account_email).toBe("someone@example.com");
   expect(row?.calendar_id).toBe("someone@example.com");

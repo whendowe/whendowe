@@ -46,10 +46,17 @@ export function createApp(options: AppOptions = {}): Hono<AppEnv> {
 </header>`;
     // POST, not a link: starting a flow sets state, and a GET would let any page
     // trigger it with an <img> tag.
+    // Connecting a calendar needs a person to own it (MVP-1 E), so the button only
+    // appears signed in, and carries that session's CSRF token.
     const connect =
       oauth === undefined
         ? html`<p class="muted">Google credentials are not configured on this instance.</p>`
-        : html`<form method="post" action="${CONNECT_PATH}"><button type="submit">Connect Google Calendar</button></form>`;
+        : signedIn === null
+          ? ""
+          : html`<form method="post" action="${CONNECT_PATH}">
+  <input type="hidden" name="csrf" value="${signedIn.csrfToken}" />
+  <button type="submit">Connect Google Calendar</button>
+</form>`;
     return c.html(
       renderPage(
         "Home",

@@ -4,6 +4,7 @@ import { z } from "zod";
 import type { TokenCipher } from "../../crypto/tokens.js";
 import type { StoragePort } from "../../db/port.js";
 import { stmt } from "../../db/port.js";
+import { uuidv7 } from "../../ids.js";
 import { buildAuthorizeUrl } from "../../oauth/authorize.js";
 import {
   buildFlowClearCookie,
@@ -16,13 +17,21 @@ import type { FetchLike } from "../../oauth/http.js";
 import { createPkcePair, createState, timingSafeEqual } from "../../oauth/pkce.js";
 import { fetchPrimaryCalendar } from "../../oauth/primary-calendar.js";
 import { exchangeAuthorizationCode } from "../../oauth/token-exchange.js";
-import { escapeHtml } from "../escape.js";
-import type { AppEnv } from "../session.js";
+import { type Html, html, renderPage } from "../layout.js";
+import { type AppEnv, requireSignedIn, verifyFormCsrf } from "../session.js";
 
-// The Google connect flow (DESIGN.md §12/§13). Platform-blind: everything that
-// touches a platform — storage driver, clock, id generation, fetch — arrives as a
-// dependency, so the same routes run under Node and workerd and are testable
-// against an in-memory database with no network.
+// The Google connect flow (DESIGN.md §12/§13), owned by a signed-in person (MVP-1 E).
+//
+// Changes from M1, each closing a gap M1 documented:
+// - Connecting requires a session, and the connection belongs to THAT person. M1
+//   stored every connection under a placeholder owner 'self', so on a public
+//   instance anyone who reached the page could attach a calendar.
+// - The connect POST is CSRF-checked. M1 recorded this as a known gap because there
+//   was no session to bind a token to; now there is.
+// - The flow cookie carries the person who started the flow, and the callback
+//   refuses unless that same person is still signed in. Otherwise signing out and in
+//   as someone else mid-flow would attach the calendar to whoever is signed in last.
+// - Pages render through the layout's `html` tag, so escaping is the default.
 
 export const CONNECT_PATH = "/oauth/google/connect";
 export const CALLBACK_PATH = "/oauth/google/callback";
@@ -34,12 +43,10 @@ export interface OAuthRouteDeps {
   readonly clientSecret: string;
   /** Must equal a redirect URI registered on the OAuth client, character for character. */
   readonly redirectUri: string;
-  /** Single-user MVP (§17 leaves multi-account open); the row still carries owner_id. */
-  readonly ownerId: string;
   /** Injected clock, ISO-8601 UTC (§9). */
   readonly now: () => string;
-  /** Injected id generator, so tests are deterministic. */
-  readonly newId: () => string;
+  /** Injected id generator; UUIDv7 by default (schema.ts convention). */
+  readonly newId?: () => string;
   readonly fetchImpl?: FetchLike;
   /** Set false only where `Secure` cookies are rejected over http. */
   readonly secureCookies?: boolean;
@@ -59,25 +66,7 @@ const callbackQuerySchema = z.object({
   error: z.string().min(1).max(MAX_QUERY_FIELD).optional(),
 });
 
-function page(title: string, bodyHtml: string): string {
-  // Static markup with pre-escaped interpolations only; callers escape.
-  return [
-    "<!doctype html>",
-    '<html lang="en">',
-    "<head>",
-    '<meta charset="utf-8" />',
-    '<meta name="viewport" content="width=device-width, initial-scale=1" />',
-    `<title>${escapeHtml(title)}</title>`,
-    "</head>",
-    "<body>",
-    `<h1>${escapeHtml(title)}</h1>`,
-    bodyHtml,
-    "</body>",
-    "</html>",
-  ].join("\n");
-}
-
-/** Truncated so a hostile `?error=` cannot flood the response. Escaped on render. */
+/** Truncated so a hostile `?error=` cannot flood the response. Escaped by `html`. */
 function shortCode(value: string): string {
   return value.slice(0, 64);
 }
@@ -86,26 +75,31 @@ function secondsSinceEpoch(nowIso: string): number {
   return Math.floor(new Date(nowIso).getTime() / 1000);
 }
 
+function result(title: string, body: Html): string {
+  return renderPage(title, html`<h1>${title}</h1>${body}<p><a href="/">← Home</a></p>`);
+}
+
+const EXPIRED = html`<p>This connection attempt is no longer valid. Please start again.</p>`;
+
 export function registerOAuthRoutes(app: Hono<AppEnv>, deps: OAuthRouteDeps): void {
   const cookieOptions = { secure: deps.secureCookies !== false };
+  const newId = deps.newId ?? (() => uuidv7());
 
-  // POST, not GET. §13's "GET never mutates" is written about token links, but the
-  // same reasoning applies to anything that sets state: a GET here would let any
-  // page start a connect flow with an <img> tag.
-  //
-  // KNOWN GAP: no CSRF token. §13 requires them "on all HTMX mutations", and there
-  // is no session layer yet to hang one on (§17 has not settled single-user vs
-  // multi-account, so there is nothing to bind a token to). The exposure is
-  // bounded: a forged POST can only push the user to Google's consent screen,
-  // which they can decline, and an attacker cannot complete the flow — the flow
-  // cookie is HttpOnly so they cannot read the `state` they would have to echo.
-  // This must gain a CSRF token when the session layer lands in M3.
+  // POST, not GET: a GET that set state could be triggered by any page with an
+  // <img> tag. CSRF-checked like every other mutation.
   app.post(CONNECT_PATH, async (c) => {
+    const me = requireSignedIn(c);
+    if (me instanceof Response) return me;
+    if (!(await verifyFormCsrf(me, await c.req.parseBody()))) {
+      return c.html(result("Request rejected", html`<p>Please try again.</p>`), 403);
+    }
+
     const pkce = await createPkcePair();
     const state = createState();
     const sealed = await sealFlow(deps.cipher, {
       state,
       verifier: pkce.verifier,
+      personId: me.personId,
       issuedAt: secondsSinceEpoch(deps.now()),
     });
 
@@ -121,8 +115,8 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: OAuthRouteDeps): vo
     return c.redirect(authorizeUrl, 303);
   });
 
-  // GET, because Google decides the method — this is the one mutating GET in the
-  // app, and `state` + PKCE are what stand in for the POST it cannot be.
+  // GET, because Google decides the method — the one mutating GET in the app, and
+  // `state` + PKCE + the session check stand in for the POST it cannot be.
   app.get(CALLBACK_PATH, async (c) => {
     // Clear the flow cookie on every outcome. A cookie cannot be invalidated
     // server-side, so clearing on use is the nearest thing to single-use here.
@@ -134,15 +128,16 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: OAuthRouteDeps): vo
       error: c.req.query("error"),
     });
     if (!query.success) {
-      return c.html(page("Connection failed", "<p>The callback was malformed.</p>"), 400);
+      return c.html(result("Connection failed", html`<p>The callback was malformed.</p>`), 400);
     }
 
-    // The user declined, or Google refused. Escaped: anyone can craft this value.
+    // The user declined, or Google refused. Anyone can craft this value; `html`
+    // escapes it.
     if (query.data.error !== undefined) {
       return c.html(
-        page(
+        result(
           "Connection cancelled",
-          `<p>Google reported: <code>${escapeHtml(shortCode(query.data.error))}</code></p>`,
+          html`<p>Google reported: <code>${shortCode(query.data.error)}</code></p>`,
         ),
         400,
       );
@@ -150,19 +145,11 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: OAuthRouteDeps): vo
 
     const { code, state } = query.data;
     if (code === undefined || state === undefined) {
-      return c.html(page("Connection failed", "<p>The callback was incomplete.</p>"), 400);
+      return c.html(result("Connection failed", html`<p>The callback was incomplete.</p>`), 400);
     }
 
     const cookie = readFlowCookie(c.req.header("cookie"));
-    if (cookie === null) {
-      return c.html(
-        page(
-          "Connection expired",
-          "<p>This connection attempt is no longer valid. Please start again.</p>",
-        ),
-        400,
-      );
-    }
+    if (cookie === null) return c.html(result("Connection expired", EXPIRED), 400);
 
     let flow: Awaited<ReturnType<typeof unsealFlow>>;
     try {
@@ -171,19 +158,26 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: OAuthRouteDeps): vo
       // Tampered, expired, or sealed under a rotated key. The reason is not shown
       // to the caller — it would be a probing oracle — and is not logged here
       // either, because the message could name fields of a hostile cookie.
-      return c.html(
-        page(
-          "Connection expired",
-          "<p>This connection attempt is no longer valid. Please start again.</p>",
-        ),
-        400,
-      );
+      return c.html(result("Connection expired", EXPIRED), 400);
     }
 
     // THE login-CSRF check (§13). Without it an attacker can feed their own
     // authorization code to a victim's callback and graft their calendar on.
     if (!timingSafeEqual(state, flow.state)) {
-      return c.html(page("Connection failed", "<p>Request verification failed.</p>"), 400);
+      return c.html(result("Connection failed", html`<p>Request verification failed.</p>`), 400);
+    }
+
+    // The person who started the flow must be the person signed in now. Checked
+    // AFTER state, and before anything is exchanged or stored.
+    const me = c.get("signedIn");
+    if (me === null || me.personId !== flow.personId) {
+      return c.html(
+        result(
+          "Connection stopped",
+          html`<p>You're no longer signed in as the person who started this. Sign in and try again.</p>`,
+        ),
+        403,
+      );
     }
 
     const tokens = await exchangeAuthorizationCode({
@@ -223,8 +217,8 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: OAuthRouteDeps): vo
            token_expiry = excluded.token_expiry,
            status = 'active',
            updated_at = excluded.updated_at`,
-        deps.newId(),
-        deps.ownerId,
+        newId(),
+        flow.personId,
         calendar.id,
         calendar.id,
         accessTokenEnc,
@@ -236,10 +230,12 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: OAuthRouteDeps): vo
     ]);
 
     // calendar.summary and calendar.id are whatever the account holder typed —
-    // untrusted, so escaped (§13).
-    const label = calendar.summary ?? calendar.id;
+    // untrusted, escaped by `html` (§13).
     return c.html(
-      page("Calendar connected", `<p>Connected <strong>${escapeHtml(label)}</strong>.</p>`),
+      result(
+        "Calendar connected",
+        html`<p>Connected <strong>${calendar.summary ?? calendar.id}</strong>.</p>`,
+      ),
     );
   });
 }

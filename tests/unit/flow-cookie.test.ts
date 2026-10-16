@@ -32,6 +32,7 @@ function flow(overrides: Partial<OAuthFlow> = {}): OAuthFlow {
   return {
     state: createState(),
     verifier: createCodeVerifier(),
+    personId: "person-1",
     issuedAt: ISSUED_AT,
     ...overrides,
   };
@@ -112,7 +113,9 @@ it("rejects a payload that does not match the schema", async () => {
 it("rejects a payload whose verifier violates RFC 7636", async () => {
   const c = await cipher();
   const sealed = encodeURIComponent(
-    await c.encrypt(JSON.stringify({ state: "s", verifier: "too-short", issuedAt: ISSUED_AT })),
+    await c.encrypt(
+      JSON.stringify({ state: "s", verifier: "too-short", personId: "p", issuedAt: ISSUED_AT }),
+    ),
   );
   await expect(unsealFlow(c, sealed, ISSUED_AT)).rejects.toThrow(/43–128 characters/);
 });

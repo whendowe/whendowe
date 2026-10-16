@@ -2,7 +2,7 @@
 import { expect, it } from "vitest";
 import { anyGoogleOAuthConfigured, loadConfig } from "../../src/config.js";
 import type { StoragePort } from "../../src/db/port.js";
-import { buildOAuthDeps, SINGLE_USER_OWNER_ID } from "../../src/web/routes/oauth-deps.js";
+import { buildOAuthDeps } from "../../src/web/routes/oauth-deps.js";
 
 // buildOAuthDeps is the config → dependencies mapping both deploy adapters go
 // through. A swap here (client id for client secret, say) would typecheck fine and
@@ -27,7 +27,9 @@ it("maps each credential to the right field", () => {
     expect(deps.clientId).toBe(GOOGLE_ENV.GOOGLE_CLIENT_ID);
     expect(deps.clientSecret).toBe(GOOGLE_ENV.GOOGLE_CLIENT_SECRET);
     expect(deps.redirectUri).toBe(GOOGLE_ENV.GOOGLE_REDIRECT_URI);
-    expect(deps.ownerId).toBe(SINGLE_USER_OWNER_ID);
+    // No owner here any more: a connection belongs to whoever is signed in when
+    // they start the flow (MVP-1 E), not to a placeholder fixed at boot.
+    expect("ownerId" in deps).toBe(false);
     expect(deps.storage).toBe(noopStorage);
   });
 });
@@ -53,10 +55,11 @@ it("derives Secure cookies from the redirect URI scheme", async () => {
   expect(http.secureCookies).toBe(false);
 });
 
-it("provides an ISO clock and distinct ids", async () => {
+it("provides an ISO clock and leaves ids to the routes' UUIDv7 default", async () => {
   const deps = await buildOAuthDeps(loadConfig(GOOGLE_ENV), noopStorage);
   expect(deps.now()).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
-  expect(deps.newId()).not.toBe(deps.newId());
+  // M1 injected crypto.randomUUID() (v4) here, against schema.ts's UUIDv7 rule.
+  expect(deps.newId).toBeUndefined();
 });
 
 it("refuses a half-configured instance", async () => {

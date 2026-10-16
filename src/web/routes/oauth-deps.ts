@@ -9,16 +9,6 @@ import type { OAuthRouteDeps } from "./oauth.js";
 // differ only in which storage driver they hand in.
 
 /**
- * Owner for rows created by the connect flow.
- *
- * The MVP is single-user (§17 leaves single-user vs multi-account open), but §10's
- * schema already carries owner_id, so the column is populated with a fixed
- * placeholder rather than left meaningless. When multi-account lands this becomes
- * the authenticated user's id and nothing else about the flow changes.
- */
-export const SINGLE_USER_OWNER_ID = "self";
-
-/**
  * The key id new ciphertexts are written under.
  *
  * The envelope format reserves a byte for this so rotation needs no migration
@@ -45,9 +35,7 @@ export async function buildOAuthDeps(
     clientId: google.GOOGLE_CLIENT_ID,
     clientSecret: google.GOOGLE_CLIENT_SECRET,
     redirectUri: google.GOOGLE_REDIRECT_URI,
-    ownerId: SINGLE_USER_OWNER_ID,
     now: () => new Date().toISOString(),
-    newId: () => crypto.randomUUID(),
     // Derived from the redirect URI rather than hardcoded: a deployment on https
     // gets Secure cookies, and plain-http local development still works. Browsers
     // do accept Secure on http://localhost, so this is belt-and-braces for the
