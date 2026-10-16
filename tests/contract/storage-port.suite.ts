@@ -148,6 +148,45 @@ export function runStoragePortContract(makePort: () => Promise<StoragePort>): vo
       expect(rows[0]?.revision).toBe(2);
     });
 
+    // §10's deletion model calls ON DELETE CASCADE "a row-hygiene backstop inside
+    // purge", and every FK in the schema assumes it is enforced. SQLite does NOT
+    // enforce foreign keys unless each connection runs PRAGMA foreign_keys = ON,
+    // whereas D1 enforces them by default — so without these tests the two drivers
+    // could silently disagree on the same schema.
+    it("enforces foreign keys: rejects a row whose parent does not exist", async () => {
+      const port = await makePort();
+      await expect(
+        port.batch([
+          {
+            sql: `INSERT INTO event_override
+                  (id, canonical_event_id, recurrence_id, field_overrides, created_at, updated_at)
+                  VALUES (?, ?, ?, ?, ?, ?)`,
+            params: ["ovr-orphan", "evt-does-not-exist", "2026-07-06T09:00:00", "{}", NOW, NOW],
+          },
+        ]),
+      ).rejects.toThrow();
+    });
+
+    it("enforces foreign keys: ON DELETE CASCADE removes children", async () => {
+      const port = await makePort();
+      await port.batch([
+        insertEvent("evt-cascade"),
+        {
+          sql: `INSERT INTO event_override
+                (id, canonical_event_id, recurrence_id, field_overrides, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)`,
+          params: ["ovr-cascade", "evt-cascade", "2026-07-06T09:00:00", "{}", NOW, NOW],
+        },
+      ]);
+      await port.batch([{ sql: "DELETE FROM canonical_event WHERE id = ?", params: ["evt-cascade"] }]);
+
+      const left = await port.query({
+        sql: "SELECT id FROM event_override WHERE id = ?",
+        params: ["ovr-cascade"],
+      });
+      expect(left).toHaveLength(0);
+    });
+
     it("empty batch is a no-op", async () => {
       const port = await makePort();
       await expect(port.batch([])).resolves.toBeUndefined();
