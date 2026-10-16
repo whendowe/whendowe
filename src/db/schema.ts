@@ -203,6 +203,46 @@ export const mailSend = sqliteTable(
   (t) => [index("mail_send_day_idx").on(t.day), index("mail_send_month_idx").on(t.month)],
 );
 
+// --- Groups (MVP-1 slice D, DESIGN §10 rc7 sketch, refined) -------------------------
+// Refinement over the sketch: group_member gains `role`. The sketch could not say who
+// may invite people or change the group; `organizer` can, `member` cannot.
+
+export const personGroup = sqliteTable("person_group", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  createdBy: text("created_by")
+    .notNull()
+    .references(() => person.id),
+  createdAt: text("created_at").notNull(),
+});
+
+export const groupMember = sqliteTable(
+  "group_member",
+  {
+    groupId: text("group_id")
+      .notNull()
+      .references(() => personGroup.id, { onDelete: "cascade" }),
+    personId: text("person_id")
+      .notNull()
+      .references(() => person.id, { onDelete: "cascade" }),
+    role: text("role").notNull(),
+    // Copied onto new events for this group (MVP-2); editable per event.
+    defaultEditTier: text("default_edit_tier").notNull().default("view"),
+    defaultVisibility: text("default_visibility").notNull().default("FULL"),
+    joinedAt: text("joined_at").notNull(),
+  },
+  (t) => [
+    unique("group_member_uq").on(t.groupId, t.personId),
+    index("group_member_person_idx").on(t.personId),
+    check("group_member_role_chk", sql`${t.role} IN ('organizer', 'member')`),
+    check("group_member_edit_tier_chk", sql`${t.defaultEditTier} IN ('edit', 'propose', 'view')`),
+    check(
+      "group_member_visibility_chk",
+      sql`${t.defaultVisibility} IN ('FULL', 'DETAILS', 'BUSY', 'HIDDEN')`,
+    ),
+  ],
+);
+
 export type CalendarConnectionRow = typeof calendarConnection.$inferSelect;
 export type CanonicalEventRow = typeof canonicalEvent.$inferSelect;
 export type EventOverrideRow = typeof eventOverride.$inferSelect;

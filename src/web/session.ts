@@ -76,3 +76,12 @@ export async function verifyFormCsrf(
   const presented = form.csrf;
   return typeof presented === "string" && (await verifyCsrf(signedIn.sessionToken, presented));
 }
+
+/**
+ * The signed-in person, or a redirect to sign-in. Routes that need a person call
+ * this first: `const me = requireSignedIn(c); if (me instanceof Response) return me;`
+ */
+export function requireSignedIn(c: Context<AppEnv>): SignedIn | Response {
+  const signedIn = c.get("signedIn");
+  return signedIn ?? c.redirect("/auth/sign-in", 303);
+}

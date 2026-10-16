@@ -2,6 +2,7 @@
 import { Hono } from "hono";
 import { html, renderPage } from "./layout.js";
 import { type AuthDeps, registerAuthRoutes, SIGN_IN_PATH, SIGN_OUT_PATH } from "./routes/auth.js";
+import { GROUPS_PATH, registerGroupRoutes } from "./routes/groups.js";
 import { CONNECT_PATH, type OAuthRouteDeps, registerOAuthRoutes } from "./routes/oauth.js";
 import { type AppEnv, sessionMiddleware } from "./session.js";
 
@@ -56,6 +57,7 @@ export function createApp(options: AppOptions = {}): Hono<AppEnv> {
 <h1>WhenDoWe</h1>
 <p>One canonical event, projected into many calendars — with attribution.</p>
 <p class="muted">Milestone: MVP-1 — People</p>
+${signedIn === null ? "" : html`<p><a href="${GROUPS_PATH}">Your groups</a></p>`}
 ${connect}`,
       ),
     );
@@ -63,7 +65,10 @@ ${connect}`,
 
   app.get("/healthz", (c) => c.json({ ok: true }));
 
-  if (auth !== undefined) registerAuthRoutes(app, auth);
+  if (auth !== undefined) {
+    registerAuthRoutes(app, auth);
+    registerGroupRoutes(app, auth);
+  }
   if (oauth !== undefined) registerOAuthRoutes(app, oauth);
 
   return app;
