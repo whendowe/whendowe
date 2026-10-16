@@ -178,7 +178,9 @@ export function runStoragePortContract(makePort: () => Promise<StoragePort>): vo
           params: ["ovr-cascade", "evt-cascade", "2026-07-06T09:00:00", "{}", NOW, NOW],
         },
       ]);
-      await port.batch([{ sql: "DELETE FROM canonical_event WHERE id = ?", params: ["evt-cascade"] }]);
+      await port.batch([
+        { sql: "DELETE FROM canonical_event WHERE id = ?", params: ["evt-cascade"] },
+      ]);
 
       const left = await port.query({
         sql: "SELECT id FROM event_override WHERE id = ?",
