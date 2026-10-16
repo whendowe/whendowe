@@ -1,9 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import type { Hono } from "hono";
-import { anyGoogleOAuthConfigured, loadConfig } from "../../src/config.js";
+import { anyGoogleOAuthConfigured, type Config, loadConfig } from "../../src/config.js";
 import { d1StoragePort } from "../../src/db/d1.js";
+import type { StoragePort } from "../../src/db/port.js";
+import { cappedMailPort } from "../../src/mail/capped.js";
+import { cloudflareBindingMailPort, type EmailBindingLike } from "../../src/mail/cloudflare.js";
+import { consoleMailPort } from "../../src/mail/console.js";
+import { disabledMailPort, type MailPort } from "../../src/mail/port.js";
 import { createApp } from "../../src/web/app.js";
 import { buildOAuthDeps } from "../../src/web/routes/oauth-deps.js";
+import type { AppEnv } from "../../src/web/session.js";
 
 export { ConnectionDO } from "./connection-do.js";
 
@@ -19,6 +25,16 @@ export interface Env {
   GOOGLE_REDIRECT_URI?: string;
   TOKEN_ENCRYPTION_KEY?: string;
   LOG_LEVEL?: string;
+  // Sign-in and mail (MVP-1). EMAIL is a send_email binding, declared by the
+  // instance's wrangler config in whendowe/deployments — never in this template, and
+  // absent until the account is on Workers Paid (DESIGN rc9).
+  PUBLIC_BASE_URL?: string;
+  MAIL_PROVIDER?: string;
+  MAIL_FROM_ADDRESS?: string;
+  MAIL_FROM_NAME?: string;
+  MAIL_DAILY_CAP?: string;
+  MAIL_MONTHLY_CAP?: string;
+  EMAIL?: EmailBindingLike;
 }
 
 // Built lazily because bindings only exist per-request, then cached for the life of
@@ -26,24 +42,66 @@ export interface Env {
 // repeat. The fields are copied out of Env explicitly rather than passing Env to
 // loadConfig() — Env holds bindings as well as strings, and AGENTS.md forbids the
 // cast that would paper over that.
-let cachedApp: Promise<Hono> | undefined;
+let cachedApp: Promise<Hono<AppEnv>> | undefined;
 
-async function buildApp(env: Env): Promise<Hono> {
+const now = () => new Date().toISOString();
+
+/** The provider for this target, ALWAYS behind the cap (DESIGN §13 rc9). */
+function buildMail(c: Config, env: Env, s: StoragePort): MailPort {
+  let inner: MailPort;
+  switch (c.MAIL_PROVIDER) {
+    case "disabled":
+      return disabledMailPort; // fail closed (src/mail/port.ts)
+    case "console":
+      inner = consoleMailPort();
+      break;
+    case "cloudflare":
+      if (env.EMAIL === undefined || c.MAIL_FROM_ADDRESS === undefined) {
+        throw new Error(
+          "MAIL_PROVIDER=cloudflare on Workers needs the EMAIL send_email binding and MAIL_FROM_ADDRESS",
+        );
+      }
+      inner = cloudflareBindingMailPort(env.EMAIL, {
+        address: c.MAIL_FROM_ADDRESS,
+        name: c.MAIL_FROM_NAME,
+      });
+      break;
+  }
+  return cappedMailPort(inner, s, {
+    cap: { daily: c.MAIL_DAILY_CAP, monthly: c.MAIL_MONTHLY_CAP },
+    now,
+  });
+}
+
+async function buildApp(env: Env): Promise<Hono<AppEnv>> {
   const config = loadConfig({
     GOOGLE_CLIENT_ID: env.GOOGLE_CLIENT_ID,
     GOOGLE_CLIENT_SECRET: env.GOOGLE_CLIENT_SECRET,
     GOOGLE_REDIRECT_URI: env.GOOGLE_REDIRECT_URI,
     TOKEN_ENCRYPTION_KEY: env.TOKEN_ENCRYPTION_KEY,
     LOG_LEVEL: env.LOG_LEVEL,
+    PUBLIC_BASE_URL: env.PUBLIC_BASE_URL,
+    MAIL_PROVIDER: env.MAIL_PROVIDER,
+    MAIL_FROM_ADDRESS: env.MAIL_FROM_ADDRESS,
+    MAIL_FROM_NAME: env.MAIL_FROM_NAME,
+    MAIL_DAILY_CAP: env.MAIL_DAILY_CAP,
+    MAIL_MONTHLY_CAP: env.MAIL_MONTHLY_CAP,
   });
+  const storage = d1StoragePort(env.DB);
 
-  if (!anyGoogleOAuthConfigured(config)) {
-    return createApp();
-  }
-  return createApp(await buildOAuthDeps(config, d1StoragePort(env.DB)));
+  return createApp({
+    auth: {
+      storage,
+      mail: buildMail(config, env, storage),
+      publicBaseUrl: config.PUBLIC_BASE_URL,
+      secureCookies: new URL(config.PUBLIC_BASE_URL).protocol === "https:",
+      now,
+    },
+    oauth: anyGoogleOAuthConfigured(config) ? await buildOAuthDeps(config, storage) : undefined,
+  });
 }
 
-function getApp(env: Env): Promise<Hono> {
+function getApp(env: Env): Promise<Hono<AppEnv>> {
   cachedApp ??= buildApp(env);
   return cachedApp;
 }

@@ -55,6 +55,11 @@ export const configSchema = z.object({
   MIGRATIONS_DIR: z.string().min(1).default("migrations"),
   LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),
 
+  // The origin every emailed link is built from (MVP-1). NEVER derived from the
+  // request's Host header: a forged Host would make the app email real login links
+  // pointing at an attacker's domain. Defaults to the local dev server.
+  PUBLIC_BASE_URL: httpUrlSchema.default("http://localhost:8080"),
+
   // Outbound mail (DESIGN §13 rc9). `disabled` fails closed — see src/mail/port.ts.
   // `console` prints messages including tokens: development only, explicit opt-in.
   MAIL_PROVIDER: z.enum(["disabled", "console", "cloudflare"]).default("disabled"),

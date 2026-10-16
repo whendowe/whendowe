@@ -93,3 +93,25 @@ export async function consumeLoginToken(
   });
   return rows[0] === undefined ? null : consumedSchema.parse(rows[0]).email;
 }
+
+/**
+ * The address a still-valid token would sign in as, WITHOUT consuming it.
+ *
+ * Backs the GET confirm page: email security scanners open links automatically, so
+ * a GET that consumed the token would burn people's links before they click. GET
+ * shows "Sign in as …? [Continue]"; only the POST consumes. Showing the address also
+ * defeats silent login-CSRF — being tricked into finishing a login to someone ELSE's
+ * account — because the page names whose account it is.
+ */
+export async function peekLoginToken(
+  storage: StoragePort,
+  token: string,
+  options: { readonly now: string },
+): Promise<string | null> {
+  const rows = await storage.query({
+    sql: `SELECT email FROM login_token
+          WHERE token_hash = ? AND consumed_at IS NULL AND expires_at > ?`,
+    params: [await hashToken(token), options.now],
+  });
+  return rows[0] === undefined ? null : consumedSchema.parse(rows[0]).email;
+}

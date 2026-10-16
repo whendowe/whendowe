@@ -107,7 +107,7 @@ async function harness(fetchImpl: FetchLike = googleFake()): Promise<Harness> {
     fetchImpl,
     secureCookies: false,
   };
-  return { app: createApp(deps), cipher, storage, now };
+  return { app: createApp({ oauth: deps }), cipher, storage, now };
 }
 
 /** Run the connect leg and return what the browser would carry into the callback. */

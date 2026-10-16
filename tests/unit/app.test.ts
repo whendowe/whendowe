@@ -7,9 +7,9 @@ it("serves the hello page", async () => {
   expect(res.status).toBe(200);
   const body = await res.text();
   expect(body).toContain("WhenDoWe");
-  // Was "M0" — the page's milestone label moved to M1 when the connect flow
-  // landed. Asserting the label, not weakening the assertion.
-  expect(body).toContain("M1");
+  // The page names the current milestone (it was "M0", then "M1", now "MVP-1").
+  // Asserting the label, not weakening the assertion.
+  expect(body).toContain("MVP-1");
 });
 
 it("serves a health check", async () => {

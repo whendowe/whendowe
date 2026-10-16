@@ -17,6 +17,7 @@ import { createPkcePair, createState, timingSafeEqual } from "../../oauth/pkce.j
 import { fetchPrimaryCalendar } from "../../oauth/primary-calendar.js";
 import { exchangeAuthorizationCode } from "../../oauth/token-exchange.js";
 import { escapeHtml } from "../escape.js";
+import type { AppEnv } from "../session.js";
 
 // The Google connect flow (DESIGN.md §12/§13). Platform-blind: everything that
 // touches a platform — storage driver, clock, id generation, fetch — arrives as a
@@ -85,7 +86,7 @@ function secondsSinceEpoch(nowIso: string): number {
   return Math.floor(new Date(nowIso).getTime() / 1000);
 }
 
-export function registerOAuthRoutes(app: Hono, deps: OAuthRouteDeps): void {
+export function registerOAuthRoutes(app: Hono<AppEnv>, deps: OAuthRouteDeps): void {
   const cookieOptions = { secure: deps.secureCookies !== false };
 
   // POST, not GET. §13's "GET never mutates" is written about token links, but the
