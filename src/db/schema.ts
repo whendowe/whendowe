@@ -140,8 +140,59 @@ export const changeLog = sqliteTable(
   ],
 );
 
+// --- People & login (MVP-1, DESIGN §10 rc7 sketch) ---------------------------------
+// calendar_connection.owner_id will reference person.id; it gains no FK here because
+// SQLite cannot add a constraint to an existing table without a rebuild, and §16's
+// expand/contract rule forbids a destructive migration for it. The app enforces it.
+
+export const person = sqliteTable("person", {
+  id: text("id").primaryKey(),
+  // Normalised (trimmed, lowercased) and verified: the identity key across login
+  // methods, so a later "Sign in with Google" with the same address lands here.
+  email: text("email").notNull().unique(),
+  displayName: text("display_name"),
+  createdAt: text("created_at").notNull(),
+});
+
+export const loginToken = sqliteTable(
+  "login_token",
+  {
+    id: text("id").primaryKey(),
+    // SHA-256 of the emailed token; the token itself is never stored (§13).
+    tokenHash: text("token_hash").notNull().unique(),
+    // Keyed on email, not person: the first login creates the person.
+    email: text("email").notNull(),
+    expiresAt: text("expires_at").notNull(),
+    consumedAt: text("consumed_at"),
+    createdAt: text("created_at").notNull(),
+  },
+  (t) => [
+    // Rate limiting counts recent tokens per address.
+    index("login_token_email_idx").on(t.email, t.createdAt),
+  ],
+);
+
+export const session = sqliteTable(
+  "session",
+  {
+    id: text("id").primaryKey(),
+    // SHA-256 of the cookie value; the cookie value itself is never stored (§13).
+    tokenHash: text("token_hash").notNull().unique(),
+    personId: text("person_id")
+      .notNull()
+      .references(() => person.id, { onDelete: "cascade" }),
+    createdAt: text("created_at").notNull(),
+    expiresAt: text("expires_at").notNull(),
+    revokedAt: text("revoked_at"),
+  },
+  (t) => [index("session_person_idx").on(t.personId)],
+);
+
 export type CalendarConnectionRow = typeof calendarConnection.$inferSelect;
 export type CanonicalEventRow = typeof canonicalEvent.$inferSelect;
 export type EventOverrideRow = typeof eventOverride.$inferSelect;
 export type ProjectionRow = typeof projection.$inferSelect;
 export type ChangeLogRow = typeof changeLog.$inferSelect;
+export type PersonRow = typeof person.$inferSelect;
+export type LoginTokenRow = typeof loginToken.$inferSelect;
+export type SessionRow = typeof session.$inferSelect;
