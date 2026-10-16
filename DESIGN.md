@@ -1,6 +1,6 @@
 # WhenDoWe — Design & Agent Bootstrap Brief
 
-> **Status:** v1.0-rc10 (rc9 + §8 entries for `src/web/layout.ts` and `src/web/session.ts`, recorded before MVP-1 slice C) (v1.0-rc9: rc8 + mail provider decided: Cloudflare Email Service, sending from `notify.whendowe.org`, behind an app-enforced hard cap — §8 entries for `src/mail/cloudflare.ts` and `src/mail/capped.ts`) (v1.0-rc8: rc7 + §8 layout for MVP-1, recorded before the code: `src/people/`, `src/ids.ts`, `src/mail/console.ts`, `src/web/routes/{auth,groups}.ts`) (v1.0-rc7: rc6 + roadmap re-sequenced people-first after an owner review: Ring 0 widened from "the household" to small groups of people who know each other; two-way Google sync is MVP scope; edit tier split from visibility tier; WORKFLOWS §9 deltas folded in — multi-person, account-less responses; §17 single-vs-multi resolved; provider-neutrality made a hard constraint) (v1.0-rc6: rc5 + M1 as-built corrections to §8: `src/crypto/` and `src/oauth/` were introduced during M1 but never documented; `src/web/routes/` contents named; `src/web/escape.ts`; `src/providers/google-event.ts`; `src/recurrence.ts` — undocumented since the M1 recurrence spike; and a `scripts/` directory. Plus §13: the deployments repo is *credential*-human-only — the boundary is credential access, not repo write access, so instance config may be agent-authored and owner-merged) (rc4 + M0 as-built corrections: change_log id in SQLite dialect, fake provider filename, publish-not-deploy workflow comment, Hegel FFI mechanism) (rc3 + security hardening: token-link semantics, ICS/HTML injection, OAuth state/PKCE, supply-chain cooldown & ignore-scripts, agent privilege model, backup-tail deletion promise) (v0.9 + artifact-store port seam for feeds/pages; v0.7 + scheduling economics: cron fan-out vs DO alarms; v0.6 + platform pivot: TypeScript intersection contract — one codebase targeting Cloudflare Workers/D1/Durable Objects free tier *and* Node/Docker self-host; SQLite dialect; Hegel-based verification; earlier history in companions/git). **Name:** WhenDoWe — repo `github.com/whendowe/whendowe`, domain `whendowe.org` (Cloudflare-registered), package name `whendowe`.
+> **Status:** v1.0-rc11 (rc10 + MVP-2 layout in §8 — `src/events/`, `routes/events.ts`, `routes/respond.ts`; the event lifecycle as a single status column in §10; and §16's one recorded exception: migration 0005 rebuilds `canonical_event`, allowed only because nothing has ever been deployed) (v1.0-rc10: rc9 + §8 entries for `src/web/layout.ts` and `src/web/session.ts`, recorded before MVP-1 slice C) (v1.0-rc9: rc8 + mail provider decided: Cloudflare Email Service, sending from `notify.whendowe.org`, behind an app-enforced hard cap — §8 entries for `src/mail/cloudflare.ts` and `src/mail/capped.ts`) (v1.0-rc8: rc7 + §8 layout for MVP-1, recorded before the code: `src/people/`, `src/ids.ts`, `src/mail/console.ts`, `src/web/routes/{auth,groups}.ts`) (v1.0-rc7: rc6 + roadmap re-sequenced people-first after an owner review: Ring 0 widened from "the household" to small groups of people who know each other; two-way Google sync is MVP scope; edit tier split from visibility tier; WORKFLOWS §9 deltas folded in — multi-person, account-less responses; §17 single-vs-multi resolved; provider-neutrality made a hard constraint) (v1.0-rc6: rc5 + M1 as-built corrections to §8: `src/crypto/` and `src/oauth/` were introduced during M1 but never documented; `src/web/routes/` contents named; `src/web/escape.ts`; `src/providers/google-event.ts`; `src/recurrence.ts` — undocumented since the M1 recurrence spike; and a `scripts/` directory. Plus §13: the deployments repo is *credential*-human-only — the boundary is credential access, not repo write access, so instance config may be agent-authored and owner-merged) (rc4 + M0 as-built corrections: change_log id in SQLite dialect, fake provider filename, publish-not-deploy workflow comment, Hegel FFI mechanism) (rc3 + security hardening: token-link semantics, ICS/HTML injection, OAuth state/PKCE, supply-chain cooldown & ignore-scripts, agent privilege model, backup-tail deletion promise) (v0.9 + artifact-store port seam for feeds/pages; v0.7 + scheduling economics: cron fan-out vs DO alarms; v0.6 + platform pivot: TypeScript intersection contract — one codebase targeting Cloudflare Workers/D1/Durable Objects free tier *and* Node/Docker self-host; SQLite dialect; Hegel-based verification; earlier history in companions/git). **Name:** WhenDoWe — repo `github.com/whendowe/whendowe`, domain `whendowe.org` (Cloudflare-registered), package name `whendowe`.
 > **Audience:** the coding agent bootstrapping this repo, and future human contributors.
 
 ---
@@ -171,6 +171,11 @@ whendowe/
       session.ts               # sessions + CSRF tokens
       group.ts                 # groups + members with default edit/visibility tiers (§10)
       invite.ts                # email invites into a group
+    events/                    # MVP-2 (§15): events, who takes part, polls and responses
+      event.ts                 # canonical events: create/edit with optimistic revision + change_log; lifecycle
+      participation.ts         # who takes part, with edit tier + visibility; copied from group defaults
+      poll.ts                  # candidate times + votes (yes / if-need-be / no) + confirm (WORKFLOWS US-13)
+      response.ts              # accept / acknowledge / attendance / feedback, incl. account-less token links
     oauth/
       pkce.ts                  # RFC 7636 verifier/challenge (S256 only) + state nonce (§13)
       authorize.ts             # Google authorization request URL (§12)
@@ -201,6 +206,8 @@ whendowe/
         oauth-deps.ts          # config + storage port -> route dependencies
         auth.ts                # magic-link request + confirm (GET renders, POST acts — §13), sign-out
         groups.ts              # create group, invite, accept invite
+        events.ts              # create/view/edit events in a group; polls; change history (MVP-2)
+        respond.ts             # token-link responses: vote / attend / acknowledge with no account (MVP-2)
     changelog.ts               # append + diff
     mail/
       port.ts                  # HTTPS mail port (invites, token links — MVP-1)
@@ -399,6 +406,14 @@ CREATE TABLE change_log (                                -- append-only
 CREATE INDEX change_log_event_idx ON change_log(canonical_event_id, revision);
 ```
 
+
+### Event lifecycle (rc11)
+
+`canonical_event.status` is the single lifecycle column, WORKFLOWS §5's state machine verbatim:
+`draft | proposed | scheduled | declined | withdrawn | cancelled`. One column with one CHECK, so an
+impossible pair (say, "cancelled" and "draft" at once) is unrepresentable rather than ruled out in
+code. The original `active` value means `scheduled`. Migration 0005 replaces the M0 constraint by
+rebuilding the table — see the one-time exception in §16.
 
 ### People, groups & participation (rc7 — folded from WORKFLOWS §9)
 
@@ -632,6 +647,7 @@ After the MVP, per-instance overrides are "start accepting rows into `event_over
 - **No provider-specific concept in domain code.** Google is the first two-way provider, not the model. Identity metadata, sync cursors, and change classification go through the `CalendarProvider` port in provider-neutral terms, so Microsoft Graph and CalDAV are new adapters, never a refactor (§5). Google-only shortcuts belong in `src/providers/google*.ts` alone.
 - **No business logic in views/templates.** Build a typed (zod) view-model; views only render its fields.
 - **Compute the push hash over the FILTERED fieldset**, per projection — not over raw canonical (matters once profiles exist).
+- **One recorded exception to expand/contract (rc11): migration 0005 rebuilds `canonical_event`** to widen its status CHECK, which SQLite cannot alter in place. It is safe for exactly one reason: **no instance has ever been deployed**, so no data and no running version depend on the old shape. The moment a first instance is deployed, the additive-first rule binds without exception — a later change of this kind ships as a new column plus a contract step, never as a rebuild.
 - **Migrations are plain `.sql` files** — applied identically by `wrangler d1 migrations` and the Node runner; no programmatic migrations, ever.
 - **The storage port is async-only, SQLite-dialect-only, and uses no D1-exclusive features** in domain code; better-sqlite3's sync API never leaks past its driver.
 - **Durable Objects hold no domain data** — serialization + alarms only; all state lives in D1/SQLite.
