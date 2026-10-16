@@ -16,6 +16,8 @@ The anchor scenario is a **shared-custody household triangle**:
 - **Kids.** Not users. They appear in event content, never as accounts.
 - **Secondary persona — Grandparents (Mara's parents).** Occasionally babysit. Only ever need busy/free: "is that weekend a Mara-weekend or a David-weekend?"
 
+**Second anchor group (rc7) — the D&D table.** Five friends and a DM who play roughly fortnightly. No custody, no trust asymmetry — the question is literally the product's name: *when do we (play)?* The DM proposes candidate dates, players vote, the DM confirms; sessions then live in each player's own calendar, whichever app that is. Players should be able to see everything and say "I'm in / maybe / out" and "Thursday's bad for me" — but a stray drag in someone's own calendar must not reschedule the table. This group exists to keep the MVP honest about people who will never connect a calendar, and about groups that aren't households.
+
 Each adult connects their own Google calendar (a `CalendarConnection`); the kids' schedule exists **once** as canonical events and is projected into each adult's calendar, shaped per person.
 
 **The trust asymmetry is half the product; consensus-seeking is the other half.** A normal shared Google calendar gives everyone everything and records nobody's agreement. This household needs *graded* sharing (full collaboration between co-parents, configurable involvement for a partner, free/busy for grandparents — per event) **and** a record of consent: who proposed, who agreed, who has seen it. The calendar is the interface; the product is **agreed-upon truth**. Accept, acknowledge, and slot-voting (§US-13) are three grades of one primitive: a recorded response to a proposed fact.
@@ -37,8 +39,8 @@ Doodle = (closed, vote+confirm, vote). Calendly = (semi-open, availability + aut
 **One hard architectural rule the vision imposes NOW: responding never requires an account.** Each end of this spectrum grows only because incumbents are frictionless for responders — a Doodle vote or Calendly booking needs no signup. Therefore: every response (acknowledge / accept / vote / RSVP) must be deliverable via a tokenized link; a `person` exists independently of any calendar connection (created lazily from an email address); connecting a calendar is an *upgrade* ("want this in your calendar?"), never the entry fee. Cheap to honor from M3, prohibitive to retrofit.
 
 **Expansion rings — the architecture spans, the roadmap refuses:**
-- **Ring 0 (MVP):** the household. Everything in this document.
-- **Ring 1:** rosters — clubs, classes, teams: RSVP, capacity, organizer teams, digest emails. Only after Ring 0 is genuinely loved.
+- **Ring 0 (MVP):** small groups of people who know each other — the household *and* ad-hoc friend groups like the D&D table (rc7: widened from "the household"). Includes attendance intent (going / maybe / not going), read-only ICS feeds, and views shared unlisted-by-link or with specific people by email. Everything in this document.
+- **Ring 1:** rosters — clubs, classes, teams: capacity-limited RSVP, organizer teams, digest emails, org tenancy. Only after Ring 0 is genuinely loved.
 - **Ring 2:** public — event pages, open feeds, availability booking, discovery. Only after Ring 1 earns it.
 
 No MVP code may *target* Ring 1–2; no MVP shape may *preclude* them. (Naming: resolved — **WhenDoWe** states the product's question; see DESIGN §17.)
@@ -48,11 +50,14 @@ No MVP code may *target* Ring 1–2; no MVP shape may *preclude* them. (Naming: 
 ## 3. Concepts the stories introduce (beyond DESIGN.md)
 
 - **Person** — a human identity in the system. Owns one or more calendar connections. (DESIGN.md has `owner_id` but no person model; the stories force one.)
-- **Per-event role:**
-  - **Organizer** — created it or was granted edit; full content, can edit, can set everyone else's role/visibility.
-  - **Participant** — full content, read (Phase 1) / propose-and-respond (with proposals), inbound-edit rights (Phase 2). The "other co-parent" role.
-  - **Viewer** — read-only, sees a *reduced* rendering chosen by the organizer.
-- **Visibility tier** — what a person's projection contains. The concrete MVP set (this instantiates DESIGN.md's `VisibilityProfile` seam):
+- **Group (rc7)** — a reusable set of people with per-member default tiers: a household, a D&D table. Creating an event for a group copies those defaults onto the event's participants; they stay editable per event.
+- **Edit tier (rc7)** — what a person may *change*, per event. Replaces the old organizer/participant/viewer roles, which conflated changing with seeing:
+  - **`edit`** — changes apply directly (UI or, with two-way sync, their own calendar). The organizer has it; others can be granted it.
+  - **`propose`** — changes become proposals the group accepts (§5). The "other co-parent" default.
+  - **`view`** — cannot change the event. An "organizer decides by fiat" event is simply one where everyone else is `view`.
+  An edit made in a person's own synced calendar follows their tier: applied, turned into a proposal, or reverted *with a notice* (US-15). Never a silent revert.
+- **Every tier can respond.** Acknowledge, state **attendance** (going / maybe / not going), and leave **feedback** (a short note on the event, in the change log). "The organizer decides" never means "participants have no voice".
+- **Visibility tier** — what a person's projection contains, **independent of edit tier** (a D&D player is `view` + `FULL`). The concrete MVP set (this instantiates DESIGN.md's `VisibilityProfile` seam):
   | Tier | title | time | location | description | notes/attachments | participant list |
   |---|---|---|---|---|---|---|
   | `FULL` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
@@ -131,6 +136,16 @@ Mara and David edit the same event within a minute (UI edits, Phase 1). Last-wri
 **Done when:** revision serialization holds (change_log UNIQUE); the UI shows "your edit was superseded by…" rather than nothing.
 **Maps to:** optimistic revision bump (DESIGN §11). Phase: M3 surface, M4 inbound.
 
+### US-14 — The D&D table (rc7)
+The DM creates a group "Thursday Table" with five players at `view` + `FULL`, invites them by email, and proposes three candidate dates. Players vote via the emailed link — no account, no calendar connection. The DM confirms Saturday. Two players subscribed the group's ICS feed (one on an iPhone), two connected Google, one did neither. Mid-week a player marks "maybe" and leaves feedback "might be late".
+**Done when:** nobody needed an account to vote; the confirmed session reaches all three calendar paths; attendance and feedback are visible to the DM with attribution.
+**Maps to:** person, group, slot votes (US-13), attendance + feedback (§3), ICS feed, MVP-4 sync. Phase: MVP-1…MVP-3 for everything but the Google path (MVP-4).
+
+### US-15 — An edit made in your own calendar (rc7)
+Three people move the same event in their own Google calendars. Petra has `edit`: her change applies and propagates, attributed. Mara has `propose`: her change becomes a proposal to David, her calendar shows the original time until he accepts, and she is emailed "proposed — waiting for David". A D&D player has `view`: their copy reverts, and they're emailed "this change wasn't applied — leave feedback →". Anyone deleting the event from their own calendar only removes it for themselves.
+**Done when:** each tier's outcome holds; no revert is silent; every inbound change is in the change log; a delete never touches anyone else's copy.
+**Maps to:** DESIGN §11 tier-gated inbound edits, §10 deletion model. Phase: MVP-5.
+
 ### US-12 — Someone leaves
 Worst case: David and Petra separate. David removes Petra's person from all his events (bulk action). Her mirrors are deleted from *her* calendar via normal reconcile; canonical history — including changes she made — is preserved with attribution (it's an append-only log; her past actions happened). Symmetric case: Petra disconnects her own account → connection `disconnected`, mirrors deleted, person record remains for history.
 **Done when:** no-cascade property holds (her removal deletes only her projections); change_log untouched; re-adding her later recreates mirrors (new provider ids, fine).
@@ -183,6 +198,8 @@ Digest emails, reminders, nagging, and push infrastructure are post-MVP (digests
 Messaging/chat between parents; expense splitting; legal custody documentation; kid-facing views; *automatic* scheduling ("find a free slot for me" — US-13 is manual candidates + human votes, not solver-driven suggestions); cross-household discovery. The product is a truthful, graded, attributed, **consensus-seeking** shared calendar — not a co-parenting suite.
 
 ## 9. Deltas to fold back into DESIGN.md (once stories are accepted)
+
+> **Status (rc7):** deltas 1, 2, 4 (as edit + visibility tiers), 6 (as groups), 7 (superseded by DESIGN §15's MVP-1…MVP-5, which carry an old→new milestone mapping so existing "Phase: M3" labels below stay valid) and 9 are folded into DESIGN v1.0-rc7 (§2, §10, §11, §15–§17). The rest stand as written. Kept below as the record of what was decided and why.
 
 1. **`person` table** + invite flow; `calendar_connection.owner_id` → references person; answers §17's "single-user vs multi-account": **multi-person from M3**.
 2. **`event_participation` table:** `(canonical_event_id, person_id, role, visibility_tier, response_kind: none|ack|accept|slot_vote, response_state, responded_at)`, UNIQUE(event, person). `desired(canonical, projection)` consults the connection-owner's participation row → `Present(project(event, tier)) | Absent`. This is the §10 policy function gaining its real inputs.

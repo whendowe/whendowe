@@ -1,6 +1,6 @@
 # WhenDoWe — Design & Agent Bootstrap Brief
 
-> **Status:** v1.0-rc6 (rc5 + M1 as-built corrections to §8: `src/crypto/` and `src/oauth/` were introduced during M1 but never documented; `src/web/routes/` contents named; `src/web/escape.ts`; `src/providers/google-event.ts`; `src/recurrence.ts` — undocumented since the M1 recurrence spike; and a `scripts/` directory. Plus §13: the deployments repo is *credential*-human-only — the boundary is credential access, not repo write access, so instance config may be agent-authored and owner-merged) (rc4 + M0 as-built corrections: change_log id in SQLite dialect, fake provider filename, publish-not-deploy workflow comment, Hegel FFI mechanism) (rc3 + security hardening: token-link semantics, ICS/HTML injection, OAuth state/PKCE, supply-chain cooldown & ignore-scripts, agent privilege model, backup-tail deletion promise) (v0.9 + artifact-store port seam for feeds/pages; v0.7 + scheduling economics: cron fan-out vs DO alarms; v0.6 + platform pivot: TypeScript intersection contract — one codebase targeting Cloudflare Workers/D1/Durable Objects free tier *and* Node/Docker self-host; SQLite dialect; Hegel-based verification; earlier history in companions/git). **Name:** WhenDoWe — repo `github.com/whendowe/whendowe`, domain `whendowe.org` (Cloudflare-registered), package name `whendowe`.
+> **Status:** v1.0-rc7 (rc6 + roadmap re-sequenced people-first after an owner review: Ring 0 widened from "the household" to small groups of people who know each other; two-way Google sync is MVP scope; edit tier split from visibility tier; WORKFLOWS §9 deltas folded in — multi-person, account-less responses; §17 single-vs-multi resolved; provider-neutrality made a hard constraint) (v1.0-rc6: rc5 + M1 as-built corrections to §8: `src/crypto/` and `src/oauth/` were introduced during M1 but never documented; `src/web/routes/` contents named; `src/web/escape.ts`; `src/providers/google-event.ts`; `src/recurrence.ts` — undocumented since the M1 recurrence spike; and a `scripts/` directory. Plus §13: the deployments repo is *credential*-human-only — the boundary is credential access, not repo write access, so instance config may be agent-authored and owner-merged) (rc4 + M0 as-built corrections: change_log id in SQLite dialect, fake provider filename, publish-not-deploy workflow comment, Hegel FFI mechanism) (rc3 + security hardening: token-link semantics, ICS/HTML injection, OAuth state/PKCE, supply-chain cooldown & ignore-scripts, agent privilege model, backup-tail deletion promise) (v0.9 + artifact-store port seam for feeds/pages; v0.7 + scheduling economics: cron fan-out vs DO alarms; v0.6 + platform pivot: TypeScript intersection contract — one codebase targeting Cloudflare Workers/D1/Durable Objects free tier *and* Node/Docker self-host; SQLite dialect; Hegel-based verification; earlier history in companions/git). **Name:** WhenDoWe — repo `github.com/whendowe/whendowe`, domain `whendowe.org` (Cloudflare-registered), package name `whendowe`.
 > **Audience:** the coding agent bootstrapping this repo, and future human contributors.
 
 ---
@@ -20,23 +20,27 @@ An agent picking this up should: read §2–§5 for context, follow §8–§10 t
 
 ## 2. Problem & MVP scope
 
-**Problem.** People maintain several overlapping shared calendars (co-parenting, partner, extended family). An event relevant to more than one must be *copied*, edits don't propagate to the copies, and there's no record of who changed what — so calendars silently disagree. We want an event to exist **once** and be projected into many calendars, with edits propagating and full change attribution.
+**Problem.** People maintain several overlapping shared calendars (co-parenting, partner, extended family, a friend group's game night). An event relevant to more than one must be *copied*, edits don't propagate to the copies, and there's no record of who changed what — so calendars silently disagree. We want an event to exist **once** and be projected into many calendars, with edits propagating and full change attribution.
+
+**Audience (MVP):** the first ~100 people — the owner's household and friends, deliberately a diverse mix: households coordinating kids, and ad-hoc groups such as a D&D table. Small groups of people who know each other (WORKFLOWS Ring 0). Not a public sign-up product yet.
 
 **In scope (MVP):**
-- Connect ≥2 Google calendars via OAuth.
-- A provider-agnostic **canonical event store** (the source of truth).
-- Project a canonical event into multiple Google calendars, keeping them current.
+- **People without a calendar:** persons, magic-link login, groups, email invites. A person with zero calendar connections is a full participant (WORKFLOWS §2 account-less rule).
+- A provider-agnostic **canonical event store** (the source of truth), created and edited in WhenDoWe's own UI.
+- **Responses:** accept, acknowledge, slot votes, attendance intent (going / maybe / not going) and feedback — all deliverable by token link without an account.
+- **Per-person edit tier** (`edit` / `propose` / `view`) and **visibility tier** (`FULL` / `DETAILS` / `BUSY` / `HIDDEN`) — two independent axes (WORKFLOWS §3).
 - Change attribution ("who changed what, when").
 - Single events and whole-series recurrence.
+- **Read-only ICS feeds** per person and per group — calendar presence for every calendar app, no OAuth.
+- **Shared views:** unlisted (anyone with the link) or invite-only (specific people by email).
+- **Two-way Google sync:** projection into each person's Google calendar, *and* edits made there flow back, gated by that person's edit tier (§11).
 
 **Out of scope (deferred behind seams — see §5):**
-- Apple/Outlook providers; per-audience visibility beyond `FULL`; importing/sourcing events from elsewhere; public event pages / RSVP / discovery; per-instance recurrence overrides; multi-tenant hosted SaaS + Google OAuth verification.
+- Two-way Apple (CalDAV) and Microsoft (Graph) — ICS feeds cover them read-only meanwhile, and the provider port must not preclude them (§16). Discoverable public pages / capacity-limited RSVP / booking (Rings 1–2). Importing a person's existing native events (§11). Per-instance recurrence overrides. Multi-*tenant* (org) hosting. Google OAuth verification — the MVP stays within the unverified-app cap (§12).
 
-**Phasing:**
-- **Phase 1 — one-way (canonical → calendars).** Owner manages events; they appear and stay current in every member's calendar. No inbound conflict handling. *This alone solves most of the pain.*
-- **Phase 2 — bidirectional.** Edits made directly in a member's calendar flow back to canonical (needs §11 echo detection + conflict resolution).
+**Phasing:** the earlier Phase 1 (one-way) / Phase 2 (bidirectional) split survives as an *internal* sequence (§15 MVP-4 and MVP-5), not as a release boundary: both ship before the first 100. Rationale (owner): "I need to remember to log in to a different app to change this thing I have in my calendar" is the friction that kills apps like this.
 
-**Demo moment (MVP success):** define an event once, assign it to two calendars, edit it once, watch both update — and see an attributed change record.
+**Demo moment (MVP success):** a group agrees a time without anyone creating an account; the confirmed event appears in each member's own calendar; one member moves it *in their Google calendar*; everyone's copy follows, or — if they may only propose — it becomes a proposal the group can accept; the change log shows who did what.
 
 ---
 
@@ -380,6 +384,48 @@ CREATE TABLE change_log (                                -- append-only
 CREATE INDEX change_log_event_idx ON change_log(canonical_event_id, revision);
 ```
 
+
+### People, groups & participation (rc7 — folded from WORKFLOWS §9)
+
+A sketch, not a migration: each table lands as a plain `.sql`, additive migration in the milestone that first needs it (§15), and is refined there. Recorded here so the shape is agreed before code.
+
+```sql
+CREATE TABLE person (                      -- MVP-1. A person exists with zero calendar connections.
+    id          text PRIMARY KEY,
+    email       text NOT NULL UNIQUE,      -- verified; the identity key across login methods
+    display_name text,
+    created_at  text NOT NULL
+);
+-- calendar_connection.owner_id → person.id (MVP-1; replaces the M1a placeholder owner 'self').
+
+CREATE TABLE person_group (                -- MVP-1. A reusable set of people: a household, a D&D table.
+    id text PRIMARY KEY, name text NOT NULL, created_by text NOT NULL REFERENCES person(id),
+    created_at text NOT NULL
+);
+CREATE TABLE group_member (                -- MVP-1. Per-member DEFAULTS, copied onto new events
+    group_id text NOT NULL REFERENCES person_group(id),   -- (WORKFLOWS §9 delta 6 "role templates").
+    person_id text NOT NULL REFERENCES person(id),
+    default_edit_tier text NOT NULL,       -- edit | propose | view
+    default_visibility text NOT NULL,      -- FULL | DETAILS | BUSY | HIDDEN
+    UNIQUE (group_id, person_id)
+);
+
+CREATE TABLE event_participation (        -- MVP-2. The input desired() was always missing (§10 policy).
+    canonical_event_id text NOT NULL REFERENCES canonical_event(id),
+    person_id          text NOT NULL REFERENCES person(id),
+    edit_tier          text NOT NULL,      -- edit | propose | view     (what they may CHANGE)
+    visibility         text NOT NULL,      -- FULL | DETAILS | BUSY | HIDDEN (what they SEE)
+    response_kind      text NOT NULL,      -- none | ack | accept | slot_vote
+    response_state     text,               -- per kind; facts also appended to change_log
+    attendance         text,               -- going | maybe | not_going | NULL — any tier
+    UNIQUE (canonical_event_id, person_id)
+);
+-- Feedback is a change_log fact on the event (actor + text), available to every tier.
+-- Candidate slots + votes: WORKFLOWS §9 delta 3, unchanged (MVP-2).
+```
+
+The two tier columns are deliberately independent: a D&D player is `view` + `FULL` (sees everything, cannot reschedule); a grandparent is `view` + `BUSY`; a co-parent is `propose` or `edit` + `FULL`. Every tier, including `view`, can acknowledge, state attendance and leave feedback — "decided by the organizer" never means "participants have no voice".
+
 ---
 
 ## 11. Core reconcile loop
@@ -486,6 +532,12 @@ Any one true → suppress.
 - **Inbound apply is idempotent too.** Re-applying an inbound edit whose fields already match canonical must be a no-op (empty diff → no revision bump, no change_log row). Same convergence invariant as PUSH, in the other direction.
 - **Steady-state ticks write nothing.** A fully-synced projection takes the no-op path without touching storage. On D1's free tier the daily write budget is the scarce resource: this is the §6 economic invariant, enforced by the §9 zero-write property.
 
+**Inbound edits are gated by the editor's edit tier** (rc7; WORKFLOWS §3). The `projection not editable` branch above generalises to the owner of the projection's connection:
+- **`edit`** → `apply_inbound_edit` (below).
+- **`propose`** → the edit becomes a *proposal* (WORKFLOWS §5 lifecycle) attributed to them; their mirror is marked `pending_update` so the next PUSH reverts it to canonical until the proposal is accepted. They receive a token-link email: "proposed — waiting for …".
+- **`view`** → mirror marked `pending_update` (revert); they receive "this change wasn't applied — leave feedback → [link]". A *silent* revert is not acceptable: it reads as the app being broken.
+In every case the inbound change is a change_log fact (actor = the connection's person). Deletion is unaffected by tier: an inbound delete is always an unsubscribe for that person only (§10 deletion model).
+
 **Inbound edit / conflict (`apply_inbound_edit`):** map provider fields → canonical. MVP policy: **last-write-wins**. Designed-in upgrade path: the incoming edit is based on `projection.base_revision`; if canonical advanced and the changed fields don't overlap, fast-forward merge; only true same-field collisions need a tiebreak. On accept: bump `canonical_event.revision`, append a `change_log` row (actor, source, field-level diff), then let reconcile drive all *other* projections.
 
 ---
@@ -527,13 +579,30 @@ Any one true → suppress.
 ## 15. Implementation roadmap
 
 - **M0 — Bootstrap.** Repo (project renamed — §17), LICENSE, skeleton (§8), `npm run check` green on an empty skeleton, CI running the gate with the both-drivers contract matrix, and **both deploy targets boot a hello page** (`wrangler dev` and `docker compose up`). Proving the dual-deploy seam is M0 scope — it is the riskiest assumption and the cheapest moment to test it. (Agent starts here.)
-- **M1 — Read.** OAuth connect; read one calendar; materialise canonical events. Proves auth, scopes, store, the REST provider. Includes the **recurrence spike**: rrule.js-floating + temporal-polyfill against the §9 DST/round-trip properties (§17).
-- **M2 — Project (Phase 1 one-way).** Reconcile a canonical event into a second calendar; idempotent re-runs; 3-layer echo check on read-back. → **Phase 1 demo.**
-- **M3 — Manage.** Change log + attribution; minimal Hono + HTMX UI to create/edit events and assign calendars. (WORKFLOWS.md governs M3 scope — read it first.)
-- **M4 — Bidirectional (Phase 2).** Inbound edits → canonical with conflict resolution.
-- **M5 — Hardening.** Whole-series recurrence end-to-end; timezone/DST correctness is by construction (RFC 5545-native model, §10) — M5 *verifies* it with the wall-clock/round-trip property tests rather than retrofitting it.
+- **M1a — Google connect & read** *(done, rc7)*. OAuth connect (PKCE, state, encrypted flow cookie, encrypted token storage), `listChanges` + event mapping, the recurrence spike (soak-verified). The original M1 clause "materialise canonical events" is withdrawn: canonical events are *created in WhenDoWe*, and importing a person's native events stays deferred (§2, §11).
 
-After M5, per-instance overrides are "start accepting rows into `event_override`/`exdates`" (no migration), and the first *sourcing* feature (subscribe-and-import an ICS feed) and first *sharing* feature (emit a read-only ICS feed) are each one adapter plus serialization of an already-5545-shaped canonical.
+**Re-sequenced people-first (rc7).** Rationale: canonical events need people and a UI to exist before a sync engine has anything to sync, and a usable app is easier to conceptualise and show than a sync engine without one. Each milestone ends in something a person can use; acceptance tests in WORKFLOWS §4.
+
+The new milestones are labelled **MVP-1…MVP-5**, deliberately *not* reusing M2–M5: roughly 70 existing references in these docs and in code comments ("upsert lands in M2") mean the original milestones, and renumbering would have made every one of them silently wrong. They stay valid via this mapping:
+
+| original | meaning | now |
+|---|---|---|
+| M1 | Read | **M1a** (done); "materialise" withdrawn |
+| M2 | Project, one-way | **MVP-4** |
+| M3 (M3a/M3b) | Manage: people, UI, responses | **MVP-1** + **MVP-2** |
+| M4 | Bidirectional | **MVP-5** |
+| M5 | Hardening | after the MVP |
+
+
+- **MVP-1 — People.** `person`, magic-link login, sessions + CSRF, groups, email invites; the mail port with a console adapter for development and an HTTPS provider for real use. Email deliverability (SPF/DKIM/DMARC, `whendowe/deployments`) is a *blocker* here, not polish. One person per verified email address — a later "Sign in with Google" with the same address must land on the same person. Closes the M1a gap where the connect route has no authenticated owner. *Accept: a D&D group exists (US-14).*
+- **MVP-2 — Events & responses.** Create/edit events (single + whole-series), per-person edit and visibility tiers, the proposal lifecycle, accept / acknowledge / slot vote / attendance / feedback by token link, the change log visible in the UI. *Accept: "when do we play?" is answered without anyone installing anything.*
+- **MVP-3 — Feeds & sharing.** Read-only ICS feed per person and per group (the §5 artifact-store seam's first driver; Google polls subscribed feeds slowly — hours — which is stated to users, not hidden); unlisted and invite-only views; `project()` tiers enforced in every output (§9 visibility integrity becomes load-bearing). *Accept: a player subscribes from an iPhone.*
+- **MVP-4 — Google one-way.** "Sign in with Google" (basic profile scopes only — must not consume the sensitive-scope user cap, §12), calendar connection as a *separate*, opt-in grant, token refresh, the reconcile loop and PUSH (§11). *Accept: the owner's household lives on it.*
+- **MVP-5 — Google two-way.** PULL classification, echo detection, tier-gated inbound edits (§11), inbound deletes as unsubscribe, conflict policy, 410 full resync with the reverse diff. *Accept: a member moves an event in Google and the group follows or receives a proposal (US-15).*
+- **→ Public MVP: the first ~100.**
+- **Later:** Microsoft Graph and CalDAV two-way; Google OAuth verification (required before user 101 — start it before it is needed); hardening of whole-series recurrence end to end.
+
+After the MVP, per-instance overrides are "start accepting rows into `event_override`/`exdates`" (no migration), and the first *sourcing* feature (subscribe-and-import an ICS feed) and first *sharing* feature (emit a read-only ICS feed) are each one adapter plus serialization of an already-5545-shaped canonical.
 
 ---
 
@@ -543,7 +612,8 @@ After M5, per-instance overrides are "start accepting rows into `event_override`
 - **Never identify events by title/time.** Identity is the canonical UID in `extendedProperties`.
 - **A mirror deletion must never cascade** to deleting the canonical event or sibling projections — it's an unsubscribe.
 - **No per-instance recurrence overrides** in MVP (whole-series + single events only). The *schema* for them exists (`event_override`, `exdates` — §10) as a seam; it stays empty. The constraint is behavioral: no code path writes it yet.
-- **No multi-tenant / OAuth-verification path** in MVP.
+- **No multi-tenant / OAuth-verification path** in MVP. *Multi-person* is MVP scope (§2); multi-*tenant* means orgs, seats and admins over people (BUSINESS §6) and is not. Isolation between unrelated groups comes from participation — you see an event because you participate in it — not from a tenant id.
+- **No provider-specific concept in domain code.** Google is the first two-way provider, not the model. Identity metadata, sync cursors, and change classification go through the `CalendarProvider` port in provider-neutral terms, so Microsoft Graph and CalDAV are new adapters, never a refactor (§5). Google-only shortcuts belong in `src/providers/google*.ts` alone.
 - **No business logic in views/templates.** Build a typed (zod) view-model; views only render its fields.
 - **Compute the push hash over the FILTERED fieldset**, per projection — not over raw canonical (matters once profiles exist).
 - **Migrations are plain `.sql` files** — applied identically by `wrangler d1 migrations` and the Node runner; no programmatic migrations, ever.
@@ -559,7 +629,7 @@ After M5, per-instance overrides are "start accepting rows into `event_override`
 
 - ~~Project name~~ — **resolved: WhenDoWe** (`whendowe.org`, `github.com/whendowe/whendowe`). It states the product's question. M0 pre-flight: verify `whendowe.org` in Google Search Console now (needed later for the OAuth consent screen branding and the push-notification endpoint — §12) and reserve the `whendowe` npm name.
 - **Confirm AGPL-3.0** vs Apache-2.0 vs open-core (§7).
-- **Single-user MVP vs multi-account** from day one (schema already carries `owner_id`, so either works; decides how much auth/UI to build in M3).
+- ~~Single-user MVP vs multi-account~~ — **resolved (rc7): multi-person from MVP-1** (WORKFLOWS §9 delta 1), magic-link login first and "Sign in with Google" when Google arrives (MVP-4). Not multi-tenant (§16).
 - ~~Deploy/hosting target~~ — **resolved (§6):** dual-target intersection contract; Cloudflare free tier hosts the primary instance, Node/Docker is the self-host build. Both are gate-verified from M0.
 - **Recurrence expansion approach** — rrule.js-floating + temporal-polyfill (default) vs hand-rolled expansion of the validated subset. Decide via the M1 spike against the §9 DST/round-trip properties; pin before M2.
 - **Deletion UX** — instant vanish vs visible-cancelled grace period vs trash-with-restore vs per-calendar unsubscribe presentation. *Safely deferred:* it's a desired-state policy + UI choice (§10 deletion model), not a data-model decision. Experiment in M3 without migrations.
