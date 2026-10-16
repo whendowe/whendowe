@@ -21,7 +21,8 @@ function event(overrides: Partial<CanonicalEventRow> = {}): CanonicalEventRow {
     allDay: 0,
     rrule: null,
     exdates: "[]",
-    status: "active",
+    status: "scheduled", // the M0 value "active" means "scheduled" since DESIGN rc11
+    groupId: null,
     createdAt: NOW,
     updatedAt: NOW,
     ...overrides,

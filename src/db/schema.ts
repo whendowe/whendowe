@@ -55,16 +55,25 @@ export const canonicalEvent = sqliteTable(
     allDay: integer("all_day").notNull().default(0),
     rrule: text("rrule"), // verbatim RFC 5545 RRULE (validated subset at the zod boundary)
     exdates: text("exdates").notNull().default("[]"), // MVP: stays empty (seam)
-    status: text("status").notNull().default("active"),
+    // The lifecycle, WORKFLOWS §5 verbatim (DESIGN §10 rc11). One column, one CHECK:
+    // impossible pairs are unrepresentable. M0's 'active' became 'scheduled'.
+    status: text("status").notNull().default("scheduled"),
+    // The group the event was made for, if any: for LISTING a group's events. Access
+    // is never derived from it — you see an event because you participate in it.
+    groupId: text("group_id").references(() => personGroup.id, { onDelete: "set null" }),
     createdAt: text("created_at").notNull(),
     updatedAt: text("updated_at").notNull(),
   },
   (t) => [
+    index("canonical_event_group_idx").on(t.groupId),
     check(
       "canonical_event_origin_chk",
       sql`${t.origin} IN ('user_edit', 'imported_from_calendar')`,
     ),
-    check("canonical_event_status_chk", sql`${t.status} IN ('active', 'cancelled')`),
+    check(
+      "canonical_event_status_chk",
+      sql`${t.status} IN ('draft', 'proposed', 'scheduled', 'declined', 'withdrawn', 'cancelled')`,
+    ),
     check("canonical_event_all_day_chk", sql`${t.allDay} IN (0, 1)`),
   ],
 );
@@ -274,6 +283,46 @@ export const groupInvite = sqliteTable(
   ],
 );
 
+// --- Event participation (MVP-2, DESIGN §10 rc7 sketch) ----------------------------
+// The input desired() was always missing: who takes part in an event, what they may
+// CHANGE (edit tier) and what they SEE (visibility) — two independent axes.
+export const eventParticipation = sqliteTable(
+  "event_participation",
+  {
+    canonicalEventId: text("canonical_event_id")
+      .notNull()
+      .references(() => canonicalEvent.id, { onDelete: "cascade" }),
+    personId: text("person_id")
+      .notNull()
+      .references(() => person.id, { onDelete: "cascade" }),
+    editTier: text("edit_tier").notNull(),
+    visibility: text("visibility").notNull(),
+    // none | ack | accept | slot_vote — set by the organizer; filled in MVP-2 slice 2D.
+    responseKind: text("response_kind").notNull().default("none"),
+    responseState: text("response_state"),
+    // going | maybe | not_going — any tier may state it (WORKFLOWS §3 rc7).
+    attendance: text("attendance"),
+    createdAt: text("created_at").notNull(),
+  },
+  (t) => [
+    unique("event_participation_uq").on(t.canonicalEventId, t.personId),
+    index("event_participation_person_idx").on(t.personId),
+    check("event_participation_edit_tier_chk", sql`${t.editTier} IN ('edit', 'propose', 'view')`),
+    check(
+      "event_participation_visibility_chk",
+      sql`${t.visibility} IN ('FULL', 'DETAILS', 'BUSY', 'HIDDEN')`,
+    ),
+    check(
+      "event_participation_response_kind_chk",
+      sql`${t.responseKind} IN ('none', 'ack', 'accept', 'slot_vote')`,
+    ),
+    check(
+      "event_participation_attendance_chk",
+      sql`${t.attendance} IS NULL OR ${t.attendance} IN ('going', 'maybe', 'not_going')`,
+    ),
+  ],
+);
+
 export type CalendarConnectionRow = typeof calendarConnection.$inferSelect;
 export type CanonicalEventRow = typeof canonicalEvent.$inferSelect;
 export type EventOverrideRow = typeof eventOverride.$inferSelect;
@@ -282,3 +331,4 @@ export type ChangeLogRow = typeof changeLog.$inferSelect;
 export type PersonRow = typeof person.$inferSelect;
 export type LoginTokenRow = typeof loginToken.$inferSelect;
 export type SessionRow = typeof session.$inferSelect;
+export type EventParticipationRow = typeof eventParticipation.$inferSelect;

@@ -48,7 +48,9 @@ export function runStoragePortContract(makePort: () => Promise<StoragePort>): vo
       expect(rows[0]?.revision).toBe(1); // integer default
       expect(rows[0]?.all_day).toBe(0); // boolean-as-integer convention (§10)
       expect(rows[0]?.exdates).toBe("[]"); // JSON-in-text convention (§10)
-      expect(rows[0]?.status).toBe("active");
+      // Was "active". DESIGN rc11 made status the WORKFLOWS §5 lifecycle, where the M0
+      // value means "scheduled" — a deliberate value change, not a looser assertion.
+      expect(rows[0]?.status).toBe("scheduled");
     });
 
     it("binds NULL and reads it back as null", async () => {
@@ -101,6 +103,25 @@ export function runStoragePortContract(makePort: () => Promise<StoragePort>): vo
           },
         ]),
       ).rejects.toThrow();
+    });
+
+    // Migration 0005 rebuilt canonical_event and its CHECKs were written against a
+    // temporary table name, then renamed. If a driver failed to carry the constraint
+    // across the rename, this is where it would show — on both drivers.
+    it("enforces the lifecycle CHECK on the rebuilt canonical_event", async () => {
+      const port = await makePort();
+      const insert = (id: string, status: string) =>
+        port.batch([
+          {
+            sql: `INSERT INTO canonical_event
+                  (id, origin, owner_id, title, start_local, end_local, status, created_at, updated_at)
+                  VALUES (?, 'user_edit', 'owner-1', 'x', '2026-07-06T09:00:00', '2026-07-06T10:00:00', ?, ?, ?)`,
+            params: [id, status, NOW, NOW],
+          },
+        ]);
+      await expect(insert("evt-life-proposed", "proposed")).resolves.toBeUndefined();
+      await expect(insert("evt-life-active", "active")).rejects.toThrow();
+      await expect(insert("evt-life-bogus", "maybe-later")).rejects.toThrow();
     });
 
     it("enforces UNIQUE (canonical_event_id, revision) on change_log", async () => {
