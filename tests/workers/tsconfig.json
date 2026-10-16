@@ -5,10 +5,9 @@
   },
   "include": [
     "./**/*.ts",
-    "../contract/storage-port.suite.ts",
-    "../contract/token-cipher.suite.ts",
-    "../contract/pkce.suite.ts",
-    "../contract/mail-cap.suite.ts",
+    // Every contract suite runs in workerd too; a glob means a new suite cannot be
+    // forgotten here (and stops parallel PRs colliding on this list).
+    "../contract/*.suite.ts",
     "../../src/**/*.ts"
   ],
   "exclude": [
