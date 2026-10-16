@@ -1,6 +1,6 @@
 # WhenDoWe — Design & Agent Bootstrap Brief
 
-> **Status:** v1.0-rc7 (rc6 + roadmap re-sequenced people-first after an owner review: Ring 0 widened from "the household" to small groups of people who know each other; two-way Google sync is MVP scope; edit tier split from visibility tier; WORKFLOWS §9 deltas folded in — multi-person, account-less responses; §17 single-vs-multi resolved; provider-neutrality made a hard constraint) (v1.0-rc6: rc5 + M1 as-built corrections to §8: `src/crypto/` and `src/oauth/` were introduced during M1 but never documented; `src/web/routes/` contents named; `src/web/escape.ts`; `src/providers/google-event.ts`; `src/recurrence.ts` — undocumented since the M1 recurrence spike; and a `scripts/` directory. Plus §13: the deployments repo is *credential*-human-only — the boundary is credential access, not repo write access, so instance config may be agent-authored and owner-merged) (rc4 + M0 as-built corrections: change_log id in SQLite dialect, fake provider filename, publish-not-deploy workflow comment, Hegel FFI mechanism) (rc3 + security hardening: token-link semantics, ICS/HTML injection, OAuth state/PKCE, supply-chain cooldown & ignore-scripts, agent privilege model, backup-tail deletion promise) (v0.9 + artifact-store port seam for feeds/pages; v0.7 + scheduling economics: cron fan-out vs DO alarms; v0.6 + platform pivot: TypeScript intersection contract — one codebase targeting Cloudflare Workers/D1/Durable Objects free tier *and* Node/Docker self-host; SQLite dialect; Hegel-based verification; earlier history in companions/git). **Name:** WhenDoWe — repo `github.com/whendowe/whendowe`, domain `whendowe.org` (Cloudflare-registered), package name `whendowe`.
+> **Status:** v1.0-rc8 (rc7 + §8 layout for MVP-1, recorded before the code: `src/people/`, `src/ids.ts`, `src/mail/console.ts`, `src/web/routes/{auth,groups}.ts`) (v1.0-rc7: rc6 + roadmap re-sequenced people-first after an owner review: Ring 0 widened from "the household" to small groups of people who know each other; two-way Google sync is MVP scope; edit tier split from visibility tier; WORKFLOWS §9 deltas folded in — multi-person, account-less responses; §17 single-vs-multi resolved; provider-neutrality made a hard constraint) (v1.0-rc6: rc5 + M1 as-built corrections to §8: `src/crypto/` and `src/oauth/` were introduced during M1 but never documented; `src/web/routes/` contents named; `src/web/escape.ts`; `src/providers/google-event.ts`; `src/recurrence.ts` — undocumented since the M1 recurrence spike; and a `scripts/` directory. Plus §13: the deployments repo is *credential*-human-only — the boundary is credential access, not repo write access, so instance config may be agent-authored and owner-merged) (rc4 + M0 as-built corrections: change_log id in SQLite dialect, fake provider filename, publish-not-deploy workflow comment, Hegel FFI mechanism) (rc3 + security hardening: token-link semantics, ICS/HTML injection, OAuth state/PKCE, supply-chain cooldown & ignore-scripts, agent privilege model, backup-tail deletion promise) (v0.9 + artifact-store port seam for feeds/pages; v0.7 + scheduling economics: cron fan-out vs DO alarms; v0.6 + platform pivot: TypeScript intersection contract — one codebase targeting Cloudflare Workers/D1/Durable Objects free tier *and* Node/Docker self-host; SQLite dialect; Hegel-based verification; earlier history in companions/git). **Name:** WhenDoWe — repo `github.com/whendowe/whendowe`, domain `whendowe.org` (Cloudflare-registered), package name `whendowe`.
 > **Audience:** the coding agent bootstrapping this repo, and future human contributors.
 
 ---
@@ -154,6 +154,7 @@ whendowe/
     watch-pr-checks.sh         # stream PR check results until they settle (gh + jq)
   src/
     config.ts                  # zod-parsed env
+    ids.ts                     # UUIDv7 for text primary keys, generated in app code (schema.ts convention)
     recurrence.ts              # validated RRULE subset + occurrence expansion (rrule-floating + temporal)
     crypto/
       base64.ts                # base64 / base64url over the btoa/atob globals (platform-blind)
@@ -163,6 +164,13 @@ whendowe/
       port.ts                  # async storage port (query/batch) — the ONLY way domain code touches storage
       d1.ts                    # driver: D1 binding
       sqlite.ts                # driver: better-sqlite3 (async-wrapped) / libsql
+    people/                    # MVP-1 (§15): identity is domain code, not web code
+      person.ts                # person repository; email normalisation; one person per verified email
+      tokens.ts                # opaque bearer tokens: random bytes out, only SHA-256 hashes stored
+      login.ts                 # magic links: single-use, short-lived, issued per email (sign-up = sign-in)
+      session.ts               # sessions + CSRF tokens
+      group.ts                 # groups + members with default edit/visibility tiers (§10)
+      invite.ts                # email invites into a group
     oauth/
       pkce.ts                  # RFC 7636 verifier/challenge (S256 only) + state nonce (§13)
       authorize.ts             # Google authorization request URL (§12)
@@ -189,9 +197,13 @@ whendowe/
       routes/                  # OAuth, events UI (HTMX)
         oauth.ts               # POST connect (GET never mutates) + GET callback: state, PKCE, store
         oauth-deps.ts          # config + storage port -> route dependencies
+        auth.ts                # magic-link request + confirm (GET renders, POST acts — §13), sign-out
+        groups.ts              # create group, invite, accept invite
     changelog.ts               # append + diff
     mail/
-      port.ts                  # HTTPS mail port (invites, token links — M3)
+      port.ts                  # HTTPS mail port (invites, token links — MVP-1)
+      console.ts               # development adapter: prints the message, never sends
+                               # (the HTTPS provider adapter lands with the provider decision)
   deploy/
     cloudflare/
       wrangler.jsonc           # bindings: D1, DO, cron
