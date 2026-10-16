@@ -55,6 +55,20 @@ export const configSchema = z.object({
   MIGRATIONS_DIR: z.string().min(1).default("migrations"),
   LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),
 
+  // Outbound mail (DESIGN §13 rc9). `disabled` fails closed — see src/mail/port.ts.
+  // `console` prints messages including tokens: development only, explicit opt-in.
+  MAIL_PROVIDER: z.enum(["disabled", "console", "cloudflare"]).default("disabled"),
+  MAIL_FROM_ADDRESS: z.email().optional(),
+  MAIL_FROM_NAME: z.string().min(1).default("WhenDoWe"),
+  // Defaults sit under the 3,000 sends/month Workers Paid includes, so the default
+  // configuration cannot incur overage. Raising them is a deliberate config change.
+  MAIL_DAILY_CAP: z.coerce.number().int().min(0).default(200),
+  MAIL_MONTHLY_CAP: z.coerce.number().int().min(0).default(2500),
+  // REST path only (Node self-host). The hosted Workers instance uses a binding and
+  // has no mail credential at all.
+  CLOUDFLARE_ACCOUNT_ID: z.string().min(1).optional(),
+  CLOUDFLARE_EMAIL_API_TOKEN: z.string().min(1).optional(),
+
   GOOGLE_CLIENT_ID: googleOAuthFields.GOOGLE_CLIENT_ID.optional(),
   GOOGLE_CLIENT_SECRET: googleOAuthFields.GOOGLE_CLIENT_SECRET.optional(),
   GOOGLE_REDIRECT_URI: googleOAuthFields.GOOGLE_REDIRECT_URI.optional(),

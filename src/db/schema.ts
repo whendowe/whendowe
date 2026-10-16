@@ -188,6 +188,21 @@ export const session = sqliteTable(
   (t) => [index("session_person_idx").on(t.personId)],
 );
 
+// --- Outbound mail cap (DESIGN §13 rc9) -------------------------------------------
+// One row per RESERVED send slot (src/mail/capped.ts). Deliberately no recipient,
+// subject, or purpose: a counter needs none of it, and this table would otherwise be
+// a log of who was emailed when — personal data with no reason to exist.
+export const mailSend = sqliteTable(
+  "mail_send",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    day: text("day").notNull(), // YYYY-MM-DD, UTC
+    month: text("month").notNull(), // YYYY-MM, UTC
+    createdAt: text("created_at").notNull(),
+  },
+  (t) => [index("mail_send_day_idx").on(t.day), index("mail_send_month_idx").on(t.month)],
+);
+
 export type CalendarConnectionRow = typeof calendarConnection.$inferSelect;
 export type CanonicalEventRow = typeof canonicalEvent.$inferSelect;
 export type EventOverrideRow = typeof eventOverride.$inferSelect;

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 // HTTPS mail port (DESIGN.md §6): raw SMTP is unavailable from Workers, so mail is
-// an HTTPS transactional API (e.g. Resend) behind this seam. Needed from M3
-// (invites, token links — WORKFLOWS §9 delta 10); the port is the M0 shape.
+// an HTTPS transactional API behind this seam. Provider: Cloudflare Email Service
+// (rc9), sending from the notify. subdomain, always behind the cap in capped.ts.
 export interface MailMessage {
   readonly to: string;
   readonly subject: string;
@@ -13,3 +13,18 @@ export interface MailMessage {
 export interface MailPort {
   send(message: MailMessage): Promise<void>;
 }
+
+/**
+ * The adapter used when no provider is configured: it refuses every send.
+ *
+ * Fail closed on purpose. The obvious alternative — fall back to the console
+ * adapter — would make a misconfigured production instance print magic-link
+ * tokens into its logs, where anyone who can read logs can sign in as anyone
+ * (§13: never log tokens). Development opts in to the console explicitly.
+ */
+export const disabledMailPort: MailPort = {
+  send: () =>
+    Promise.reject(
+      new Error("mail is not configured (MAIL_PROVIDER is 'disabled'); refusing to send"),
+    ),
+};

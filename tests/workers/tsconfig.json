@@ -8,6 +8,7 @@
     "../contract/storage-port.suite.ts",
     "../contract/token-cipher.suite.ts",
     "../contract/pkce.suite.ts",
+    "../contract/mail-cap.suite.ts",
     "../../src/**/*.ts"
   ],
   "exclude": [
