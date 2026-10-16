@@ -317,7 +317,7 @@ export function runEventsContract(makePort: () => Promise<StoragePort>): void {
         now: T0,
       });
       const groupMembership: GroupMembership = membership;
-      expect((await listGroupEvents(port, groupMembership, dm.id)).map((e) => e.id)).toEqual([
+      expect((await listGroupEvents(port, groupMembership, dm.id)).map((a) => a.event.id)).toEqual([
         sooner.id,
         later.id,
       ]);

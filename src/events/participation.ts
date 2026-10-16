@@ -98,3 +98,54 @@ export async function listParticipants(
     return { ...toParticipation(row), email: r.email, displayName: r.display_name };
   });
 }
+
+// --- What each visibility tier may see (WORKFLOWS §3, DESIGN §9 visibility integrity)
+//
+// THE single source of truth for "who sees what", used by every view: the event page,
+// the group's event list AND the change history. History matters most — an entry
+// "description: old → new" shown to a DETAILS viewer would leak exactly the private
+// notes the tier exists to protect (WORKFLOWS US-6).
+
+export type EventPart = "title" | "time" | "location" | "description" | "participants";
+
+const VISIBLE: Record<Visibility, ReadonlySet<EventPart>> = {
+  FULL: new Set<EventPart>(["title", "time", "location", "description", "participants"]),
+  DETAILS: new Set<EventPart>(["title", "time", "location"]),
+  BUSY: new Set<EventPart>(["time"]),
+  HIDDEN: new Set<EventPart>(),
+};
+
+export function canSee(visibility: Visibility, part: EventPart): boolean {
+  return VISIBLE[visibility].has(part);
+}
+
+/** Which part a change_log field belongs to; `status` is visible to every tier that sees anything. */
+export function partOfField(field: string): EventPart | "status" | null {
+  switch (field) {
+    case "title":
+      return "title";
+    case "description":
+      return "description";
+    case "location":
+      return "location";
+    case "startLocal":
+    case "endLocal":
+    case "tzid":
+    case "allDay":
+      return "time";
+    case "status":
+      return "status";
+    default:
+      // An unknown field is hidden from everyone below FULL: failing closed means a
+      // field added later can never leak by default.
+      return null;
+  }
+}
+
+export function canSeeField(visibility: Visibility, field: string): boolean {
+  if (visibility === "FULL") return true;
+  if (visibility === "HIDDEN") return false;
+  const part = partOfField(field);
+  if (part === null) return false;
+  return part === "status" || canSee(visibility, part);
+}

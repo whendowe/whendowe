@@ -2,6 +2,7 @@
 import { Hono } from "hono";
 import { html, renderPage } from "./layout.js";
 import { type AuthDeps, registerAuthRoutes, SIGN_IN_PATH, SIGN_OUT_PATH } from "./routes/auth.js";
+import { registerEventRoutes } from "./routes/events.js";
 import { GROUPS_PATH, registerGroupRoutes } from "./routes/groups.js";
 import { CONNECT_PATH, type OAuthRouteDeps, registerOAuthRoutes } from "./routes/oauth.js";
 import { type AppEnv, sessionMiddleware } from "./session.js";
@@ -75,6 +76,7 @@ ${connect}`,
   if (auth !== undefined) {
     registerAuthRoutes(app, auth);
     registerGroupRoutes(app, auth);
+    registerEventRoutes(app, auth);
   }
   if (oauth !== undefined) registerOAuthRoutes(app, oauth);
 

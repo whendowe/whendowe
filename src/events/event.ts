@@ -250,20 +250,24 @@ export async function findEventForParticipant(
   return { event: toEvent(rows[0]), participation: toParticipation(rows[0]) };
 }
 
-/** Events in a group that this person takes part in, soonest first. */
+/**
+ * Events in a group that this person takes part in, soonest first — each WITH that
+ * person's participation, because a list must render every event at the viewer's own
+ * visibility tier, never at the event's full detail.
+ */
 export async function listGroupEvents(
   storage: StoragePort,
   membership: GroupMembership,
   personId: string,
-): Promise<CanonicalEvent[]> {
+): Promise<EventAccess[]> {
   const rows = await storage.query({
-    sql: `SELECT ${EVENT_COLUMNS}
+    sql: `SELECT ${EVENT_COLUMNS}, ep.canonical_event_id, ep.person_id, ep.edit_tier, ep.visibility, ep.attendance
           FROM canonical_event e JOIN event_participation ep ON ep.canonical_event_id = e.id
-          WHERE e.group_id = ? AND ep.person_id = ?
+          WHERE e.group_id = ? AND ep.person_id = ? AND ep.visibility <> 'HIDDEN'
           ORDER BY e.start_local, e.id`,
     params: [membership.group.id, personId],
   });
-  return rows.map(toEvent);
+  return rows.map((row) => ({ event: toEvent(row), participation: toParticipation(row) }));
 }
 
 export type EditResult =
@@ -290,7 +294,18 @@ export type EditResult =
 export async function editEvent(
   storage: StoragePort,
   access: EventAccess,
-  input: { readonly fields: EventFieldsInput; readonly actorId: string; readonly now: string },
+  input: {
+    readonly fields: EventFieldsInput;
+    readonly actorId: string;
+    readonly now: string;
+    /**
+     * The revision the person SAW — carried in the edit form. Defaults to the access's
+     * own revision, which is only right when the read and the write are one action. For
+     * a form, checking against a revision re-read at save time would let two people
+     * editing at once silently overwrite each other: each would pass the check.
+     */
+    readonly expectedRevision?: number;
+  },
 ): Promise<EditResult> {
   // MVP-2 slice 2A: only `edit` changes directly. `propose` becomes a proposal in 2E.
   if (access.participation.editTier !== "edit") return { kind: "forbidden" };
@@ -299,7 +314,7 @@ export async function editEvent(
   const change = diff(flatten(access.event), flatten(fields));
   if (Object.keys(change).length === 0) return { kind: "unchanged" };
 
-  const expected = access.event.revision;
+  const expected = input.expectedRevision ?? access.event.revision;
   const next = expected + 1;
   const log = logRow(access.event.id, next, input.actorId, change, input.now);
   try {

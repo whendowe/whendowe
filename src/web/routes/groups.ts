@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import type { Hono } from "hono";
 import type { StoragePort } from "../../db/port.js";
+import { listGroupEvents } from "../../events/event.js";
 import { MailCapReachedError } from "../../mail/capped.js";
 import type { MailPort } from "../../mail/port.js";
 import {
@@ -22,6 +23,7 @@ import { normalizeEmail } from "../../people/person.js";
 import { createSession, revokeSession } from "../../people/session.js";
 import { html, renderPage } from "../layout.js";
 import { type AppEnv, requireSignedIn, setSessionCookie, verifyFormCsrf } from "../session.js";
+import { eventSummary } from "./events.js";
 
 // Groups (MVP-1 slice D1). Every route needs a signed-in person; every group page
 // goes through findGroupForMember, which is the only way to read a group at all, so
@@ -163,11 +165,16 @@ ${createForm(me.csrfToken, "", null)}`,
     const membership = await findGroupForMember(deps.storage, c.req.param("id"), me.personId);
     if (membership === null) return c.html(notFound(), 404);
     const members = await listMembers(deps.storage, membership);
+    // Each event rendered at THIS viewer's visibility tier (eventSummary → canSee).
+    const events = await listGroupEvents(deps.storage, membership, me.personId);
     return c.html(
       renderPage(
         membership.group.name,
         html`<p><a href="${GROUPS_PATH}">← Your groups</a></p>
 <h1>${membership.group.name}</h1>
+<h2>Events</h2>
+${events.length === 0 ? html`<p class="muted">Nothing planned yet.</p>` : html`<ul>${events.map((a) => html`<li>${eventSummary(a)}</li>`)}</ul>`}
+<p><a href="${GROUPS_PATH}/${membership.group.id}/events/new">+ New event</a></p>
 <h2>People</h2>
 <ul>${members.map(
           (m) =>
