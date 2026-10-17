@@ -276,7 +276,7 @@ export async function withdrawChange(
   storage: StoragePort,
   access: EventAccess,
   input: { readonly proposalId: string; readonly now: string },
-): Promise<{ readonly kind: "withdrawn" | "closed" }> {
+): Promise<{ readonly kind: "withdrawn" } | { readonly kind: "closed" }> {
   const me = access.participation.personId;
   const done = await storage.query({
     sql: `UPDATE event_change_proposal SET status = 'withdrawn', decided_by = ?, decided_at = ?
