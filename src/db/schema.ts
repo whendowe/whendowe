@@ -1,6 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { sql } from "drizzle-orm";
-import { check, index, integer, sqliteTable, text, unique } from "drizzle-orm/sqlite-core";
+import {
+  check,
+  foreignKey,
+  index,
+  integer,
+  primaryKey,
+  sqliteTable,
+  text,
+  unique,
+} from "drizzle-orm/sqlite-core";
 
 // DESIGN.md §10, transcribed. One SQLite dialect, two homes (D1 + SQLite file).
 // Conventions: text PKs holding UUIDv7 generated in app code; enums as text + CHECK;
@@ -320,6 +329,55 @@ export const eventParticipation = sqliteTable(
       "event_participation_attendance_chk",
       sql`${t.attendance} IS NULL OR ${t.attendance} IN ('going', 'maybe', 'not_going')`,
     ),
+  ],
+);
+
+// --- Time polls (MVP-2 slice 2C; WORKFLOWS §9 delta 3, US-13) -----------------------
+// A `proposed` event carries candidate times; each participant answers per candidate.
+// Candidates share the event's all_day/tzid (one poll, one kind of time) — stored per
+// row anyway so confirm copies a self-contained time, exactly the event's shape.
+export const eventCandidate = sqliteTable(
+  "event_candidate",
+  {
+    canonicalEventId: text("canonical_event_id")
+      .notNull()
+      .references(() => canonicalEvent.id, { onDelete: "cascade" }),
+    slotIndex: integer("slot_index").notNull(),
+    allDay: integer("all_day").notNull(),
+    startLocal: text("start_local").notNull(),
+    endLocal: text("end_local").notNull(),
+    tzid: text("tzid"),
+  },
+  (t) => [
+    primaryKey({ name: "event_candidate_pk", columns: [t.canonicalEventId, t.slotIndex] }),
+    check("event_candidate_slot_chk", sql`${t.slotIndex} >= 0`),
+  ],
+);
+
+export const slotResponse = sqliteTable(
+  "slot_response",
+  {
+    canonicalEventId: text("canonical_event_id").notNull(),
+    slotIndex: integer("slot_index").notNull(),
+    personId: text("person_id")
+      .notNull()
+      .references(() => person.id, { onDelete: "cascade" }),
+    answer: text("answer").notNull(),
+    respondedAt: text("responded_at").notNull(),
+  },
+  (t) => [
+    primaryKey({
+      name: "slot_response_pk",
+      columns: [t.canonicalEventId, t.slotIndex, t.personId],
+    }),
+    // A vote can only be for a candidate that exists; deleting the event cascades.
+    foreignKey({
+      name: "slot_response_candidate_fk",
+      columns: [t.canonicalEventId, t.slotIndex],
+      foreignColumns: [eventCandidate.canonicalEventId, eventCandidate.slotIndex],
+    }).onDelete("cascade"),
+    index("slot_response_person_idx").on(t.personId),
+    check("slot_response_answer_chk", sql`${t.answer} IN ('yes', 'ifneedbe', 'no')`),
   ],
 );
 

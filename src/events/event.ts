@@ -137,7 +137,7 @@ function toEvent(row: unknown): CanonicalEvent {
 }
 
 /** The diffable, flat view of an event's fields (what the change log records). */
-function flatten(f: EventFields): Record<string, string | number | null> {
+export function flatten(f: EventFields): Record<string, string | number | null> {
   return {
     title: f.title,
     description: f.description,
@@ -174,14 +174,38 @@ export async function createEvent(
     readonly creatorId: string;
     readonly group: GroupMembership | null;
     readonly fields: EventFieldsInput;
-    readonly status?: EventStatus;
     readonly now: string;
     readonly newId?: () => string;
   },
 ): Promise<CanonicalEvent> {
+  return createEventWith(
+    storage,
+    { ...input, status: "scheduled", responseKind: "none" },
+    () => [],
+  );
+}
+
+/**
+ * createEvent for sibling modules in src/events (poll.ts): a lifecycle status, the
+ * response everyone is asked for, and further rows written IN THE SAME BATCH — a poll
+ * without its candidates must never exist, even briefly.
+ */
+export async function createEventWith(
+  storage: StoragePort,
+  input: {
+    readonly creatorId: string;
+    readonly group: GroupMembership | null;
+    readonly fields: EventFieldsInput;
+    readonly status: EventStatus;
+    readonly responseKind: "none" | "slot_vote";
+    readonly now: string;
+    readonly newId?: () => string;
+  },
+  extra: (eventId: string) => SqlStatement[],
+): Promise<CanonicalEvent> {
   const fields = eventFieldsSchema.parse(input.fields);
   const id = (input.newId ?? (() => uuidv7()))();
-  const status = input.status ?? "scheduled";
+  const status = input.status;
   const others =
     input.group === null
       ? []
@@ -210,15 +234,16 @@ export async function createEvent(
       ],
     },
     {
-      sql: `INSERT INTO event_participation (canonical_event_id, person_id, edit_tier, visibility, created_at)
-            VALUES (?, ?, 'edit', 'FULL', ?)`,
-      params: [id, input.creatorId, input.now],
+      sql: `INSERT INTO event_participation (canonical_event_id, person_id, edit_tier, visibility, response_kind, created_at)
+            VALUES (?, ?, 'edit', 'FULL', ?, ?)`,
+      params: [id, input.creatorId, input.responseKind, input.now],
     },
     ...others.map((m) => ({
-      sql: `INSERT INTO event_participation (canonical_event_id, person_id, edit_tier, visibility, created_at)
-            VALUES (?, ?, ?, ?, ?)`,
-      params: [id, m.personId, m.editTier, m.visibility, input.now],
+      sql: `INSERT INTO event_participation (canonical_event_id, person_id, edit_tier, visibility, response_kind, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)`,
+      params: [id, m.personId, m.editTier, m.visibility, input.responseKind, input.now],
     })),
+    ...extra(id),
     logRow(id, 1, input.creatorId, diff({}, { ...flatten(fields), status }), input.now),
   ]);
 
@@ -309,6 +334,10 @@ export async function editEvent(
 ): Promise<EditResult> {
   // MVP-2 slice 2A: only `edit` changes directly. `propose` becomes a proposal in 2E.
   if (access.participation.editTier !== "edit") return { kind: "forbidden" };
+  // A poll's time is decided by confirming a candidate (poll.ts), not by editing a
+  // placeholder; changing candidates is slice 2E. A confirm that lands between this
+  // check and the write bumps the revision, so the optimistic guard still catches it.
+  if (access.event.status === "proposed") return { kind: "forbidden" };
 
   const fields = eventFieldsSchema.parse(input.fields);
   const change = diff(flatten(access.event), flatten(fields));

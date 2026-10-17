@@ -55,6 +55,14 @@ describe("desired() — the §10 deletion-model policy", () => {
     expect(result).toEqual({ kind: "present", fields: project(event(), "FULL") });
   });
 
+  it("only a scheduled event projects: every other lifecycle state is Absent (WORKFLOWS §9)", () => {
+    // An open poll must not land in anyone's calendar at its placeholder time.
+    for (const status of ["draft", "proposed", "declined", "withdrawn", "cancelled"]) {
+      expect(desired(event({ status }), projectionRow())).toEqual({ kind: "absent" });
+    }
+    expect(desired(event({ status: "scheduled" }), projectionRow()).kind).toBe("present");
+  });
+
   it("a cancelled event is Absent (default policy: instant vanish)", () => {
     expect(desired(event({ status: "cancelled" }), projectionRow())).toEqual({ kind: "absent" });
   });

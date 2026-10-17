@@ -13,9 +13,14 @@ export type Desired =
   | { readonly kind: "present"; readonly fields: EventFields }
   | { readonly kind: "absent" };
 
-/** Default MVP policy: cancelled events and unsubscribed projections vanish. */
+/**
+ * Default MVP policy: only `scheduled` events project; unsubscribed projections vanish.
+ * WORKFLOWS §9's lifecycle property — no viewer ever receives a non-scheduled event —
+ * so a draft, an open poll, a declined or withdrawn proposal and a cancelled event are
+ * all Absent. (Tentative projection of a poll's candidates to its voters is MVP-4.)
+ */
 export function desired(canonical: CanonicalEventRow, projection: ProjectionRow): Desired {
-  if (canonical.status === "cancelled") {
+  if (canonical.status !== "scheduled") {
     return { kind: "absent" };
   }
   if (projection.state === "pending_delete" || projection.state === "deleted") {
