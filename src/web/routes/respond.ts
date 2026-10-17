@@ -21,7 +21,7 @@ import {
 import type { MailPort } from "../../mail/port.js";
 import { type Html, html, renderPage } from "../layout.js";
 import type { AppEnv } from "../session.js";
-import { BUSY_LABEL, formatWhen } from "./events.js";
+import { BUSY_LABEL, describeRRule, formatWhen } from "./events.js";
 
 // Account-less responses (MVP-2 slice 2D; WORKFLOWS §2: responding never requires an
 // account). The emailed link IS the person, for one event and one question:
@@ -68,7 +68,9 @@ function header(access: EventAccess): Html {
   const when =
     event.status === "proposed" && participation.responseKind === "slot_vote"
       ? html`<p>Voting on a time.</p>`
-      : html`<p>${formatWhen(event)}${event.status === "cancelled" ? " — cancelled" : ""}</p>`;
+      : html`<p>${formatWhen(event)}${event.status === "cancelled" ? " — cancelled" : ""}</p>${
+          event.rrule === null ? "" : html`<p>↻ ${describeRRule(event.rrule)}</p>`
+        }`;
   const where =
     canSee(participation.visibility, "location") && event.location !== null
       ? html`<p>📍 ${event.location}</p>`

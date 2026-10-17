@@ -5,6 +5,7 @@ import { type Diff, diff } from "../changelog.js";
 import type { SqlStatement, StoragePort } from "../db/port.js";
 import { uuidv7 } from "../ids.js";
 import type { GroupMembership } from "../people/group.js";
+import { expandOccurrences, formatRRule, parseRRule } from "../recurrence.js";
 import {
   groupDefaults,
   PARTICIPATION_COLUMNS,
@@ -56,30 +57,49 @@ export const eventFieldsSchema = z
     startLocal: z.string(),
     endLocal: z.string(),
     tzid: z.string().nullable(),
+    /**
+     * A whole series (DESIGN §10 rc13, slice 2E-3): an RRULE in the validated subset of
+     * src/recurrence.ts, stored in its canonical form. Absent = a single event.
+     */
+    rrule: z.string().trim().max(500).nullable().default(null),
   })
   .transform((v, ctx) => {
     const fail = (message: string) => {
       ctx.addIssue({ code: "custom", message });
       return z.NEVER;
     };
+    let times: { startLocal: string; endLocal: string; tzid: string | null };
     try {
       if (v.allDay) {
         const start = Temporal.PlainDate.from(v.startLocal, { overflow: "reject" });
         const end = Temporal.PlainDate.from(v.endLocal, { overflow: "reject" });
         if (Temporal.PlainDate.compare(end, start) <= 0)
           return fail("An all-day event must end after it starts.");
-        return { ...v, startLocal: start.toString(), endLocal: end.toString(), tzid: null };
+        times = { startLocal: start.toString(), endLocal: end.toString(), tzid: null };
+      } else {
+        if (v.tzid === null || !isTimeZone(v.tzid)) return fail("Choose a valid time zone.");
+        const start = Temporal.PlainDateTime.from(v.startLocal, { overflow: "reject" });
+        const end = Temporal.PlainDateTime.from(v.endLocal, { overflow: "reject" });
+        if (Temporal.PlainDateTime.compare(end, start) <= 0)
+          return fail("The event must end after it starts.");
+        const fmt = (t: Temporal.PlainDateTime) => t.toString({ smallestUnit: "second" });
+        times = { startLocal: fmt(start), endLocal: fmt(end), tzid: v.tzid };
       }
-      if (v.tzid === null || !isTimeZone(v.tzid)) return fail("Choose a valid time zone.");
-      const start = Temporal.PlainDateTime.from(v.startLocal, { overflow: "reject" });
-      const end = Temporal.PlainDateTime.from(v.endLocal, { overflow: "reject" });
-      if (Temporal.PlainDateTime.compare(end, start) <= 0)
-        return fail("The event must end after it starts.");
-      const fmt = (t: Temporal.PlainDateTime) => t.toString({ smallestUnit: "second" });
-      return { ...v, startLocal: fmt(start), endLocal: fmt(end) };
     } catch {
       return fail("That isn't a valid date or time.");
     }
+    let rrule: string | null = null;
+    if (v.rrule !== null && v.rrule !== "") {
+      try {
+        rrule = formatRRule(parseRRule(v.rrule));
+      } catch {
+        return fail("That repeat rule isn't supported.");
+      }
+      // A rule whose UNTIL is before the start would be a series with nothing in it.
+      if (expandOccurrences({ ...times, rrule, exdates: [] }, 1).length === 0)
+        return fail("The series must end after its first date.");
+    }
+    return { ...v, ...times, rrule };
   });
 
 export type EventFieldsInput = z.input<typeof eventFieldsSchema>;
@@ -114,6 +134,7 @@ const eventRowSchema = z.object({
   start_local: z.string(),
   end_local: z.string(),
   tzid: z.string().nullable(),
+  rrule: z.string().nullable(),
   created_at: z.string(),
   updated_at: z.string(),
 });
@@ -129,7 +150,7 @@ export const PARTY_RULE = `(e.status NOT IN ('proposed', 'declined', 'withdrawn'
   OR e.owner_id = ep.person_id OR ep.response_kind IN ('accept', 'slot_vote'))`;
 
 const EVENT_COLUMNS = `e.id, e.revision, e.status, e.owner_id, e.group_id, e.title, e.description,
-  e.location, e.all_day, e.start_local, e.end_local, e.tzid, e.created_at, e.updated_at`;
+  e.location, e.all_day, e.start_local, e.end_local, e.tzid, e.rrule, e.created_at, e.updated_at`;
 
 function toEvent(row: unknown): CanonicalEvent {
   const r = eventRowSchema.parse(row);
@@ -146,6 +167,7 @@ function toEvent(row: unknown): CanonicalEvent {
     startLocal: r.start_local,
     endLocal: r.end_local,
     tzid: r.tzid,
+    rrule: r.rrule,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   };
@@ -161,6 +183,7 @@ export function flatten(f: EventFields): Record<string, string | number | null> 
     startLocal: f.startLocal,
     endLocal: f.endLocal,
     tzid: f.tzid,
+    rrule: f.rrule,
   };
 }
 
@@ -245,8 +268,8 @@ export async function createEventWith(
     {
       sql: `INSERT INTO canonical_event
               (id, revision, origin, owner_id, group_id, title, description, location, all_day,
-               start_local, end_local, tzid, status, created_at, updated_at)
-            VALUES (?, 1, 'user_edit', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+               start_local, end_local, tzid, rrule, status, created_at, updated_at)
+            VALUES (?, 1, 'user_edit', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       params: [
         id,
         input.creatorId,
@@ -258,6 +281,7 @@ export async function createEventWith(
         fields.startLocal,
         fields.endLocal,
         fields.tzid,
+        fields.rrule,
         status,
         input.now,
         input.now,
@@ -339,6 +363,7 @@ export async function listGroupEvents(
 
 /** Fields whose change alters someone's plans (DESIGN §10 rc13): not title, not notes. */
 const MATERIAL_FIELDS: ReadonlySet<string> = new Set([
+  "rrule",
   "startLocal",
   "endLocal",
   "tzid",
@@ -380,7 +405,7 @@ export function fieldEditStatements(input: {
   return [
     {
       sql: `UPDATE canonical_event SET title = ?, description = ?, location = ?, all_day = ?,
-              start_local = ?, end_local = ?, tzid = ?, revision = revision + 1, updated_at = ?
+              start_local = ?, end_local = ?, tzid = ?, rrule = ?, revision = revision + 1, updated_at = ?
             WHERE id = ? AND revision = ?${input.gate === undefined ? "" : ` AND ${input.gate.sql}`}`,
       params: [
         fields.title,
@@ -390,6 +415,7 @@ export function fieldEditStatements(input: {
         fields.startLocal,
         fields.endLocal,
         fields.tzid,
+        fields.rrule,
         input.now,
         input.eventId,
         input.expected,

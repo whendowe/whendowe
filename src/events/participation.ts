@@ -158,6 +158,7 @@ export function partOfField(field: string): EventPart | "status" | null {
     case "endLocal":
     case "tzid":
     case "allDay":
+    case "rrule": // which dates a series falls on is its time
       return "time";
     case "status":
       return "status";

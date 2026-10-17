@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import rrulePkg from "rrule";
+
+import type { Weekday } from "rrule";
+import * as rruleModule from "rrule";
 import { Temporal } from "temporal-polyfill";
 import { z } from "zod";
 
@@ -8,11 +10,21 @@ import { z } from "zod";
 // temporal-polyfill localises each occurrence via tzid. UTC instants are derived
 // here, never stored as truth.
 //
-// rrule ships a CJS bundle; the default-import + destructure below is the one shape
-// that works at runtime in real Node ESM (cjs-module-lexer can't find named exports
-// in its webpack build), under vitest, and when bundled by wrangler.
+// rrule ships two builds, and each runtime picks a different one:
+//   - Node ESM loads the CJS `main` (a webpack bundle cjs-module-lexer can't read), so
+//     the namespace has only `default` = module.exports;
+//   - workerd (vite in tests, esbuild in wrangler) loads the ESM `module`, which has
+//     only NAMED exports — `import x from "rrule"` is undefined there.
+// A namespace import plus this guard is the one shape that works in both; the workers
+// contract tests are what proves the second.
+function isRRuleModule(value: unknown): value is Pick<typeof rruleModule, "RRule"> {
+  return (
+    typeof value === "object" && value !== null && typeof Reflect.get(value, "RRule") === "function"
+  );
+}
+const rrulePkg = isRRuleModule(rruleModule) ? rruleModule : Reflect.get(rruleModule, "default");
+if (!isRRuleModule(rrulePkg)) throw new Error("the rrule package exports no RRule");
 const { RRule } = rrulePkg;
-type Weekday = InstanceType<typeof rrulePkg.Weekday>;
 
 // ---------------------------------------------------------------------------
 // Validated RRULE subset (§10): FREQ in {DAILY,WEEKLY,MONTHLY,YEARLY}, INTERVAL,
@@ -169,6 +181,36 @@ function toByWeekday(byday: readonly string[]): Weekday[] {
   });
 }
 
+function toRRule(input: ExpandInput, rrule: string): InstanceType<typeof RRule> {
+  const rule = parseRRule(rrule);
+  return new RRule({
+    freq: FREQ_MAP[rule.freq],
+    dtstart: toNaive(input.startLocal),
+    interval: rule.interval ?? 1,
+    byweekday: rule.byday === undefined ? null : toByWeekday(rule.byday),
+    count: rule.count ?? null,
+    until: rule.until === undefined ? null : toNaive(rule.until),
+  });
+}
+
+function localise(
+  occStart: Temporal.PlainDateTime,
+  duration: Temporal.Duration,
+  tzid: string | null,
+): Occurrence {
+  const occEnd = occStart.add(duration);
+  const utc = (t: Temporal.PlainDateTime) =>
+    tzid === null
+      ? null
+      : t.toZonedDateTime(tzid, { disambiguation: "compatible" }).toInstant().toString();
+  return {
+    startLocal: occStart.toString(),
+    endLocal: occEnd.toString(),
+    startUtc: utc(occStart),
+    endUtc: utc(occEnd),
+  };
+}
+
 /**
  * Expand an event into its first `limit` occurrences (capped at MAX_OCCURRENCES).
  *
@@ -188,41 +230,62 @@ export function expandOccurrences(input: ExpandInput, limit: number): Occurrence
   const duration = start.until(Temporal.PlainDateTime.from(input.endLocal));
   const exdates = new Set(input.exdates);
 
-  let starts: Temporal.PlainDateTime[];
-  if (input.rrule === null) {
-    starts = [start];
-  } else {
-    const rule = parseRRule(input.rrule);
-    const rrule = new RRule({
-      freq: FREQ_MAP[rule.freq],
-      dtstart: toNaive(input.startLocal),
-      interval: rule.interval ?? 1,
-      byweekday: rule.byday === undefined ? null : toByWeekday(rule.byday),
-      count: rule.count ?? null,
-      until: rule.until === undefined ? null : toNaive(rule.until),
-    });
-    starts = rrule.all((_, i) => i < cap).map((d) => Temporal.PlainDateTime.from(fromNaive(d)));
-  }
+  const starts =
+    input.rrule === null
+      ? [start]
+      : toRRule(input, input.rrule)
+          .all((_, i) => i < cap)
+          .map((d) => Temporal.PlainDateTime.from(fromNaive(d)));
 
   const occurrences: Occurrence[] = [];
   for (const occStart of starts) {
     if (occurrences.length >= cap) break;
-    const startLocal = occStart.toString();
-    if (exdates.has(startLocal)) continue;
-    const occEnd = occStart.add(duration);
-    let startUtc: string | null = null;
-    let endUtc: string | null = null;
-    if (input.tzid !== null) {
-      startUtc = occStart
-        .toZonedDateTime(input.tzid, { disambiguation: "compatible" })
-        .toInstant()
-        .toString();
-      endUtc = occEnd
-        .toZonedDateTime(input.tzid, { disambiguation: "compatible" })
-        .toInstant()
-        .toString();
-    }
-    occurrences.push({ startLocal, endLocal: occEnd.toString(), startUtc, endUtc });
+    if (exdates.has(occStart.toString())) continue;
+    occurrences.push(localise(occStart, duration, input.tzid));
   }
   return occurrences;
+}
+
+/**
+ * How many series starts upcomingOccurrences will walk, however old the series: rrule
+ * iterates from DTSTART, so this bounds the CPU a page view can spend (a Worker has
+ * ~10ms). 2000 covers a weekly series for 38 years or a daily one for 5½.
+ */
+export const MAX_SCAN = 2000;
+
+/**
+ * The next `limit` occurrences (capped at MAX_OCCURRENCES) that haven't ended by
+ * `fromLocal` — a wall-clock time in the series' own zone — for "what's coming up".
+ * Walks from the series start; past MAX_SCAN starts it returns what it found (perhaps
+ * nothing) rather than spend unbounded work.
+ */
+export function upcomingOccurrences(
+  input: ExpandInput,
+  fromLocal: string,
+  limit: number,
+): Occurrence[] {
+  if (!Number.isInteger(limit) || limit < 1) {
+    throw new Error(`limit must be a positive integer, got ${limit}`);
+  }
+  const cap = Math.min(limit, MAX_OCCURRENCES);
+  const start = Temporal.PlainDateTime.from(input.startLocal);
+  const duration = start.until(Temporal.PlainDateTime.from(input.endLocal));
+  const exdates = new Set(input.exdates);
+  // The scan compares naive epoch numbers — the same wall-clock arithmetic rrule
+  // iterates in — and builds Temporal values only for what it keeps: a polyfilled
+  // Temporal per step costs ~0.15ms, which a Worker's CPU budget can't pay 20k times.
+  const lengthMs = toNaive(input.endLocal).getTime() - toNaive(input.startLocal).getTime();
+  const fromMs = toNaive(fromLocal).getTime();
+  const found: Occurrence[] = [];
+  const consider = (d: Date): boolean => {
+    if (d.getTime() + lengthMs > fromMs) {
+      const occStart = Temporal.PlainDateTime.from(fromNaive(d));
+      if (!exdates.has(occStart.toString())) found.push(localise(occStart, duration, input.tzid));
+    }
+    return found.length < cap;
+  };
+
+  if (input.rrule === null) consider(toNaive(input.startLocal));
+  else toRRule(input, input.rrule).all((d, i) => i < MAX_SCAN && consider(d));
+  return found;
 }

@@ -11,6 +11,7 @@ import {
   listHistory,
 } from "../../src/events/event.js";
 import { listParticipants } from "../../src/events/participation.js";
+import { acknowledge, listRequests } from "../../src/events/response.js";
 import { createGroup, findGroupForMember, type GroupMembership } from "../../src/people/group.js";
 import { acceptInvite, createInvite } from "../../src/people/invite.js";
 import { findOrCreatePerson } from "../../src/people/person.js";
@@ -323,6 +324,100 @@ export function runEventsContract(makePort: () => Promise<StoragePort>): void {
       ]);
       const outsider = await findOrCreatePerson(port, "ev-list-outsider@example.org", { now: T0 });
       expect(await listGroupEvents(port, groupMembership, outsider.id)).toEqual([]);
+    });
+  });
+
+  describe("series (slice 2E-3)", () => {
+    const WEEKLY = { ...GAME_NIGHT, rrule: "FREQ=WEEKLY;UNTIL=21011231" };
+
+    it("stores a whole series with its rule in canonical form, round-tripped", async () => {
+      const port = await makePort();
+      const { dm } = await table(port, "series");
+      const event = await createEvent(port, {
+        creatorId: dm.id,
+        group: null,
+        fields: WEEKLY,
+        now: T0,
+      });
+      expect(event.rrule).toBe("FREQ=WEEKLY;UNTIL=21011231T235959");
+      expect((await access(port, event.id, dm.id)).event.rrule).toBe(
+        "FREQ=WEEKLY;UNTIL=21011231T235959",
+      );
+      const single = await createEvent(port, {
+        creatorId: dm.id,
+        group: null,
+        fields: GAME_NIGHT,
+        now: T0,
+      });
+      expect((await access(port, single.id, dm.id)).event.rrule).toBeNull();
+    });
+
+    it("refuses rules outside the subset, and a series with nothing in it", async () => {
+      const port = await makePort();
+      const { dm } = await table(port, "badrule");
+      const make = (rrule: string) =>
+        createEvent(port, {
+          creatorId: dm.id,
+          group: null,
+          fields: { ...GAME_NIGHT, rrule },
+          now: T0,
+        });
+      await expect(make("FREQ=HOURLY")).rejects.toThrow(/isn't supported/);
+      await expect(make("FREQ=WEEKLY;BYSETPOS=1")).rejects.toThrow(/isn't supported/);
+      await expect(make("FREQ=WEEKLY;UNTIL=21011001")).rejects.toThrow(/after its first date/);
+    });
+
+    it("an all-day series works on bare dates", async () => {
+      const port = await makePort();
+      const { dm } = await table(port, "allday-series");
+      const event = await createEvent(port, {
+        creatorId: dm.id,
+        group: null,
+        fields: {
+          ...GAME_NIGHT,
+          allDay: true,
+          startLocal: "2101-10-24",
+          endLocal: "2101-10-25",
+          tzid: null,
+          rrule: "FREQ=YEARLY;COUNT=3",
+        },
+        now: T0,
+      });
+      expect(event.rrule).toBe("FREQ=YEARLY;COUNT=3");
+    });
+
+    it("changing the rule edits the whole series: logged, and material", async () => {
+      const port = await makePort();
+      const { dm, membership, playerId } = await table(port, "rule-edit");
+      const event = await createEvent(port, {
+        creatorId: dm.id,
+        group: membership,
+        fields: WEEKLY,
+        now: T0,
+        requests: new Map([[playerId, "ack"]]),
+      });
+      await acknowledge(port, await access(port, event.id, playerId), { now: T0 });
+
+      const edited = await editEvent(port, await access(port, event.id, dm.id), {
+        fields: { ...WEEKLY, rrule: "FREQ=WEEKLY;INTERVAL=2" },
+        actorId: dm.id,
+        now: T1,
+      });
+      expect(edited.kind).toBe("updated");
+      const [latest] = await listHistory(port, await access(port, event.id, dm.id));
+      expect(latest?.change).toEqual({
+        rrule: { before: "FREQ=WEEKLY;UNTIL=21011231T235959", after: "FREQ=WEEKLY;INTERVAL=2" },
+      });
+      const [request] = await listRequests(port, await access(port, event.id, dm.id));
+      expect(request?.state).toBe("reack");
+
+      // Back to a single event: the rule is cleared, not left behind.
+      await editEvent(port, await access(port, event.id, dm.id), {
+        fields: GAME_NIGHT,
+        actorId: dm.id,
+        now: T1,
+      });
+      expect((await access(port, event.id, dm.id)).event.rrule).toBeNull();
     });
   });
 }

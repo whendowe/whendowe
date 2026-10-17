@@ -51,6 +51,12 @@ import {
 import { MailCapReachedError } from "../../mail/capped.js";
 import type { MailPort } from "../../mail/port.js";
 import { findGroupForMember, type GroupMembership, listMembers } from "../../people/group.js";
+import {
+  formatRRule,
+  parseRRule,
+  type RRuleSubset,
+  upcomingOccurrences,
+} from "../../recurrence.js";
 import { type Html, html, renderPage } from "../layout.js";
 import { type AppEnv, requireSignedIn, verifyFormCsrf } from "../session.js";
 import { sendResponseLink } from "./respond.js";
@@ -119,6 +125,75 @@ function statusBadge(access: EventAccess): Html | string {
   return text === "" ? "" : html` <span class="muted">(${text})</span>`;
 }
 
+// --- Series (slice 2E-3) ---------------------------------------------------------------
+
+const UNIT: Record<RRuleSubset["freq"], string> = {
+  DAILY: "day",
+  WEEKLY: "week",
+  MONTHLY: "month",
+  YEARLY: "year",
+};
+const WEEKDAY: Record<string, string> = {
+  MO: "Monday",
+  TU: "Tuesday",
+  WE: "Wednesday",
+  TH: "Thursday",
+  FR: "Friday",
+  SA: "Saturday",
+  SU: "Sunday",
+};
+const ORDINAL: Record<string, string> = {
+  "1": "first",
+  "2": "second",
+  "3": "third",
+  "4": "fourth",
+  "-1": "last",
+  "-2": "second to last",
+  "-3": "third to last",
+  "-4": "fourth to last",
+};
+
+/** "Every 2 weeks on Tuesday, Thursday, until 2102-06-30" — a stored rule, in words. */
+export function describeRRule(rrule: string): string {
+  let rule: RRuleSubset;
+  try {
+    rule = parseRRule(rrule);
+  } catch {
+    return "Repeats";
+  }
+  const n = rule.interval ?? 1;
+  const unit = UNIT[rule.freq];
+  const days = (rule.byday ?? []).map((entry) => {
+    const m = /^(-?\d)?([A-Z]{2})$/.exec(entry);
+    const day = WEEKDAY[m?.[2] ?? ""] ?? entry;
+    return m?.[1] === undefined ? day : `the ${ORDINAL[m[1]] ?? m[1]} ${day}`;
+  });
+  return [
+    n === 1 ? `Every ${unit}` : `Every ${n} ${unit}s`,
+    days.length === 0 ? "" : ` on ${days.join(", ")}`,
+    rule.count === undefined ? "" : `, ${rule.count} times`,
+    rule.until === undefined ? "" : `, until ${rule.until.slice(0, 10)}`,
+  ].join("");
+}
+
+/** The next few dates of a series, from `now`, in the series' own zone. */
+function nextDates(event: CanonicalEvent, now: string, count: number): string[] {
+  if (event.rrule === null) return [];
+  const fromLocal = Temporal.Instant.from(now)
+    .toZonedDateTimeISO(event.tzid ?? "UTC")
+    .toPlainDateTime()
+    .toString();
+  return upcomingOccurrences({ ...event, exdates: [] }, fromLocal, count).map((o) =>
+    formatWhen({
+      allDay: event.allDay,
+      tzid: event.tzid,
+      // An all-day occurrence comes back as midnight; show it as the date it is.
+      startLocal: event.allDay ? o.startLocal.slice(0, 10) : o.startLocal,
+      endLocal: event.allDay ? o.endLocal.slice(0, 10) : o.endLocal,
+    }),
+  );
+}
+
 /** One line for a list, at the viewer's tier. */
 export function eventSummary(access: EventAccess): Html {
   const { event, participation } = access;
@@ -126,7 +201,8 @@ export function eventSummary(access: EventAccess): Html {
   // An open poll's own time is only a placeholder: never show it as "the" time.
   const when =
     isPoll(access) && event.status === "proposed" ? "voting on a time" : formatWhen(event);
-  return html`<a href="${EVENTS_PATH}/${event.id}">${title}</a>${statusBadge(access)} <span class="muted">· ${when}</span>`;
+  const repeats = event.rrule === null ? "" : ` · ↻ ${describeRRule(event.rrule)}`;
+  return html`<a href="${EVENTS_PATH}/${event.id}">${title}</a>${statusBadge(access)} <span class="muted">· ${when}${repeats}</span>`;
 }
 
 interface FormValues {
@@ -138,6 +214,15 @@ interface FormValues {
   readonly start: string;
   readonly end: string;
   readonly tzid: string;
+  /** A rule without its UNTIL ("" = doesn't repeat), and that UNTIL as a date. */
+  readonly repeat: string;
+  readonly until: string;
+}
+
+function repeatValues(rrule: string | null): Pick<FormValues, "repeat" | "until"> {
+  if (rrule === null) return { repeat: "", until: "" };
+  const { until, ...rest } = parseRRule(rrule);
+  return { repeat: formatRRule(rest), until: until?.slice(0, 10) ?? "" };
 }
 
 function valuesFrom(event: CanonicalEvent): FormValues {
@@ -153,6 +238,7 @@ function valuesFrom(event: CanonicalEvent): FormValues {
     start: event.allDay ? `${event.startLocal}T00:00` : event.startLocal.slice(0, 16),
     end,
     tzid: event.tzid ?? "",
+    ...repeatValues(event.rrule),
   };
 }
 
@@ -188,12 +274,21 @@ function readForm(form: Record<string, unknown>): FormValues {
     start: str(form, "start"),
     end: str(form, "end"),
     tzid: str(form, "tzid"),
+    repeat: str(form, "repeat"),
+    until: str(form, "until"),
   };
+}
+
+/** "Until" is the last day: the rule's UNTIL is that day's end, local (§10). */
+function toRRuleText(v: FormValues): string | null {
+  if (v.repeat === "") return null;
+  return v.until === "" ? v.repeat : `${v.repeat};UNTIL=${v.until.replaceAll("-", "")}T235959`;
 }
 
 /** Form values → domain input. All-day: date parts, end made EXCLUSIVE (+1 day). */
 function toFields(v: FormValues): EventFieldsInput {
   const text = (s: string) => (s.trim() === "" ? null : s);
+  const rrule = toRRuleText(v);
   if (v.allDay) {
     const startDate = v.start.slice(0, 10);
     let endExclusive = v.end.slice(0, 10);
@@ -210,6 +305,7 @@ function toFields(v: FormValues): EventFieldsInput {
       startLocal: startDate,
       endLocal: endExclusive,
       tzid: null,
+      rrule,
     };
   }
   return {
@@ -220,6 +316,7 @@ function toFields(v: FormValues): EventFieldsInput {
     startLocal: v.start,
     endLocal: v.end,
     tzid: v.tzid === "" ? null : v.tzid,
+    rrule,
   };
 }
 
@@ -233,6 +330,30 @@ function zoneOptions(): Html {
   const zones =
     typeof Intl.supportedValuesOf === "function" ? Intl.supportedValuesOf("timeZone") : [];
   return html`<datalist id="zones">${zones.map((z) => html`<option value="${z}"></option>`)}</datalist>`;
+}
+
+const REPEATS: readonly (readonly [string, string])[] = [
+  ["", "Doesn't repeat"],
+  ["FREQ=DAILY", "Every day"],
+  ["FREQ=WEEKLY", "Every week"],
+  ["FREQ=WEEKLY;INTERVAL=2", "Every 2 weeks"],
+  ["FREQ=MONTHLY", "Every month"],
+  ["FREQ=YEARLY", "Every year"],
+];
+
+/**
+ * The whole series is edited at once (DESIGN §10 rc13). A rule the presets don't cover
+ * — one that came from a calendar — is offered as itself, so saving keeps it.
+ */
+function repeatInputs(v: FormValues): Html {
+  const options: (readonly [string, string])[] = REPEATS.some(([value]) => value === v.repeat)
+    ? [...REPEATS]
+    : [...REPEATS, [v.repeat, describeRRule(v.repeat)]];
+  return html`<p><label>Repeats<br /><select name="repeat">${options.map(
+    ([value, label]) =>
+      html`<option value="${value}" ${value === v.repeat ? html`selected` : ""}>${label}</option>`,
+  )}</select></label>
+  <label>until <span class="muted">(optional, the last day)</span> <input type="date" name="until" value="${v.until}" /></label></p>`;
 }
 
 function eventForm(
@@ -255,6 +376,7 @@ function eventForm(
   <p><label>Ends <span class="muted">(for all-day events: the last day)</span><br /><input type="datetime-local" name="end" required value="${v.end}" /></label></p>
   <p><label>Time zone<br /><input id="tzid" name="tzid" list="zones" value="${v.tzid}" placeholder="Europe/Prague" /></label></p>
   ${zoneOptions()}
+  ${repeatInputs(v)}
   ${canSee(vis, "description") ? html`<p><label>Notes <span class="muted">(only people who see full details see these)</span><br /><textarea name="description" rows="4" style="width:100%">${v.description}</textarea></label></p>` : ""}
   <p><button type="submit">${submit}</button></p>
 </form>
@@ -311,6 +433,8 @@ const EMPTY: FormValues = {
   start: "",
   end: "",
   tzid: "",
+  repeat: "",
+  until: "",
 };
 
 // --- Time polls (slice 2C) ----------------------------------------------------------
@@ -588,7 +712,8 @@ function editHeading(proposing: boolean): Html {
     : html`<h1>Edit event</h1>`;
 }
 
-function renderHistoryValue(v: string | number | null): string {
+function renderHistoryValue(field: string, v: string | number | null): string {
+  if (field === "rrule") return v === null ? "doesn't repeat" : describeRRule(String(v));
   return v === null ? "—" : String(v);
 }
 
@@ -601,7 +726,7 @@ function changeList(
     .filter(([field]) => canSeeField(vis, field))
     .map(
       ([field, c]) =>
-        html`<li>${field}: ${renderHistoryValue(c.before)} → ${renderHistoryValue(c.after)}</li>`,
+        html`<li>${field}: ${renderHistoryValue(field, c.before)} → ${renderHistoryValue(field, c.after)}</li>`,
     )}</ul>`;
 }
 
@@ -645,6 +770,17 @@ ${button(event.id, "proposal/withdraw", csrf, "Withdraw my proposal", { proposal
   return html`<h2>Proposed changes</h2>${forEditor.length === 0 ? "" : html`<ul>${forEditor}</ul>`}${own}`;
 }
 
+/** How a series repeats and its next dates — time, so every tier that sees the event. */
+function seriesSection(event: CanonicalEvent, now: string): Html | string {
+  if (event.rrule === null) return "";
+  const next = event.status === "scheduled" ? nextDates(event, now, 5) : [];
+  return html`<p>↻ ${describeRRule(event.rrule)}</p>${
+    next.length === 0
+      ? ""
+      : html`<p class="muted">Next:</p><ul>${next.map((d) => html`<li>${d}</li>`)}</ul>`
+  }`;
+}
+
 async function eventPage(
   deps: EventRouteDeps,
   access: EventAccess,
@@ -672,6 +808,7 @@ async function eventPage(
 <h1>${see("title") ? event.title : BUSY_LABEL}${statusBadge(access)}</h1>
 ${notice === null ? "" : html`<p class="error">${notice}</p>`}
 ${poll === null ? html`<p>${formatWhen(event)}</p>` : pollSection(access, poll, csrf, see("participants"))}
+${seriesSection(event, deps.now())}
 ${see("location") && event.location !== null ? html`<p>📍 ${event.location}</p>` : ""}
 ${see("description") && event.description !== null ? html`<p style="white-space:pre-wrap">${event.description}</p>` : ""}
 ${
@@ -705,7 +842,7 @@ ${await responsesSection(deps, access, csrf)}
         }${
           h.revision === 1
             ? ""
-            : html`<ul>${h.fields.map(([field, c]) => html`<li>${field}: ${renderHistoryValue(c.before)} → ${renderHistoryValue(c.after)}</li>`)}</ul>`
+            : html`<ul>${h.fields.map(([field, c]) => html`<li>${field}: ${renderHistoryValue(field, c.before)} → ${renderHistoryValue(field, c.after)}</li>`)}</ul>`
         }</li>`,
     )}</ul>`,
   );

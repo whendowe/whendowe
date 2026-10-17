@@ -1070,3 +1070,94 @@ it("a pending proposal is shown at the editor's own tier", async () => {
   expect(page).toContain("location: Ann&#39;s place → Park");
   expect(page).not.toContain("SECRET-NOTE");
 });
+
+// --- recurring series (slice 2E-3) ---------------------------------------------------
+
+it("a weekly series: described in words, its next dates listed, editable as a whole", async () => {
+  const h = await harness();
+  const { dm, group } = await setup(h);
+  const event = await createVia(h, dm, group, {
+    ...NIGHT,
+    repeat: "FREQ=WEEKLY",
+    until: "2101-12-31",
+  });
+  const page = await text(h, event, dm);
+  expect(page).toContain("↻ Every week, until 2101-12-31");
+  expect(page).toMatch(
+    /Next:<\/p><ul><li>2101-10-20 19:00 – 23:00 · Europe\/Prague<\/li><li>2101-10-27 19:00/,
+  );
+  expect(await text(h, group, dm)).toContain("↻ Every week, until 2101-12-31");
+
+  const form = await text(h, `${event}/edit`, dm);
+  expect(form).toContain('<option value="FREQ=WEEKLY" selected>');
+  expect(form).toContain('name="until" value="2101-12-31"');
+
+  // Every 2 weeks, open-ended; then back to a single event.
+  expect(
+    (await submitEdit(h, event, dm, { ...NIGHT, repeat: "FREQ=WEEKLY;INTERVAL=2" })).status,
+  ).toBe(303);
+  const after = await text(h, event, dm);
+  expect(after).toContain("↻ Every 2 weeks");
+  expect(after).toContain("2101-11-03 19:00");
+  expect(after).not.toContain("2101-10-27 19:00");
+  expect(after).toContain("rrule: Every week, until 2101-12-31 → Every 2 weeks");
+  expect((await submitEdit(h, event, dm, { ...NIGHT, repeat: "" })).status).toBe(303);
+  const single = await text(h, event, dm);
+  expect(single).not.toContain("↻");
+  expect(single).toContain("rrule: Every 2 weeks → doesn&#39;t repeat");
+});
+
+it("a series is time: BUSY sees when it repeats, never what it is", async () => {
+  const h = await harness();
+  const { dm, group } = await setup(h);
+  const gran = await join(h, dm, group, "gran@example.org", "view", "BUSY");
+  const event = await createVia(h, dm, group, { ...NIGHT, repeat: "FREQ=MONTHLY" });
+  await submitEdit(h, event, dm, { ...NIGHT, repeat: "FREQ=YEARLY" });
+  const page = await text(h, event, gran);
+  expect(page).toContain("↻ Every year");
+  expect(page).toContain("2102-10-20 19:00");
+  expect(page).toContain("rrule: Every month → Every year"); // in her history too
+  expect(page).not.toContain("Sunken Keep");
+});
+
+it("a rule the presets don't cover is offered as itself, and kept on save", async () => {
+  const h = await harness();
+  const { dm, group } = await setup(h);
+  const event = await createVia(h, dm, group, { ...NIGHT, repeat: "FREQ=WEEKLY;BYDAY=TU,TH" });
+  expect(await text(h, event, dm)).toContain("↻ Every week on Tuesday, Thursday");
+  const form = await text(h, `${event}/edit`, dm);
+  expect(form).toContain(
+    '<option value="FREQ=WEEKLY;BYDAY=TU,TH" selected>Every week on Tuesday, Thursday</option>',
+  );
+  await submitEdit(h, event, dm, {
+    ...NIGHT,
+    title: "Renamed",
+    repeat: "FREQ=WEEKLY;BYDAY=TU,TH",
+  });
+  const page = await text(h, event, dm);
+  expect(page).toContain("Renamed");
+  expect(page).toContain("↻ Every week on Tuesday, Thursday");
+
+  // Cancelled: still says how it repeated, but lists no dates that won't happen.
+  await act(h, event, dm, "cancel");
+  const cancelled = await text(h, event, dm);
+  expect(cancelled).toContain("↻ Every week on Tuesday, Thursday");
+  expect(cancelled).not.toContain("Next:");
+});
+
+it("refuses an unsupported rule and a series that ends before it starts", async () => {
+  const h = await harness();
+  const { dm, group } = await setup(h);
+  const bad = async (fields: Record<string, string>) => {
+    const res = await h.app.request(
+      `${group}/events`,
+      post({ csrf: dm.csrf, ...NIGHT, ...fields }, dm.cookie),
+    );
+    expect(res.status).toBe(400);
+    return res.text();
+  };
+  expect(await bad({ repeat: "FREQ=HOURLY" })).toContain("isn&#39;t supported");
+  expect(await bad({ repeat: "FREQ=WEEKLY", until: "2101-10-01" })).toContain(
+    "must end after its first date",
+  );
+});

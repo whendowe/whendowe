@@ -4,7 +4,9 @@ import {
   expandOccurrences,
   formatRRule,
   MAX_OCCURRENCES,
+  MAX_SCAN,
   parseRRule,
+  upcomingOccurrences,
 } from "../../src/recurrence.js";
 
 describe("parseRRule — validated subset boundary (§10)", () => {
@@ -184,5 +186,52 @@ describe("expandOccurrences — DST correctness by construction (§9/§10)", () 
     expect(expandOccurrences(input, 7)).toHaveLength(7);
     expect(expandOccurrences(input, 10_000)).toHaveLength(MAX_OCCURRENCES);
     expect(() => expandOccurrences(input, 0)).toThrow(/positive integer/);
+  });
+});
+
+describe("upcomingOccurrences — what's coming up, however old the series", () => {
+  const weekly = {
+    startLocal: "2026-01-05T19:00:00",
+    endLocal: "2026-01-05T21:00:00",
+    tzid: "Europe/Prague",
+    rrule: "FREQ=WEEKLY",
+    exdates: [],
+  };
+
+  it("skips what has ended and returns the next ones, in order", () => {
+    const next = upcomingOccurrences(weekly, "2026-03-01T12:00:00", 3);
+    expect(next.map((o) => o.startLocal)).toEqual([
+      "2026-03-02T19:00:00",
+      "2026-03-09T19:00:00",
+      "2026-03-16T19:00:00",
+    ]);
+  });
+
+  it("an occurrence still under way counts as upcoming", () => {
+    const [now] = upcomingOccurrences(weekly, "2026-03-02T20:00:00", 1);
+    expect(now?.startLocal).toBe("2026-03-02T19:00:00");
+  });
+
+  it("respects exdates, the end of the rule, and single events", () => {
+    const next = upcomingOccurrences(
+      { ...weekly, rrule: "FREQ=WEEKLY;COUNT=3", exdates: ["2026-01-12T19:00:00"] },
+      "2026-01-01T00:00:00",
+      10,
+    );
+    expect(next.map((o) => o.startLocal)).toEqual(["2026-01-05T19:00:00", "2026-01-19T19:00:00"]);
+    expect(
+      upcomingOccurrences({ ...weekly, rrule: "FREQ=WEEKLY;COUNT=3" }, "2027-01-01T00:00:00", 5),
+    ).toEqual([]);
+    expect(upcomingOccurrences({ ...weekly, rrule: null }, "2026-01-01T00:00:00", 5)).toHaveLength(
+      1,
+    );
+    expect(upcomingOccurrences({ ...weekly, rrule: null }, "2026-02-01T00:00:00", 5)).toEqual([]);
+  });
+
+  it(`walks at most MAX_SCAN (${MAX_SCAN}) starts: bounded work for any series`, () => {
+    const daily = { ...weekly, rrule: "FREQ=DAILY" };
+    // 2000 days from 2026-01-05 is 2031-06-28: past it, nothing, rather than unbounded work.
+    expect(upcomingOccurrences(daily, "2031-07-01T00:00:00", 1)).toEqual([]);
+    expect(upcomingOccurrences(daily, "2031-06-01T00:00:00", 1)).toHaveLength(1);
   });
 });
