@@ -174,7 +174,7 @@ ${createForm(me.csrfToken, "", null)}`,
 <h1>${membership.group.name}</h1>
 <h2>Events</h2>
 ${events.length === 0 ? html`<p class="muted">Nothing planned yet.</p>` : html`<ul>${events.map((a) => html`<li>${eventSummary(a)}</li>`)}</ul>`}
-<p><a href="${GROUPS_PATH}/${membership.group.id}/events/new">+ New event</a></p>
+<p><a href="${GROUPS_PATH}/${membership.group.id}/events/new">+ New event</a> · <a href="${GROUPS_PATH}/${membership.group.id}/polls/new">+ Find a time (poll)</a></p>
 <h2>People</h2>
 <ul>${members.map(
           (m) =>

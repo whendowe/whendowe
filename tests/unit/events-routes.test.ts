@@ -336,3 +336,184 @@ it("escapes hostile titles, places and notes everywhere they appear", async () =
     expect(body).not.toContain("<img src=x");
   }
 });
+
+// --- time polls (slice 2C) ------------------------------------------------------------
+
+const POLL = {
+  title: "Session 13",
+  location: "Ann's place",
+  description: "",
+  tzid: "Europe/Prague",
+  start_0: "2101-10-22T18:00",
+  end_0: "2101-10-22T22:00",
+  start_1: "2101-10-20T19:00",
+  end_1: "2101-10-20T23:00",
+};
+
+async function startPoll(h: H, dm: Who, group: string, fields: Record<string, string> = POLL) {
+  const res = await h.app.request(`${group}/polls`, post({ csrf: dm.csrf, ...fields }, dm.cookie));
+  expect(res.status).toBe(303);
+  return res.headers.get("location") ?? "";
+}
+
+async function revisionOnPage(h: H, event: string, who: Who): Promise<string> {
+  return /name="revision" value="(\d+)"/.exec(await text(h, event, who))?.[1] ?? "";
+}
+
+it("a poll shows its options in time order, not a placeholder time, and no edit link", async () => {
+  const h = await harness();
+  const { dm, group } = await setup(h);
+  const poll = await startPoll(h, dm, group);
+  const page = await text(h, poll, dm);
+  expect(page).toContain("Voting on a time.");
+  expect(page.indexOf("2101-10-20 19:00")).toBeLessThan(page.indexOf("2101-10-22 18:00"));
+  expect(page).not.toContain(`${poll}/edit`);
+  expect(await text(h, group, dm)).toContain("voting on a time");
+  expect((await get(h, `${poll}/edit`, dm)).status).toBe(409);
+});
+
+it("refuses a poll with one option, keeping what was typed", async () => {
+  const h = await harness();
+  const { dm, group } = await setup(h);
+  const res = await h.app.request(
+    `${group}/polls`,
+    post({ csrf: dm.csrf, ...POLL, start_1: "", end_1: "" }, dm.cookie),
+  );
+  expect(res.status).toBe(400);
+  const body = await res.text();
+  expect(body).toContain("at least 2");
+  expect(body).toContain('value="2101-10-22T18:00"');
+});
+
+it("players vote, change their mind, and the DM sees who said what", async () => {
+  const h = await harness();
+  const { dm, group } = await setup(h);
+  const ann = await join(h, dm, group, "ann@example.org", "view", "FULL");
+  const poll = await startPoll(h, dm, group);
+  expect(
+    (
+      await h.app.request(
+        `${poll}/votes`,
+        post({ csrf: ann.csrf, slot_0: "no", slot_1: "yes" }, ann.cookie),
+      )
+    ).status,
+  ).toBe(303);
+  expect(
+    (await h.app.request(`${poll}/votes`, post({ csrf: ann.csrf, slot_0: "ifneedbe" }, ann.cookie)))
+      .status,
+  ).toBe(303);
+  expect(
+    (
+      await h.app.request(
+        `${poll}/votes`,
+        post({ csrf: dm.csrf, slot_0: "yes", slot_1: "yes" }, dm.cookie),
+      )
+    ).status,
+  ).toBe(303);
+
+  const page = await text(h, poll, dm);
+  expect(page).toContain("ann@example.org: If need be"); // replaced, not duplicated
+  expect(page).not.toContain("ann@example.org: No");
+  expect(page).toContain("2 yes · 0 if need be · 0 no");
+  expect(page).toContain("works for everyone"); // Thursday: both said yes
+  // Ann's own answers come back checked.
+  const annPage = await text(h, poll, ann);
+  expect(annPage).toMatch(/name="slot_1" value="yes" checked/);
+});
+
+it("a DETAILS player sees the counts but not who voted what", async () => {
+  const h = await harness();
+  const { dm, group } = await setup(h);
+  const petra = await join(h, dm, group, "petra@example.org", "view", "DETAILS");
+  const poll = await startPoll(h, dm, group);
+  await h.app.request(`${poll}/votes`, post({ csrf: dm.csrf, slot_0: "yes" }, dm.cookie));
+  const page = await text(h, poll, petra);
+  expect(page).toContain("1 yes · 0 if need be · 0 no");
+  // No voter names. (The organizer's address DOES appear once — as the author in the
+  // history, "… created it" — which is attribution, a separate policy question.)
+  expect(page).not.toContain("dm@example.org: Yes");
+  expect(page.split("dm@example.org").length - 1).toBe(1);
+  expect(page).toContain("dm@example.org created it");
+});
+
+it("the DM confirms; the event is scheduled at that time, logged, and voting is closed", async () => {
+  const h = await harness();
+  const { dm, group } = await setup(h);
+  const ann = await join(h, dm, group, "ann@example.org", "view", "FULL");
+  const poll = await startPoll(h, dm, group);
+  const revision = await revisionOnPage(h, poll, dm);
+  // Slot 1 in time order is Saturday the 22nd.
+  const res = await h.app.request(
+    `${poll}/confirm`,
+    post({ csrf: dm.csrf, revision, slot: "1" }, dm.cookie),
+  );
+  expect(res.status).toBe(303);
+
+  const page = await text(h, poll, ann);
+  expect(page).toContain("2101-10-22 18:00 – 22:00 · Europe/Prague");
+  expect(page).not.toContain("Voting on a time.");
+  expect(page).toContain("status: proposed → scheduled");
+  const late = await h.app.request(
+    `${poll}/votes`,
+    post({ csrf: ann.csrf, slot_0: "yes" }, ann.cookie),
+  );
+  expect(late.status).toBe(409);
+  expect(await late.text()).toContain("Voting has closed");
+});
+
+it("only an editor can confirm; a stale confirm button is refused", async () => {
+  const h = await harness();
+  const { dm, group } = await setup(h);
+  const ann = await join(h, dm, group, "ann@example.org", "view", "FULL");
+  const poll = await startPoll(h, dm, group);
+  expect(await text(h, poll, ann)).not.toContain("/confirm");
+  expect(
+    (
+      await h.app.request(
+        `${poll}/confirm`,
+        post({ csrf: ann.csrf, revision: "1", slot: "0" }, ann.cookie),
+      )
+    ).status,
+  ).toBe(403);
+
+  // Two tabs: the first confirms Thursday, the second (same page) tries Saturday.
+  const revision = await revisionOnPage(h, poll, dm);
+  await h.app.request(`${poll}/confirm`, post({ csrf: dm.csrf, revision, slot: "0" }, dm.cookie));
+  const second = await h.app.request(
+    `${poll}/confirm`,
+    post({ csrf: dm.csrf, revision, slot: "1" }, dm.cookie),
+  );
+  expect(second.status).toBe(409);
+  expect(await text(h, poll, dm)).toContain("2101-10-20 19:00");
+});
+
+it("poll actions require CSRF and membership", async () => {
+  const h = await harness();
+  const { dm, group } = await setup(h);
+  const poll = await startPoll(h, dm, group);
+  const stranger = await signIn(h, "stranger@example.org");
+  expect((await h.app.request(`${group}/polls`, post({ ...POLL }, dm.cookie))).status).toBe(403);
+  expect((await h.app.request(`${poll}/votes`, post({ slot_0: "yes" }, dm.cookie))).status).toBe(
+    403,
+  );
+  expect(
+    (await h.app.request(`${poll}/confirm`, post({ revision: "1", slot: "0" }, dm.cookie))).status,
+  ).toBe(403);
+  expect(
+    (
+      await h.app.request(
+        `${poll}/votes`,
+        post({ csrf: stranger.csrf, slot_0: "yes" }, stranger.cookie),
+      )
+    ).status,
+  ).toBe(404);
+  expect(
+    (
+      await h.app.request(
+        `${poll}/confirm`,
+        post({ csrf: stranger.csrf, revision: "1", slot: "0" }, stranger.cookie),
+      )
+    ).status,
+  ).toBe(404);
+  expect((await get(h, `${group}/polls/new`, stranger)).status).toBe(404);
+});

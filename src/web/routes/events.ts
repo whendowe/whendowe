@@ -13,6 +13,17 @@ import {
   listHistory,
 } from "../../events/event.js";
 import { canSee, canSeeField, listParticipants } from "../../events/participation.js";
+import {
+  type Answer,
+  answerSchema,
+  confirmCandidate,
+  createPoll,
+  MAX_CANDIDATES,
+  PollInputError,
+  type PollResults,
+  pollResults,
+  vote,
+} from "../../events/poll.js";
 import { findGroupForMember } from "../../people/group.js";
 import { type Html, html, renderPage } from "../layout.js";
 import { type AppEnv, requireSignedIn, verifyFormCsrf } from "../session.js";
@@ -62,7 +73,9 @@ export function eventSummary(access: EventAccess): Html {
   const title = canSee(participation.visibility, "title") ? event.title : BUSY_LABEL;
   const cancelled =
     event.status === "cancelled" ? html` <span class="muted">(cancelled)</span>` : "";
-  return html`<a href="${EVENTS_PATH}/${event.id}">${title}</a>${cancelled} <span class="muted">· ${formatWhen(event)}</span>`;
+  // An open poll's own time is only a placeholder: never show it as "the" time.
+  const when = event.status === "proposed" ? "voting on a time" : formatWhen(event);
+  return html`<a href="${EVENTS_PATH}/${event.id}">${title}</a>${cancelled} <span class="muted">· ${when}</span>`;
 }
 
 interface FormValues {
@@ -143,6 +156,7 @@ function toFields(v: FormValues): EventFieldsInput {
 
 function errorMessage(error: unknown): string {
   if (error instanceof ZodError) return error.issues[0]?.message ?? "Please check the form.";
+  if (error instanceof PollInputError) return error.message;
   return "Please check the form.";
 }
 
@@ -191,14 +205,140 @@ const EMPTY: FormValues = {
   tzid: "",
 };
 
+// --- Time polls (slice 2C) ----------------------------------------------------------
+
+const ANSWER_LABEL: Record<Answer, string> = { yes: "Yes", ifneedbe: "If need be", no: "No" };
+
+/**
+ * Candidates with this person's answers as one form, tallies, and — for editors — a
+ * confirm button per candidate. Names next to answers only for tiers that see the
+ * participant list; everyone sees the counts.
+ */
+function pollSection(
+  access: EventAccess,
+  poll: PollResults,
+  csrf: string,
+  showNames: boolean,
+): Html {
+  const { event, participation } = access;
+  const editor = participation.editTier === "edit";
+  const rows = poll.candidates.map((c) => {
+    const radios = answerSchema.options.map(
+      (a) =>
+        html`<label style="margin-right:.8em"><input type="radio" name="slot_${c.slotIndex}" value="${a}" ${c.mine === a ? html`checked` : ""} /> ${ANSWER_LABEL[a]}</label>`,
+    );
+    const names = showNames
+      ? html`<br /><span class="muted">${c.voters.map((v) => `${v.displayName ?? v.email}: ${ANSWER_LABEL[v.answer]}`).join(" · ")}</span>`
+      : "";
+    const everyone = poll.everyoneYes.includes(c.slotIndex)
+      ? html` <strong>· works for everyone</strong>`
+      : "";
+    return html`<li style="margin-bottom:.8em"><strong>${formatWhen(c)}</strong>${everyone}<br />
+${radios}<br /><span class="muted">${c.yes} yes · ${c.ifNeedBe} if need be · ${c.no} no</span>${names}</li>`;
+  });
+  const confirms = editor
+    ? html`<h3>Pick the time</h3><p class="muted">Confirming schedules the event at that time and closes voting.</p>
+${poll.candidates.map(
+  (
+    c,
+  ) => html`<form method="post" action="${EVENTS_PATH}/${event.id}/confirm" style="display:inline-block;margin:0 .5em .5em 0">
+  <input type="hidden" name="csrf" value="${csrf}" />
+  <input type="hidden" name="revision" value="${event.revision}" />
+  <input type="hidden" name="slot" value="${c.slotIndex}" />
+  <button type="submit">Confirm ${formatWhen(c)}</button>
+</form>`,
+)}`
+    : "";
+  return html`<p><strong>Voting on a time.</strong> ${poll.electorate} ${poll.electorate === 1 ? "person" : "people"} can answer.</p>
+<form method="post" action="${EVENTS_PATH}/${event.id}/votes">
+  <input type="hidden" name="csrf" value="${csrf}" />
+  <ul style="list-style:none;padding-left:0">${rows}</ul>
+  <p><button type="submit">Save my answers</button></p>
+</form>
+${confirms}`;
+}
+
+interface PollFormValues extends FormValues {
+  readonly slots: readonly { readonly start: string; readonly end: string }[];
+}
+
+const POLL_ROWS = 5;
+
+function readPollForm(form: Record<string, unknown>): PollFormValues {
+  const slots = Array.from({ length: MAX_CANDIDATES }, (_, i) => ({
+    start: str(form, `start_${i}`),
+    end: str(form, `end_${i}`),
+  }));
+  return { ...readForm(form), slots };
+}
+
+function pollForm(action: string, csrf: string, v: PollFormValues, error: string | null): Html {
+  const shown = Math.max(POLL_ROWS, v.slots.filter((s) => s.start !== "" || s.end !== "").length);
+  const slots = Array.from(
+    { length: Math.min(shown, MAX_CANDIDATES) },
+    (_, i) => v.slots[i] ?? { start: "", end: "" },
+  );
+  return html`${error === null ? "" : html`<p class="error">${error}</p>`}
+<form method="post" action="${action}">
+  <input type="hidden" name="csrf" value="${csrf}" />
+  <p><label>What<br /><input name="title" required maxlength="200" value="${v.title}" style="width:100%" /></label></p>
+  <p><label>Where<br /><input name="location" maxlength="500" value="${v.location}" style="width:100%" /></label></p>
+  <p><label><input type="checkbox" name="allDay" ${v.allDay ? html`checked` : ""} /> All-day options</label></p>
+  <p><label>Time zone<br /><input id="tzid" name="tzid" list="zones" value="${v.tzid}" placeholder="Europe/Prague" /></label></p>
+  ${zoneOptions()}
+  <h2>Options</h2>
+  <p class="muted">Offer at least two. Leave the rows you don't need empty. For all-day options, "ends" is the last day.</p>
+  ${slots.map(
+    (
+      slot,
+      i,
+    ) => html`<p><label>Starts <input type="datetime-local" name="start_${i}" value="${slot.start}" /></label>
+  <label>Ends <input type="datetime-local" name="end_${i}" value="${slot.end}" /></label></p>`,
+  )}
+  <p><label>Notes <span class="muted">(only people who see full details see these)</span><br /><textarea name="description" rows="3" style="width:100%">${v.description}</textarea></label></p>
+  <p><button type="submit">Start the poll</button></p>
+</form>
+<script>
+  var tz = document.getElementById("tzid");
+  if (tz && !tz.value) tz.value = Intl.DateTimeFormat().resolvedOptions().timeZone;
+</script>`;
+}
+
+/** Poll form → domain input: shared fields once, a time pair per filled row. */
+function toPollInput(v: PollFormValues) {
+  const filled = v.slots.filter((s) => s.start !== "" || s.end !== "");
+  const times = filled.map((s) => {
+    const f = toFields({ ...v, start: s.start, end: s.end });
+    return { startLocal: f.startLocal, endLocal: f.endLocal };
+  });
+  const base = toFields({ ...v, start: "", end: "" });
+  return {
+    fields: {
+      title: base.title,
+      description: base.description,
+      location: base.location,
+      allDay: base.allDay,
+      tzid: base.tzid,
+    },
+    candidates: times,
+  };
+}
+
 function renderHistoryValue(v: string | number | null): string {
   return v === null ? "—" : String(v);
 }
 
-async function eventPage(deps: EventRouteDeps, access: EventAccess): Promise<string> {
+async function eventPage(
+  deps: EventRouteDeps,
+  access: EventAccess,
+  csrf: string,
+  notice: string | null = null,
+): Promise<string> {
   const { event, participation } = access;
   const vis = participation.visibility;
   const see = (part: Parameters<typeof canSee>[1]) => canSee(vis, part);
+  const voting = event.status === "proposed";
+  const poll = voting ? await pollResults(deps.storage, access) : null;
 
   const people = see("participants") ? await listParticipants(deps.storage, event.id) : [];
   const history = (await listHistory(deps.storage, access))
@@ -213,10 +353,11 @@ async function eventPage(deps: EventRouteDeps, access: EventAccess): Promise<str
     see("title") ? event.title : BUSY_LABEL,
     html`<p>${event.groupId === null ? html`<a href="/groups">← Your groups</a>` : html`<a href="/groups/${event.groupId}">← Back to the group</a>`}</p>
 <h1>${see("title") ? event.title : BUSY_LABEL}${event.status === "cancelled" ? html` <span class="muted">(cancelled)</span>` : ""}</h1>
-<p>${formatWhen(event)}</p>
+${notice === null ? "" : html`<p class="error">${notice}</p>`}
+${poll === null ? html`<p>${formatWhen(event)}</p>` : pollSection(access, poll, csrf, see("participants"))}
 ${see("location") && event.location !== null ? html`<p>📍 ${event.location}</p>` : ""}
 ${see("description") && event.description !== null ? html`<p style="white-space:pre-wrap">${event.description}</p>` : ""}
-${participation.editTier === "edit" ? html`<p><a href="${EVENTS_PATH}/${event.id}/edit">Edit</a></p>` : ""}
+${participation.editTier === "edit" && !voting ? html`<p><a href="${EVENTS_PATH}/${event.id}/edit">Edit</a></p>` : ""}
 ${
   people.length === 0
     ? ""
@@ -288,7 +429,7 @@ ${eventForm(`/groups/${membership.group.id}/events`, me.csrfToken, values, "", e
     // HIDDEN means "no projection at all" (WORKFLOWS §3): indistinguishable from absent.
     if (access === null || access.participation.visibility === "HIDDEN")
       return c.html(notFound(), 404);
-    return c.html(await eventPage(deps, access));
+    return c.html(await eventPage(deps, access, me.csrfToken));
   });
 
   app.get(`${EVENTS_PATH}/:id/edit`, async (c) => {
@@ -299,6 +440,14 @@ ${eventForm(`/groups/${membership.group.id}/events`, me.csrfToken, values, "", e
       return c.html(notFound(), 404);
     if (access.participation.editTier !== "edit")
       return c.html(renderPage("Not allowed", html`<h1>You can't edit this event</h1>`), 403);
+    if (access.event.status === "proposed")
+      return c.html(
+        renderPage(
+          "Voting open",
+          html`<h1>Voting is still open</h1><p>Its time is chosen by confirming one of the options. <a href="${EVENTS_PATH}/${access.event.id}">Back to the poll</a></p>`,
+        ),
+        409,
+      );
     const { event } = access;
     return c.html(
       renderPage(
@@ -360,6 +509,144 @@ ${eventForm(`${EVENTS_PATH}/${access.event.id}`, me.csrfToken, v, html`<input ty
           409,
         );
       }
+    }
+  });
+
+  app.get("/groups/:groupId/polls/new", async (c) => {
+    const me = requireSignedIn(c);
+    if (me instanceof Response) return me;
+    const membership = await findGroupForMember(deps.storage, c.req.param("groupId"), me.personId);
+    if (membership === null) return c.html(notFound(), 404);
+    return c.html(
+      renderPage(
+        "Find a time",
+        html`<p><a href="/groups/${membership.group.id}">← ${membership.group.name}</a></p>
+<h1>Find a time with ${membership.group.name}</h1>
+${pollForm(`/groups/${membership.group.id}/polls`, me.csrfToken, { ...EMPTY, slots: [] }, null)}`,
+      ),
+    );
+  });
+
+  app.post("/groups/:groupId/polls", async (c) => {
+    const me = requireSignedIn(c);
+    if (me instanceof Response) return me;
+    const form = await c.req.parseBody();
+    if (!(await verifyFormCsrf(me, form))) return c.html(rejected(), 403);
+    const membership = await findGroupForMember(deps.storage, c.req.param("groupId"), me.personId);
+    if (membership === null) return c.html(notFound(), 404);
+    const values = readPollForm(form);
+    try {
+      const input = toPollInput(values);
+      const event = await createPoll(deps.storage, {
+        creatorId: me.personId,
+        group: membership,
+        fields: input.fields,
+        candidates: input.candidates,
+        now: deps.now(),
+      });
+      return c.redirect(`${EVENTS_PATH}/${event.id}`, 303);
+    } catch (error) {
+      return c.html(
+        renderPage(
+          "Find a time",
+          html`<h1>Find a time with ${membership.group.name}</h1>
+${pollForm(`/groups/${membership.group.id}/polls`, me.csrfToken, values, errorMessage(error))}`,
+        ),
+        400,
+      );
+    }
+  });
+
+  app.post(`${EVENTS_PATH}/:id/votes`, async (c) => {
+    const me = requireSignedIn(c);
+    if (me instanceof Response) return me;
+    const form = await c.req.parseBody();
+    if (!(await verifyFormCsrf(me, form))) return c.html(rejected(), 403);
+    const access = await findEventForParticipant(deps.storage, c.req.param("id"), me.personId);
+    if (access === null || access.participation.visibility === "HIDDEN")
+      return c.html(notFound(), 404);
+
+    const answers = new Map<number, Answer>();
+    for (const [key, value] of Object.entries(form)) {
+      const slot = /^slot_(\d{1,2})$/.exec(key)?.[1];
+      const answer = answerSchema.safeParse(value);
+      if (slot !== undefined && answer.success) answers.set(Number.parseInt(slot, 10), answer.data);
+    }
+    const result = await vote(deps.storage, access, { answers, now: deps.now() });
+    switch (result.kind) {
+      case "recorded":
+        return c.redirect(`${EVENTS_PATH}/${access.event.id}`, 303);
+      case "invalid":
+        return c.html(
+          await eventPage(
+            deps,
+            access,
+            me.csrfToken,
+            "Pick an answer for at least one of the options.",
+          ),
+          400,
+        );
+      case "closed": {
+        const fresh =
+          (await findEventForParticipant(deps.storage, access.event.id, me.personId)) ?? access;
+        return c.html(
+          await eventPage(
+            deps,
+            fresh,
+            me.csrfToken,
+            "Voting has closed — a time was already picked.",
+          ),
+          409,
+        );
+      }
+      case "forbidden":
+        return c.html(notFound(), 404);
+    }
+  });
+
+  app.post(`${EVENTS_PATH}/:id/confirm`, async (c) => {
+    const me = requireSignedIn(c);
+    if (me instanceof Response) return me;
+    const form = await c.req.parseBody();
+    if (!(await verifyFormCsrf(me, form))) return c.html(rejected(), 403);
+    const access = await findEventForParticipant(deps.storage, c.req.param("id"), me.personId);
+    if (access === null || access.participation.visibility === "HIDDEN")
+      return c.html(notFound(), 404);
+    const seen = Number.parseInt(str(form, "revision"), 10);
+    const slot = Number.parseInt(str(form, "slot"), 10);
+    const result = await confirmCandidate(deps.storage, access, {
+      slotIndex: Number.isInteger(slot) ? slot : -1,
+      // The revision the editor SAW: if the poll changed since, they decide again.
+      expectedRevision: Number.isInteger(seen) ? seen : -1,
+      actorId: me.personId,
+      now: deps.now(),
+    });
+    const fresh = async () =>
+      (await findEventForParticipant(deps.storage, access.event.id, me.personId)) ?? access;
+    switch (result.kind) {
+      case "confirmed":
+        return c.redirect(`${EVENTS_PATH}/${access.event.id}`, 303);
+      case "forbidden":
+        return c.html(
+          renderPage("Not allowed", html`<h1>Only the organizers can pick the time</h1>`),
+          403,
+        );
+      case "invalid":
+        return c.html(
+          await eventPage(deps, access, me.csrfToken, "That option doesn't exist."),
+          400,
+        );
+      case "closed":
+      case "conflict":
+        return c.html(
+          await eventPage(
+            deps,
+            await fresh(),
+            me.csrfToken,
+            "The poll changed while you were looking — here it is as it stands now.",
+          ),
+          409,
+        );
     }
   });
 }
