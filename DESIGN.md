@@ -1,6 +1,6 @@
 # WhenDoWe — Design & Agent Bootstrap Brief
 
-> **Status:** v1.0-rc12 (rc11 + §10: responses — votes, attendance, feedback — are attributed rows of their own, not change_log rows, because change_log's revision key serialises edits; `event_feedback` and `response_token` sketched; §13 token links as built: re-answerable vote/attend links, 14-day expiry, rotate-on-resend by replacement, no session) (v1.0-rc11: rc10 + MVP-2 layout in §8 — `src/events/`, `routes/events.ts`, `routes/respond.ts`; the event lifecycle as a single status column in §10; and §16's one recorded exception: migration 0005 rebuilds `canonical_event`, allowed only because nothing has ever been deployed) (v1.0-rc10: rc9 + §8 entries for `src/web/layout.ts` and `src/web/session.ts`, recorded before MVP-1 slice C) (v1.0-rc9: rc8 + mail provider decided: Cloudflare Email Service, sending from `notify.whendowe.org`, behind an app-enforced hard cap — §8 entries for `src/mail/cloudflare.ts` and `src/mail/capped.ts`) (v1.0-rc8: rc7 + §8 layout for MVP-1, recorded before the code: `src/people/`, `src/ids.ts`, `src/mail/console.ts`, `src/web/routes/{auth,groups}.ts`) (v1.0-rc7: rc6 + roadmap re-sequenced people-first after an owner review: Ring 0 widened from "the household" to small groups of people who know each other; two-way Google sync is MVP scope; edit tier split from visibility tier; WORKFLOWS §9 deltas folded in — multi-person, account-less responses; §17 single-vs-multi resolved; provider-neutrality made a hard constraint) (v1.0-rc6: rc5 + M1 as-built corrections to §8: `src/crypto/` and `src/oauth/` were introduced during M1 but never documented; `src/web/routes/` contents named; `src/web/escape.ts`; `src/providers/google-event.ts`; `src/recurrence.ts` — undocumented since the M1 recurrence spike; and a `scripts/` directory. Plus §13: the deployments repo is *credential*-human-only — the boundary is credential access, not repo write access, so instance config may be agent-authored and owner-merged) (rc4 + M0 as-built corrections: change_log id in SQLite dialect, fake provider filename, publish-not-deploy workflow comment, Hegel FFI mechanism) (rc3 + security hardening: token-link semantics, ICS/HTML injection, OAuth state/PKCE, supply-chain cooldown & ignore-scripts, agent privilege model, backup-tail deletion promise) (v0.9 + artifact-store port seam for feeds/pages; v0.7 + scheduling economics: cron fan-out vs DO alarms; v0.6 + platform pivot: TypeScript intersection contract — one codebase targeting Cloudflare Workers/D1/Durable Objects free tier *and* Node/Docker self-host; SQLite dialect; Hegel-based verification; earlier history in companions/git). **Name:** WhenDoWe — repo `github.com/whendowe/whendowe`, domain `whendowe.org` (Cloudflare-registered), package name `whendowe`.
+> **Status:** v1.0-rc13 (rc12 + MVP-2 slice 2E planned in §10: response requests — accept/acknowledge states, lifecycle as built, material change = time/date/location; link actions name the phase; `event_change_proposal` for the propose tier with §8 `proposal.ts`; whole-series RRULE; history attribution shown to every tier by owner decision) (v1.0-rc12: rc11 + §10: responses — votes, attendance, feedback — are attributed rows of their own, not change_log rows, because change_log's revision key serialises edits; `event_feedback` and `response_token` sketched; §13 token links as built: re-answerable vote/attend links, 14-day expiry, rotate-on-resend by replacement, no session) (v1.0-rc11: rc10 + MVP-2 layout in §8 — `src/events/`, `routes/events.ts`, `routes/respond.ts`; the event lifecycle as a single status column in §10; and §16's one recorded exception: migration 0005 rebuilds `canonical_event`, allowed only because nothing has ever been deployed) (v1.0-rc10: rc9 + §8 entries for `src/web/layout.ts` and `src/web/session.ts`, recorded before MVP-1 slice C) (v1.0-rc9: rc8 + mail provider decided: Cloudflare Email Service, sending from `notify.whendowe.org`, behind an app-enforced hard cap — §8 entries for `src/mail/cloudflare.ts` and `src/mail/capped.ts`) (v1.0-rc8: rc7 + §8 layout for MVP-1, recorded before the code: `src/people/`, `src/ids.ts`, `src/mail/console.ts`, `src/web/routes/{auth,groups}.ts`) (v1.0-rc7: rc6 + roadmap re-sequenced people-first after an owner review: Ring 0 widened from "the household" to small groups of people who know each other; two-way Google sync is MVP scope; edit tier split from visibility tier; WORKFLOWS §9 deltas folded in — multi-person, account-less responses; §17 single-vs-multi resolved; provider-neutrality made a hard constraint) (v1.0-rc6: rc5 + M1 as-built corrections to §8: `src/crypto/` and `src/oauth/` were introduced during M1 but never documented; `src/web/routes/` contents named; `src/web/escape.ts`; `src/providers/google-event.ts`; `src/recurrence.ts` — undocumented since the M1 recurrence spike; and a `scripts/` directory. Plus §13: the deployments repo is *credential*-human-only — the boundary is credential access, not repo write access, so instance config may be agent-authored and owner-merged) (rc4 + M0 as-built corrections: change_log id in SQLite dialect, fake provider filename, publish-not-deploy workflow comment, Hegel FFI mechanism) (rc3 + security hardening: token-link semantics, ICS/HTML injection, OAuth state/PKCE, supply-chain cooldown & ignore-scripts, agent privilege model, backup-tail deletion promise) (v0.9 + artifact-store port seam for feeds/pages; v0.7 + scheduling economics: cron fan-out vs DO alarms; v0.6 + platform pivot: TypeScript intersection contract — one codebase targeting Cloudflare Workers/D1/Durable Objects free tier *and* Node/Docker self-host; SQLite dialect; Hegel-based verification; earlier history in companions/git). **Name:** WhenDoWe — repo `github.com/whendowe/whendowe`, domain `whendowe.org` (Cloudflare-registered), package name `whendowe`.
 > **Audience:** the coding agent bootstrapping this repo, and future human contributors.
 
 ---
@@ -175,6 +175,7 @@ whendowe/
       event.ts                 # canonical events: create/edit with optimistic revision + change_log; lifecycle
       participation.ts         # who takes part, with edit tier + visibility; copied from group defaults
       poll.ts                  # candidate times + votes (yes / if-need-be / no) + confirm (WORKFLOWS US-13)
+      proposal.ts              # propose tier: a pending change an editor accepts or rejects (MVP-2, rc13)
       response.ts              # accept / acknowledge / attendance / feedback, incl. account-less token links
     oauth/
       pkce.ts                  # RFC 7636 verifier/challenge (S256 only) + state nonce (§13)
@@ -483,6 +484,70 @@ time, and in 2E accepting a proposal — remain change_log rows. The UI presents
 attributed trail (WORKFLOWS §3's "one UI list, one attribution trail" is kept at the view,
 not the table).
 
+### Response requests, change proposals and series (rc13 — MVP-2 slice 2E)
+
+**Response requests.** When creating an event the organizer may ask individual participants
+to **agree** (`response_kind = 'accept'`) or to **acknowledge** (`'ack'`); everyone else is
+`'none'` (or `'slot_vote'` on a poll). `response_state` holds the answer:
+
+| kind | states |
+|---|---|
+| `accept` | `pending` → `accepted` \| `declined`; after a material change: `reack` |
+| `ack` | `pending` → `acknowledged`; after a material change: `reack` |
+
+`response_state` has no CHECK constraint (the column predates these values, and SQLite can't
+add one without a rebuild — §16); the app validates it with zod at the boundary.
+
+Lifecycle, WORKFLOWS §5 as built:
+- An event with **any** `accept` participant is created `proposed`; it becomes `scheduled` when
+  the last of them accepts, and `declined` the moment one declines. Its creator may **withdraw**
+  it while it is `proposed`. With no `accept` participant it is `scheduled` at once (§5 "skip
+  straight to scheduled").
+- `ack` never gates: the event exists immediately; the request is a "needs your
+  acknowledgment" flag, and the organizer sees "seen ✓" with its time (US-4).
+- A **material change** to a `scheduled` event — time, date or location; *not* the title or the
+  notes (WORKFLOWS §10, owner default) — applies immediately (last-write-wins, US-7 MVP) and
+  sets every `accepted` / `acknowledged` participant back to `reack`.
+- **Cancel / restore** (US-9): editors move `scheduled → cancelled` and back, attributed in
+  change_log. `desired()` already makes `cancelled` Absent; the grace-period "CANCELLED:" title
+  is a sync-side policy and arrives with MVP-4.
+- Every transition that changes the event (accept-to-schedule, decline, withdraw, cancel,
+  restore, confirm) is a change_log row; the answers themselves are participation state
+  (rc12).
+
+**Link actions name the phase, not the widget.** `response_token.action` keeps its two values
+(no table rebuild): `vote` answers a *proposed* event — slot votes on a poll, accept/decline on a
+consent proposal — and `attend` answers a *scheduled* one — attendance and acknowledgment.
+
+**Change proposals (the `propose` tier).** A `propose` participant's edit does not apply; it
+becomes a pending proposal an `edit` participant accepts or rejects:
+
+```sql
+CREATE TABLE event_change_proposal (       -- MVP-2 slice 2E-2
+    id                 text PRIMARY KEY,   -- UUIDv7
+    canonical_event_id text NOT NULL REFERENCES canonical_event(id),
+    proposed_by        text NOT NULL REFERENCES person(id),
+    base_revision      integer NOT NULL,   -- the revision the proposer saw
+    fields             text NOT NULL,      -- JSON: the full proposed field set
+    status             text NOT NULL,      -- pending | accepted | rejected | withdrawn | superseded
+    decided_by         text REFERENCES person(id),
+    decided_at         text,
+    created_at         text NOT NULL
+);
+```
+Accepting applies the fields through the ordinary optimistic edit at `base_revision`; if the
+event moved on since, the proposal is `superseded` and the proposer is told — never silently
+merged. The inbound-sync path (§11) reuses this table in MVP-4.
+
+**Series.** Events may carry an RRULE from the supported subset (`src/recurrence.ts`), created
+and edited as a whole series; pages show the next occurrences. Editing a single occurrence stays
+parked behind the `event_override` seam (WORKFLOWS US-8: swaps are ordinary events).
+
+**History attribution (owner decision, 2026-10-17).** Each history entry names its author to
+every tier that can see the event, including `DETAILS` and `BUSY`, which don't see the
+participant list: attribution is the product. What an entry *changed* is still filtered per
+tier (§9 visibility integrity).
+
 The two tier columns are deliberately independent: a D&D player is `view` + `FULL` (sees everything, cannot reschedule); a grandparent is `view` + `BUSY`; a co-parent is `propose` or `edit` + `FULL`. Every tier, including `view`, can acknowledge, state attendance and leave feedback — "decided by the organizer" never means "participants have no voice".
 
 ---
@@ -655,7 +720,7 @@ The new milestones are labelled **MVP-1…MVP-5**, deliberately *not* reusing M2
 
 
 - **MVP-1 — People.** `person`, magic-link login, sessions + CSRF, groups, email invites; the mail port with a console adapter for development and an HTTPS provider for real use. Email deliverability (SPF/DKIM/DMARC, `whendowe/deployments`) is a *blocker* here, not polish. One person per verified email address — a later "Sign in with Google" with the same address must land on the same person. Closes the M1a gap where the connect route has no authenticated owner. *Accept: a D&D group exists (US-14).*
-- **MVP-2 — Events & responses.** Create/edit events (single + whole-series), per-person edit and visibility tiers, the proposal lifecycle, accept / acknowledge / slot vote / attendance / feedback by token link, the change log visible in the UI. *Accept: "when do we play?" is answered without anyone installing anything.*
+- **MVP-2 — Events & responses.** Create/edit events (single + whole-series), per-person edit and visibility tiers, the proposal lifecycle, accept / acknowledge / slot vote / attendance / feedback by token link, the change log visible in the UI. *Accept: "when do we play?" is answered without anyone installing anything.* Slices: 2A domain · 2B event pages · 2C polls · 2D account-less responses · 2E-1 agreement & acknowledgment requests, cancel/restore · 2E-2 change proposals (propose tier) · 2E-3 recurring series.
 - **MVP-3 — Feeds & sharing.** Read-only ICS feed per person and per group (the §5 artifact-store seam's first driver; Google polls subscribed feeds slowly — hours — which is stated to users, not hidden); unlisted and invite-only views; `project()` tiers enforced in every output (§9 visibility integrity becomes load-bearing). *Accept: a player subscribes from an iPhone.*
 - **MVP-4 — Google one-way.** "Sign in with Google" (basic profile scopes only — must not consume the sensitive-scope user cap, §12), calendar connection as a *separate*, opt-in grant, token refresh, the reconcile loop and PUSH (§11). *Accept: the owner's household lives on it.*
 - **MVP-5 — Google two-way.** PULL classification, echo detection, tier-gated inbound edits (§11), inbound deletes as unsubscribe, conflict policy, 410 full resync with the reverse diff. *Accept: a member moves an event in Google and the group follows or receives a proposal (US-15).*

@@ -219,5 +219,5 @@ Messaging/chat between parents; expense splitting; legal custody documentation; 
 - Should candidate slots be visible to BUSY-tier viewers as tentative blocks, or only to voters? (Start: voters only.)
 - Does a declined proposal notify viewers it almost existed? (Current answer: no — viewers see scheduled reality only.)
 - Grace period length for cancelled events (per-household setting vs constant — start with a constant).
-- Material-change definition for re-acknowledgment: time/date/location only, or also title?
+- Material-change definition for re-acknowledgment: time/date/location only, or also title? (**Default, DESIGN rc13:** time/date/location only — a renamed event changes nobody's plans, so it shouldn't nag.)
 - Should `BUSY` placeholder labels be per-event or per-relationship? (Start per-relationship.)
