@@ -1,6 +1,6 @@
 # Publish, not deploy (DESIGN.md §18): this repo's CI never deploys — it publishes
-# versioned artifacts. main → ghcr image tagged with the branch/sha; tag v* →
-# release-tagged image. Deployment happens exclusively from the private
+# versioned artifacts. main → ghcr image and Worker bundle tagged with the
+# branch/sha; tag v* → release-tagged image and bundle. Deployment happens exclusively from the private
 # whendowe/deployments registry, which pins these artifacts.
 # (Named deploy.yml per the §8 skeleton; its semantics are §18's publish step.)
 name: Publish
@@ -39,3 +39,53 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+
+  publish-worker:
+    # The Worker bundle as an OCI artifact (DESIGN.md §18, rc14). The deployments
+    # repo pins it BY DIGEST and deploys it with `no_bundle`, so what runs on an
+    # instance is exactly what was built here — it never builds from source and
+    # needs no access to this repo. Contents (`npm run build:worker`):
+    #   bundle/                  wrangler's dry-run bundle (+ source map)
+    #   migrations/*.sql         the migrations this commit's code expects
+    #   wrangler.template.jsonc  bindings, Durable Object classes + tags, crons
+    runs-on: ubuntu-latest
+    env:
+      WRANGLER_SEND_METRICS: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build:worker
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ghcr.io/${{ github.repository }}-worker
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=sha
+      # The oras CLI image rather than a third-party setup action, as with
+      # gitleaks in ci.yml. The token goes in on stdin and is never stored.
+      - name: Push the bundle to ghcr
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -o pipefail
+          image="ghcr.io/${GITHUB_REPOSITORY}-worker"
+          tags=$(printf '%s\n' "$TAGS" | sed 's/.*://' | paste -sd, -)
+          digest=$(printf '%s' "$GH_TOKEN" | docker run --rm -i \
+            -v "$PWD/dist/worker:/workspace" -w /workspace \
+            ghcr.io/oras-project/oras:v1.3.4 push \
+            --username "$GITHUB_ACTOR" --password-stdin \
+            --format json \
+            --artifact-type application/vnd.whendowe.worker.v1 \
+            --annotation "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --annotation "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            "${image}:${tags}" \
+            bundle migrations wrangler.template.jsonc | jq -r .digest)
+          case "$digest" in sha256:*) ;; *) echo "::error::push returned no digest"; exit 1 ;; esac
+          echo "Pin: \`${image}@${digest}\` (tags: ${tags})" >> "$GITHUB_STEP_SUMMARY"

@@ -19,6 +19,7 @@
     "dev:cf": "wrangler dev -c deploy/cloudflare/wrangler.jsonc",
     "dev:node": "tsx watch deploy/node/server.ts",
     "build:node": "tsc -p deploy/node/tsconfig.build.json",
+    "build:worker": "rm -rf dist/worker && wrangler deploy --dry-run -c deploy/cloudflare/wrangler.jsonc --outdir \"$PWD/dist/worker/bundle\" && rm dist/worker/bundle/README.md && mkdir dist/worker/migrations && cp migrations/*.sql dist/worker/migrations/ && cp deploy/cloudflare/wrangler.jsonc dist/worker/wrangler.template.jsonc",
     "migrate:new": "drizzle-kit generate --name",
     "migrate:node": "tsx deploy/node/migrate.ts"
   },
