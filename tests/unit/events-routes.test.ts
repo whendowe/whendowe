@@ -908,10 +908,165 @@ it("lifecycle buttons require CSRF and membership", async () => {
   const { mara, group } = await household(h);
   const event = await createVia(h, mara, group);
   const stranger = await signIn(h, "stranger@example.org");
-  for (const path of ["answer", "acknowledge", "withdraw", "cancel", "restore"]) {
+  for (const path of [
+    "answer",
+    "acknowledge",
+    "withdraw",
+    "cancel",
+    "restore",
+    "proposal",
+    "proposal/withdraw",
+  ]) {
     expect(
       (await h.app.request(`${event}/${path}`, post({ answer: "accept" }, mara.cookie))).status,
     ).toBe(403);
     expect((await act(h, event, stranger, path, { answer: "accept" })).status).toBe(404);
   }
+});
+
+// --- change proposals: the propose tier (slice 2E-2) ----------------------------------
+
+/** Submit the edit form as `who`, from the revision their form page carried. */
+async function submitEdit(h: H, event: string, who: Who, fields: Record<string, string>) {
+  const revision = /name="revision" value="(\d+)"/.exec(await text(h, `${event}/edit`, who))?.[1];
+  return h.app.request(
+    event,
+    post({ csrf: who.csrf, revision: revision ?? "", ...fields }, who.cookie),
+  );
+}
+const proposalIdOf = (page: string) =>
+  /name="proposal" value="([0-9a-f-]{36})"/.exec(page)?.[1] ?? "";
+
+it("a propose-tier change waits for an editor; accepted, history names both", async () => {
+  const h = await harness();
+  const { dm, group } = await setup(h);
+  const ann = await join(h, dm, group, "ann@example.org", "propose", "FULL");
+  const petra = await join(h, dm, group, "petra@example.org", "view", "DETAILS");
+  const event = await createVia(h, dm, group);
+
+  expect(await text(h, event, ann)).toContain("Propose a change");
+  expect(await text(h, event, petra)).not.toContain("Propose a change");
+  expect(await text(h, `${event}/edit`, ann)).toContain("Send proposal");
+  expect((await submitEdit(h, event, ann, { ...NIGHT, location: "Bob's place" })).status).toBe(303);
+
+  const before = await text(h, event, dm);
+  expect(before).toContain("📍 Ann&#39;s place"); // nothing changed yet
+  expect(before).toContain("<strong>ann@example.org</strong> proposes:");
+  expect(before).toContain("location: Ann&#39;s place → Bob&#39;s place");
+  expect(await text(h, event, ann)).toContain("You proposed a change — waiting");
+  expect(await text(h, event, petra)).not.toContain("Proposed changes");
+
+  const id = proposalIdOf(before);
+  expect((await act(h, event, ann, "proposal", { proposal: id, decision: "accept" })).status).toBe(
+    403,
+  );
+  expect((await act(h, event, dm, "proposal", { proposal: id, decision: "accept" })).status).toBe(
+    303,
+  );
+  const after = await text(h, event, petra); // attribution reaches every tier (rc13)
+  expect(after).toContain("📍 Bob&#39;s place");
+  expect(after).toContain("dm@example.org accepted ann@example.org&#39;s proposal");
+  expect(await text(h, event, ann)).toContain("Your proposal was accepted by dm@example.org.");
+  expect(await text(h, event, dm)).not.toContain("Proposed changes");
+});
+
+it("the proposer is told when it is turned down, or when the event moved on first", async () => {
+  const h = await harness();
+  const { dm, group } = await setup(h);
+  const ann = await join(h, dm, group, "ann@example.org", "propose", "FULL");
+  const event = await createVia(h, dm, group);
+
+  await submitEdit(h, event, ann, { ...NIGHT, location: "Bob's place" });
+  expect((await submitEdit(h, event, dm, { ...NIGHT, title: "Session 12, moved" })).status).toBe(
+    303,
+  );
+  expect(await text(h, event, dm)).not.toContain("Proposed changes");
+  expect(await text(h, event, ann)).toContain("wasn&#39;t decided before the event changed");
+
+  await submitEdit(h, event, ann, { ...NIGHT, title: "Session 12, moved", location: "Park" });
+  const id = proposalIdOf(await text(h, event, dm));
+  expect((await act(h, event, dm, "proposal", { proposal: id, decision: "reject" })).status).toBe(
+    303,
+  );
+  expect(await text(h, event, ann)).toContain("Your proposal was turned down by dm@example.org.");
+  expect(await text(h, event, dm)).toContain("📍 Ann&#39;s place");
+});
+
+it("the proposer can withdraw; view tier can't propose; cancelled events take no proposals", async () => {
+  const h = await harness();
+  const { dm, group } = await setup(h);
+  const ann = await join(h, dm, group, "ann@example.org", "propose", "FULL");
+  const bob = await join(h, dm, group, "bob@example.org", "view", "FULL");
+  const event = await createVia(h, dm, group);
+
+  await submitEdit(h, event, ann, { ...NIGHT, location: "Park" });
+  const mine = await text(h, event, ann);
+  expect(
+    (await act(h, event, ann, "proposal/withdraw", { proposal: proposalIdOf(mine) })).status,
+  ).toBe(303);
+  expect(await text(h, event, dm)).not.toContain("Proposed changes");
+
+  expect(await text(h, event, bob)).not.toContain("Propose a change");
+  expect((await get(h, `${event}/edit`, bob)).status).toBe(403);
+  expect((await submitEdit(h, event, bob, { ...NIGHT, location: "Park" })).status).toBe(403);
+
+  await act(h, event, dm, "cancel");
+  expect(await text(h, event, ann)).not.toContain("Propose a change");
+  expect((await get(h, `${event}/edit`, ann)).status).toBe(409);
+});
+
+it("the edit form never shows a field the tier can't see, and saving keeps it", async () => {
+  const h = await harness();
+  const { dm, group } = await setup(h);
+  const ann = await join(h, dm, group, "ann@example.org", "propose", "DETAILS");
+  const carl = await join(h, dm, group, "carl@example.org", "edit", "DETAILS");
+  const gran = await join(h, dm, group, "gran@example.org", "propose", "BUSY");
+  const event = await createVia(h, dm, group);
+
+  for (const who of [ann, carl]) {
+    const form = await text(h, `${event}/edit`, who);
+    expect(form).toContain("Ann&#39;s place");
+    expect(form).not.toContain("SECRET-NOTE");
+    expect(form).not.toContain('name="description"');
+  }
+  const busyForm = await text(h, `${event}/edit`, gran);
+  expect(busyForm).not.toContain("Sunken Keep");
+  expect(busyForm).not.toContain("Ann&#39;s place");
+
+  // Carl edits the place; Ann proposes a later start and it is accepted.
+  const { description: _notes, ...visible } = NIGHT;
+  expect((await submitEdit(h, event, carl, { ...visible, location: "Bob's place" })).status).toBe(
+    303,
+  );
+  await submitEdit(h, event, ann, {
+    ...visible,
+    location: "Bob's place",
+    start: "2101-10-20T20:00",
+  });
+  const id = proposalIdOf(await text(h, event, dm));
+  await act(h, event, dm, "proposal", { proposal: id, decision: "accept" });
+
+  const page = await text(h, event, dm);
+  expect(page).toContain("📍 Bob&#39;s place");
+  expect(page).toContain("2101-10-20 20:00");
+  expect(page).toContain("SECRET-NOTE: Bob is anxious"); // the notes survived both saves
+  expect(page).not.toMatch(/description:/);
+});
+
+it("a pending proposal is shown at the editor's own tier", async () => {
+  const h = await harness();
+  const { dm, group } = await setup(h);
+  const ann = await join(h, dm, group, "ann@example.org", "propose", "FULL");
+  const carl = await join(h, dm, group, "carl@example.org", "edit", "DETAILS");
+  const event = await createVia(h, dm, group);
+
+  await submitEdit(h, event, ann, {
+    ...NIGHT,
+    location: "Park",
+    description: "SECRET-NOTE-3: bring the map",
+  });
+  expect(await text(h, event, dm)).toContain("SECRET-NOTE-3"); // FULL sees the whole proposal
+  const page = await text(h, event, carl);
+  expect(page).toContain("location: Ann&#39;s place → Park");
+  expect(page).not.toContain("SECRET-NOTE");
 });

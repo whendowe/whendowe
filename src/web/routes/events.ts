@@ -28,6 +28,13 @@ import {
   vote,
 } from "../../events/poll.js";
 import {
+  type ChangeProposal,
+  decideProposal,
+  listProposals,
+  proposeChange,
+  withdrawChange,
+} from "../../events/proposal.js";
+import {
   type Attendance,
   acknowledge,
   actionFor,
@@ -149,6 +156,24 @@ function valuesFrom(event: CanonicalEvent): FormValues {
   };
 }
 
+type Vis = EventAccess["participation"]["visibility"];
+
+/**
+ * Saving the edit form at the viewer's tier: eventForm doesn't render a field they can't
+ * see (an `edit` or `propose` + DETAILS member must not read the notes in a textarea), so
+ * it keeps the event's current value rather than being blanked.
+ */
+function withHidden(fields: EventFieldsInput, access: EventAccess): EventFieldsInput {
+  const vis = access.participation.visibility;
+  const { event } = access;
+  return {
+    ...fields,
+    title: canSee(vis, "title") ? fields.title : event.title,
+    location: canSee(vis, "location") ? fields.location : event.location,
+    description: canSee(vis, "description") ? fields.description : event.description,
+  };
+}
+
 function str(form: Record<string, unknown>, key: string): string {
   const v = form[key];
   return typeof v === "string" ? v : "";
@@ -217,19 +242,20 @@ function eventForm(
   extra: Html | string,
   error: string | null,
   submit: string,
+  vis: Vis = "FULL",
 ): Html {
   return html`${error === null ? "" : html`<p class="error">${error}</p>`}
 <form method="post" action="${action}">
   <input type="hidden" name="csrf" value="${csrf}" />
   ${extra}
-  <p><label>Title<br /><input name="title" required maxlength="200" value="${v.title}" style="width:100%" /></label></p>
-  <p><label>Where<br /><input name="location" maxlength="500" value="${v.location}" style="width:100%" /></label></p>
+  ${canSee(vis, "title") ? html`<p><label>Title<br /><input name="title" required maxlength="200" value="${v.title}" style="width:100%" /></label></p>` : ""}
+  ${canSee(vis, "location") ? html`<p><label>Where<br /><input name="location" maxlength="500" value="${v.location}" style="width:100%" /></label></p>` : ""}
   <p><label><input type="checkbox" name="allDay" ${v.allDay ? html`checked` : ""} /> All day</label></p>
   <p><label>Starts<br /><input type="datetime-local" name="start" required value="${v.start}" /></label></p>
   <p><label>Ends <span class="muted">(for all-day events: the last day)</span><br /><input type="datetime-local" name="end" required value="${v.end}" /></label></p>
   <p><label>Time zone<br /><input id="tzid" name="tzid" list="zones" value="${v.tzid}" placeholder="Europe/Prague" /></label></p>
   ${zoneOptions()}
-  <p><label>Notes <span class="muted">(only people who see full details see these)</span><br /><textarea name="description" rows="4" style="width:100%">${v.description}</textarea></label></p>
+  ${canSee(vis, "description") ? html`<p><label>Notes <span class="muted">(only people who see full details see these)</span><br /><textarea name="description" rows="4" style="width:100%">${v.description}</textarea></label></p>` : ""}
   <p><button type="submit">${submit}</button></p>
 </form>
 <script>
@@ -555,8 +581,68 @@ function toPollInput(v: PollFormValues) {
   };
 }
 
+function editHeading(proposing: boolean): Html {
+  return proposing
+    ? html`<h1>Propose a change</h1>
+<p class="muted">Nothing changes yet: someone who can edit this event will accept or turn down your proposal.</p>`
+    : html`<h1>Edit event</h1>`;
+}
+
 function renderHistoryValue(v: string | number | null): string {
   return v === null ? "—" : String(v);
+}
+
+/** A diff as list items, minus every field this tier can't see (the history rule). */
+function changeList(
+  vis: EventAccess["participation"]["visibility"],
+  change: Record<string, { before: string | number | null; after: string | number | null }>,
+): Html {
+  return html`<ul>${Object.entries(change)
+    .filter(([field]) => canSeeField(vis, field))
+    .map(
+      ([field, c]) =>
+        html`<li>${field}: ${renderHistoryValue(c.before)} → ${renderHistoryValue(c.after)}</li>`,
+    )}</ul>`;
+}
+
+const OUTCOME: Record<Exclude<ChangeProposal["status"], "pending" | "withdrawn">, string> = {
+  accepted: "was accepted",
+  rejected: "was turned down",
+  superseded: "wasn't decided before the event changed — propose it again if it still matters",
+};
+
+/**
+ * Change proposals (slice 2E-2): editors decide what is pending; a proposer sees what
+ * became of theirs, so a rejection or a supersede is never silent. Nobody else sees any.
+ */
+async function proposalsSection(
+  deps: EventRouteDeps,
+  access: EventAccess,
+  csrf: string,
+): Promise<Html | string> {
+  const { event, participation } = access;
+  const vis = participation.visibility;
+  const { pending, mine } = await listProposals(deps.storage, access);
+  const forEditor = pending.map(
+    (p) => html`<li><strong>${p.proposerName ?? p.proposerEmail}</strong> proposes:
+${p.change === null ? "" : changeList(vis, p.change)}
+${button(event.id, "proposal", csrf, "Accept", { proposal: p.id, decision: "accept" })}${button(event.id, "proposal", csrf, "Reject", { proposal: p.id, decision: "reject" })}</li>`,
+  );
+  let own: Html | string = "";
+  if (mine !== null) {
+    const { status } = mine;
+    if (status === "pending") {
+      own = html`<p>You proposed a change — waiting for someone who can edit to accept it.</p>
+${mine.change === null ? "" : changeList(vis, mine.change)}
+${button(event.id, "proposal/withdraw", csrf, "Withdraw my proposal", { proposal: mine.id })}`;
+    } else if (status !== "withdrawn") {
+      const by =
+        status === "superseded" || mine.decidedByEmail === null ? "" : ` by ${mine.decidedByEmail}`;
+      own = html`<p class="muted">Your proposal ${OUTCOME[status]}${by}.</p>`;
+    }
+  }
+  if (forEditor.length === 0 && own === "") return "";
+  return html`<h2>Proposed changes</h2>${forEditor.length === 0 ? "" : html`<ul>${forEditor}</ul>`}${own}`;
 }
 
 async function eventPage(
@@ -588,8 +674,16 @@ ${notice === null ? "" : html`<p class="error">${notice}</p>`}
 ${poll === null ? html`<p>${formatWhen(event)}</p>` : pollSection(access, poll, csrf, see("participants"))}
 ${see("location") && event.location !== null ? html`<p>📍 ${event.location}</p>` : ""}
 ${see("description") && event.description !== null ? html`<p style="white-space:pre-wrap">${event.description}</p>` : ""}
-${participation.editTier === "edit" && (event.status === "scheduled" || event.status === "cancelled") ? html`<p><a href="${EVENTS_PATH}/${event.id}/edit">Edit</a></p>` : ""}
+${
+  participation.editTier === "edit" &&
+  (event.status === "scheduled" || event.status === "cancelled")
+    ? html`<p><a href="${EVENTS_PATH}/${event.id}/edit">Edit</a></p>`
+    : participation.editTier === "propose" && event.status === "scheduled"
+      ? html`<p><a href="${EVENTS_PATH}/${event.id}/edit">Propose a change</a></p>`
+      : ""
+}
 ${await requestsSection(deps, access, csrf)}
+${await proposalsSection(deps, access, csrf)}
 ${
   people.length === 0
     ? ""
@@ -602,7 +696,13 @@ ${await responsesSection(deps, access, csrf)}
 <h2>History</h2>
 <ul>${history.map(
       (h) =>
-        html`<li><span class="muted">${h.at.slice(0, 16).replace("T", " ")}</span> · ${h.actorEmail ?? "someone"} ${h.revision === 1 ? "created it" : "changed"}${
+        html`<li><span class="muted">${h.at.slice(0, 16).replace("T", " ")}</span> · ${h.actorEmail ?? "someone"} ${
+          h.revision === 1
+            ? "created it"
+            : h.proposedByEmail === null
+              ? "changed"
+              : `accepted ${h.proposedByEmail}'s proposal`
+        }${
           h.revision === 1
             ? ""
             : html`<ul>${h.fields.map(([field, c]) => html`<li>${field}: ${renderHistoryValue(c.before)} → ${renderHistoryValue(c.after)}</li>`)}</ul>`
@@ -673,8 +773,17 @@ ${eventForm(`/groups/${membership.group.id}/events`, me.csrfToken, values, await
     const access = await findEventForParticipant(deps.storage, c.req.param("id"), me.personId);
     if (access === null || access.participation.visibility === "HIDDEN")
       return c.html(notFound(), 404);
-    if (access.participation.editTier !== "edit")
+    const proposing = access.participation.editTier === "propose";
+    if (access.participation.editTier === "view")
       return c.html(renderPage("Not allowed", html`<h1>You can't edit this event</h1>`), 403);
+    if (proposing && access.event.status !== "scheduled")
+      return c.html(
+        renderPage(
+          "Not now",
+          html`<h1>Changes can't be proposed right now</h1><p>Only a scheduled event takes proposals. <a href="${EVENTS_PATH}/${access.event.id}">Back to the event</a></p>`,
+        ),
+        409,
+      );
     if (access.event.status === "proposed")
       return c.html(
         renderPage(
@@ -684,12 +793,13 @@ ${eventForm(`/groups/${membership.group.id}/events`, me.csrfToken, values, await
         409,
       );
     const { event } = access;
+    const vis = access.participation.visibility;
     return c.html(
       renderPage(
-        `Edit ${event.title}`,
-        html`<p><a href="${EVENTS_PATH}/${event.id}">← ${event.title}</a></p>
-<h1>Edit event</h1>
-${eventForm(`${EVENTS_PATH}/${event.id}`, me.csrfToken, valuesFrom(event), html`<input type="hidden" name="revision" value="${event.revision}" />`, null, "Save")}`,
+        canSee(vis, "title") ? `Edit ${event.title}` : "Edit",
+        html`<p><a href="${EVENTS_PATH}/${event.id}">← ${canSee(vis, "title") ? event.title : BUSY_LABEL}</a></p>
+${editHeading(proposing)}
+${eventForm(`${EVENTS_PATH}/${event.id}`, me.csrfToken, valuesFrom(event), html`<input type="hidden" name="revision" value="${event.revision}" />`, null, proposing ? "Send proposal" : "Save", vis)}`,
       ),
     );
   });
@@ -705,31 +815,52 @@ ${eventForm(`${EVENTS_PATH}/${event.id}`, me.csrfToken, valuesFrom(event), html`
 
     const seen = Number.parseInt(str(form, "revision"), 10);
     const values = readForm(form);
+    const proposing = access.participation.editTier === "propose";
+    const vis = access.participation.visibility;
     const editForm = (error: string, v: FormValues, revision: number) =>
       renderPage(
-        `Edit ${access.event.title}`,
-        html`<h1>Edit event</h1>
-${eventForm(`${EVENTS_PATH}/${access.event.id}`, me.csrfToken, v, html`<input type="hidden" name="revision" value="${revision}" />`, error, "Save")}`,
+        canSee(vis, "title") ? `Edit ${access.event.title}` : "Edit",
+        html`${editHeading(proposing)}
+${eventForm(`${EVENTS_PATH}/${access.event.id}`, me.csrfToken, v, html`<input type="hidden" name="revision" value="${revision}" />`, error, proposing ? "Send proposal" : "Save", vis)}`,
       );
 
-    let result: Awaited<ReturnType<typeof editEvent>>;
+    let result: Awaited<ReturnType<typeof editEvent>> | Awaited<ReturnType<typeof proposeChange>>;
     try {
-      result = await editEvent(deps.storage, access, {
-        fields: toFields(values),
-        actorId: me.personId,
+      const input = {
+        // Fields this tier can't see aren't in the form; they keep their current values.
+        fields: withHidden(toFields(values), access),
         now: deps.now(),
         // The revision the person SAW, from the form — not the one re-read just now.
         expectedRevision: Number.isInteger(seen) ? seen : -1,
-      });
+      };
+      // The propose tier's edit doesn't apply: it waits for an editor (slice 2E-2).
+      result = proposing
+        ? await proposeChange(deps.storage, access, input)
+        : await editEvent(deps.storage, access, { ...input, actorId: me.personId });
     } catch (error) {
       return c.html(editForm(errorMessage(error), values, seen), 400);
     }
     switch (result.kind) {
       case "updated":
       case "unchanged":
+      case "proposed":
         return c.redirect(`${EVENTS_PATH}/${access.event.id}`, 303);
       case "forbidden":
         return c.html(renderPage("Not allowed", html`<h1>You can't edit this event</h1>`), 403);
+      case "closed":
+        return c.html(
+          await eventPage(deps, access, me.csrfToken, "Only a scheduled event takes proposals."),
+          409,
+        );
+      case "limit":
+        return c.html(
+          editForm(
+            "You've proposed changes to this event too many times.",
+            values,
+            access.event.revision,
+          ),
+          400,
+        );
       case "conflict": {
         // Show the CURRENT version; their typed change is lost on purpose rather than
         // silently overwriting someone else's. The message says so.
@@ -1053,6 +1184,31 @@ ${pollForm(`/groups/${membership.group.id}/polls`, me.csrfToken, values, errorMe
     return result.kind === "invalid" ? { kind: "invalid" } : result;
   });
   lifecycle("withdraw", (access, _form, now) => withdrawProposal(deps.storage, access, { now }));
+  lifecycle("proposal", async (access, form, now) => {
+    const decision =
+      form.decision === "accept" || form.decision === "reject" ? form.decision : null;
+    if (decision === null || typeof form.proposal !== "string") return { kind: "invalid" };
+    const result = await decideProposal(deps.storage, access, {
+      proposalId: form.proposal,
+      decision,
+      now,
+    });
+    switch (result.kind) {
+      case "accepted":
+      case "rejected":
+        return { kind: "done", status: access.event.status };
+      // The event moved on since it was proposed: the page, re-read, shows it as it is.
+      case "superseded":
+        return { kind: "closed" };
+      default:
+        return result;
+    }
+  });
+  lifecycle("proposal/withdraw", async (access, form, now) => {
+    if (typeof form.proposal !== "string") return { kind: "invalid" };
+    const result = await withdrawChange(deps.storage, access, { proposalId: form.proposal, now });
+    return result.kind === "withdrawn" ? { kind: "done", status: access.event.status } : result;
+  });
   lifecycle("cancel", (access, _form, now) =>
     setCancelled(deps.storage, access, { cancelled: true, now }),
   );
