@@ -427,6 +427,36 @@ export const responseToken = sqliteTable(
   ],
 );
 
+// The propose tier (DESIGN §10 rc13, MVP-2 slice 2E-2): an edit that waits for an `edit`
+// participant to accept or reject it. `fields` is the full proposed field set; accepting
+// applies it only at `base_revision`, so an accepted proposal is always revision
+// base_revision + 1 — the join that names the proposer in history.
+export const eventChangeProposal = sqliteTable(
+  "event_change_proposal",
+  {
+    id: text("id").primaryKey(),
+    canonicalEventId: text("canonical_event_id")
+      .notNull()
+      .references(() => canonicalEvent.id, { onDelete: "cascade" }),
+    proposedBy: text("proposed_by")
+      .notNull()
+      .references(() => person.id, { onDelete: "cascade" }),
+    baseRevision: integer("base_revision").notNull(),
+    fields: text("fields").notNull(),
+    status: text("status").notNull(),
+    decidedBy: text("decided_by").references(() => person.id, { onDelete: "set null" }),
+    decidedAt: text("decided_at"),
+    createdAt: text("created_at").notNull(),
+  },
+  (t) => [
+    index("event_change_proposal_event_idx").on(t.canonicalEventId, t.status),
+    check(
+      "event_change_proposal_status_chk",
+      sql`${t.status} IN ('pending', 'accepted', 'rejected', 'withdrawn', 'superseded')`,
+    ),
+  ],
+);
+
 export type CalendarConnectionRow = typeof calendarConnection.$inferSelect;
 export type CanonicalEventRow = typeof canonicalEvent.$inferSelect;
 export type EventOverrideRow = typeof eventOverride.$inferSelect;

@@ -357,10 +357,72 @@ export type EditResult =
   | { readonly kind: "conflict" };
 
 /**
+ * The statements of one optimistic field edit, in order:
+ *   UPDATE … SET …, revision = revision + 1 WHERE id = ? AND revision = expected [AND gate]
+ *   INSERT INTO change_log … SELECT … WHERE changes() = 1
+ *   …`afterLog`, each of which must itself be guarded by changes() = 1
+ *   a material change's reack, guarded the same way
+ * so every statement after the first happens exactly when the edit did. Shared by a
+ * direct edit and an accepted change proposal (proposal.ts).
+ */
+export function fieldEditStatements(input: {
+  readonly eventId: string;
+  readonly expected: number;
+  readonly fields: EventFields;
+  readonly change: Diff;
+  readonly actorId: string;
+  readonly now: string;
+  readonly gate?: SqlStatement;
+  readonly afterLog?: readonly SqlStatement[];
+}): SqlStatement[] {
+  const { fields } = input;
+  const log = logRow(input.eventId, input.expected + 1, input.actorId, input.change, input.now);
+  return [
+    {
+      sql: `UPDATE canonical_event SET title = ?, description = ?, location = ?, all_day = ?,
+              start_local = ?, end_local = ?, tzid = ?, revision = revision + 1, updated_at = ?
+            WHERE id = ? AND revision = ?${input.gate === undefined ? "" : ` AND ${input.gate.sql}`}`,
+      params: [
+        fields.title,
+        fields.description,
+        fields.location,
+        fields.allDay ? 1 : 0,
+        fields.startLocal,
+        fields.endLocal,
+        fields.tzid,
+        input.now,
+        input.eventId,
+        input.expected,
+        ...(input.gate?.params ?? []),
+      ],
+    },
+    {
+      sql: `INSERT INTO change_log (canonical_event_id, revision, actor, source, diff, created_at)
+            SELECT ?, ?, ?, 'ui', ?, ? WHERE changes() = 1`,
+      params: log.params,
+    },
+    ...(input.afterLog ?? []),
+    // A material change (time, date, place — DESIGN §10 rc13) asks everyone who had
+    // agreed or acknowledged to look again. Guarded by changes() on the statement before,
+    // so it happens exactly when the edit did.
+    ...(isMaterial(input.change)
+      ? [
+          {
+            sql: `UPDATE event_participation SET response_state = 'reack'
+                  WHERE canonical_event_id = ? AND response_state IN ('accepted', 'acknowledged')
+                    AND changes() = 1`,
+            params: [input.eventId],
+          },
+        ]
+      : []),
+  ];
+}
+
+/**
  * Edit an event's fields, optimistically: only if nobody else changed it since the
  * caller read it (`access.event.revision`).
  *
- * One batch of two statements:
+ * One batch (fieldEditStatements), whose first two statements are:
  *   UPDATE … SET …, revision = revision + 1 WHERE id = ? AND revision = expected
  *   INSERT INTO change_log … SELECT … WHERE changes() = 1
  * The guard on the insert matters: without it, an UPDATE that matched nothing (someone
@@ -387,7 +449,7 @@ export async function editEvent(
     readonly expectedRevision?: number;
   },
 ): Promise<EditResult> {
-  // MVP-2 slice 2A: only `edit` changes directly. `propose` becomes a proposal in 2E.
+  // Only `edit` changes directly; `propose` makes a change proposal (proposal.ts).
   if (access.participation.editTier !== "edit") return { kind: "forbidden" };
   // A poll's time is decided by confirming a candidate (poll.ts), not by editing a
   // placeholder; changing candidates is slice 2E. A confirm that lands between this
@@ -400,45 +462,17 @@ export async function editEvent(
 
   const expected = input.expectedRevision ?? access.event.revision;
   const next = expected + 1;
-  const log = logRow(access.event.id, next, input.actorId, change, input.now);
   try {
-    await storage.batch([
-      {
-        sql: `UPDATE canonical_event SET title = ?, description = ?, location = ?, all_day = ?,
-                start_local = ?, end_local = ?, tzid = ?, revision = revision + 1, updated_at = ?
-              WHERE id = ? AND revision = ?`,
-        params: [
-          fields.title,
-          fields.description,
-          fields.location,
-          fields.allDay ? 1 : 0,
-          fields.startLocal,
-          fields.endLocal,
-          fields.tzid,
-          input.now,
-          access.event.id,
-          expected,
-        ],
-      },
-      {
-        sql: `INSERT INTO change_log (canonical_event_id, revision, actor, source, diff, created_at)
-              SELECT ?, ?, ?, 'ui', ?, ? WHERE changes() = 1`,
-        params: log.params,
-      },
-      // A material change (time, date, place — DESIGN §10 rc13) asks everyone who had
-      // agreed or acknowledged to look again. Guarded by changes() on the log insert,
-      // so it happens exactly when the edit did.
-      ...(isMaterial(change)
-        ? [
-            {
-              sql: `UPDATE event_participation SET response_state = 'reack'
-                    WHERE canonical_event_id = ? AND response_state IN ('accepted', 'acknowledged')
-                      AND changes() = 1`,
-              params: [access.event.id],
-            },
-          ]
-        : []),
-    ]);
+    await storage.batch(
+      fieldEditStatements({
+        eventId: access.event.id,
+        expected,
+        fields,
+        change,
+        actorId: input.actorId,
+        now: input.now,
+      }),
+    );
   } catch {
     // UNIQUE(event, revision): a rival committed revision `next` first.
     return { kind: "conflict" };
@@ -462,6 +496,8 @@ export interface HistoryEntry {
   readonly revision: number;
   readonly actorId: string;
   readonly actorEmail: string | null;
+  /** When this revision was an accepted change proposal: who proposed it (proposal.ts). */
+  readonly proposedByEmail: string | null;
   readonly change: Diff;
   readonly at: string;
 }
@@ -470,6 +506,7 @@ const historyRowSchema = z.object({
   revision: z.number(),
   actor: z.string(),
   email: z.string().nullable(),
+  proposer_email: z.string().nullable(),
   diff: z.string(),
   created_at: z.string(),
 });
@@ -488,8 +525,13 @@ export async function listHistory(
   access: EventAccess,
 ): Promise<HistoryEntry[]> {
   const rows = await storage.query({
-    sql: `SELECT c.revision, c.actor, p.email, c.diff, c.created_at
+    // An accepted proposal is applied only at its base revision, so it IS revision
+    // base_revision + 1 — exactly one per revision, no extra column needed.
+    sql: `SELECT c.revision, c.actor, p.email, pp.email AS proposer_email, c.diff, c.created_at
           FROM change_log c LEFT JOIN person p ON p.id = c.actor
+            LEFT JOIN event_change_proposal ecp ON ecp.canonical_event_id = c.canonical_event_id
+              AND ecp.status = 'accepted' AND ecp.base_revision + 1 = c.revision
+            LEFT JOIN person pp ON pp.id = ecp.proposed_by
           WHERE c.canonical_event_id = ?
           ORDER BY c.revision DESC`,
     params: [access.event.id],
@@ -500,6 +542,7 @@ export async function listHistory(
       revision: r.revision,
       actorId: r.actor,
       actorEmail: r.email,
+      proposedByEmail: r.proposer_email,
       change: diffSchema.parse(JSON.parse(r.diff)),
       at: r.created_at,
     };
