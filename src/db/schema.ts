@@ -312,6 +312,8 @@ export const eventParticipation = sqliteTable(
     // going | maybe | not_going — any tier may state it (WORKFLOWS §3 rc7).
     attendance: text("attendance"),
     createdAt: text("created_at").notNull(),
+    // When attendance was last stated (DESIGN §10 rc12: responses carry their own time).
+    respondedAt: text("responded_at"),
   },
   (t) => [
     unique("event_participation_uq").on(t.canonicalEventId, t.personId),
@@ -378,6 +380,48 @@ export const slotResponse = sqliteTable(
     }).onDelete("cascade"),
     index("slot_response_person_idx").on(t.personId),
     check("slot_response_answer_chk", sql`${t.answer} IN ('yes', 'ifneedbe', 'no')`),
+  ],
+);
+
+// --- Responses (MVP-2 slice 2D, DESIGN §10 rc12) -------------------------------------
+// Feedback: append-only notes ("might be late"), attributed. Not change_log rows —
+// those are keyed by revision and would turn every note into an edit conflict.
+export const eventFeedback = sqliteTable(
+  "event_feedback",
+  {
+    id: text("id").primaryKey(),
+    canonicalEventId: text("canonical_event_id")
+      .notNull()
+      .references(() => canonicalEvent.id, { onDelete: "cascade" }),
+    personId: text("person_id")
+      .notNull()
+      .references(() => person.id, { onDelete: "cascade" }),
+    body: text("body").notNull(),
+    createdAt: text("created_at").notNull(),
+  },
+  (t) => [index("event_feedback_event_idx").on(t.canonicalEventId, t.createdAt)],
+);
+
+// The account-less surface (DESIGN §13 token links): one action × one event × one
+// person. Only the hash is stored; issuing again replaces the row (rotate on resend).
+export const responseToken = sqliteTable(
+  "response_token",
+  {
+    tokenHash: text("token_hash").primaryKey(),
+    canonicalEventId: text("canonical_event_id")
+      .notNull()
+      .references(() => canonicalEvent.id, { onDelete: "cascade" }),
+    personId: text("person_id")
+      .notNull()
+      .references(() => person.id, { onDelete: "cascade" }),
+    action: text("action").notNull(),
+    expiresAt: text("expires_at").notNull(),
+    createdAt: text("created_at").notNull(),
+  },
+  (t) => [
+    unique("response_token_scope_uq").on(t.canonicalEventId, t.personId, t.action),
+    index("response_token_person_idx").on(t.personId),
+    check("response_token_action_chk", sql`${t.action} IN ('vote', 'attend')`),
   ],
 );
 
