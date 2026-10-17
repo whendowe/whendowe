@@ -24,9 +24,22 @@ import {
   pollResults,
   vote,
 } from "../../events/poll.js";
+import {
+  type Attendance,
+  actionFor,
+  addFeedback,
+  attendanceSchema,
+  issueResponseLinks,
+  listResponses,
+  revokeUndeliveredLink,
+  setAttendance,
+} from "../../events/response.js";
+import { MailCapReachedError } from "../../mail/capped.js";
+import type { MailPort } from "../../mail/port.js";
 import { findGroupForMember } from "../../people/group.js";
 import { type Html, html, renderPage } from "../layout.js";
 import { type AppEnv, requireSignedIn, verifyFormCsrf } from "../session.js";
+import { sendResponseLink } from "./respond.js";
 
 // Event pages (MVP-2 slice 2B). Every read goes through findEventForParticipant (no
 // IDOR), and every rendering goes through canSee / canSeeField — the single rule for
@@ -38,9 +51,13 @@ export const EVENTS_PATH = "/events";
 export interface EventRouteDeps {
   readonly storage: StoragePort;
   readonly now: () => string;
+  /** Always the capped port; response links go out through it. */
+  readonly mail: MailPort;
+  /** Links are built from this, never the Host header. */
+  readonly publicBaseUrl: string;
 }
 
-const BUSY_LABEL = "Busy";
+export const BUSY_LABEL = "Busy";
 
 function notFound(): string {
   return renderPage("Not found", html`<h1>Not found</h1><p><a href="/groups">Your groups</a></p>`);
@@ -258,6 +275,74 @@ ${poll.candidates.map(
 ${confirms}`;
 }
 
+// --- Attendance & notes (slice 2D) -------------------------------------------------
+
+const ATTENDANCE_LABEL: Record<Attendance, string> = {
+  going: "Going",
+  maybe: "Maybe",
+  not_going: "Can't make it",
+};
+
+/**
+ * Attendance and notes, at the viewer's tier. Who said what is participant-list
+ * information: names and everyone's notes for tiers that see participants; counts
+ * plus your OWN notes for everyone else.
+ */
+async function responsesSection(
+  deps: EventRouteDeps,
+  access: EventAccess,
+  csrf: string,
+): Promise<Html> {
+  const { event, participation } = access;
+  const names = canSee(participation.visibility, "participants");
+  const responses = await listResponses(deps.storage, access);
+  const count = (a: Attendance) => responses.attendance.filter((r) => r.attendance === a).length;
+  const label = (p: { displayName: string | null; email: string }) => p.displayName ?? p.email;
+  const notes = names
+    ? responses.feedback
+    : responses.feedback.filter((f) => f.personId === participation.personId);
+  const scheduled = event.status === "scheduled";
+  const open = scheduled || event.status === "proposed";
+
+  const attendanceForm = scheduled
+    ? html`<form method="post" action="${EVENTS_PATH}/${event.id}/attendance">
+  <input type="hidden" name="csrf" value="${csrf}" />
+  <p>${attendanceSchema.options.map(
+    (a) =>
+      html`<label style="margin-right:.8em"><input type="radio" name="attendance" value="${a}" ${participation.attendance === a ? html`checked` : ""} /> ${ATTENDANCE_LABEL[a]}</label>`,
+  )} <button type="submit">Save</button></p>
+</form>`
+    : "";
+  const tally = scheduled
+    ? html`<p class="muted">${count("going")} going · ${count("maybe")} maybe · ${count("not_going")} can't make it</p>${
+        names && responses.attendance.length > 0
+          ? html`<ul>${responses.attendance.map((r) => html`<li>${label(r)}: ${ATTENDANCE_LABEL[r.attendance]}</li>`)}</ul>`
+          : ""
+      }`
+    : "";
+  const noteForm = open
+    ? html`<form method="post" action="${EVENTS_PATH}/${event.id}/feedback">
+  <input type="hidden" name="csrf" value="${csrf}" />
+  <p><label>Add a note <span class="muted">(e.g. "might be late")</span><br /><textarea name="note" rows="2" maxlength="500" style="width:100%"></textarea></label></p>
+  <p><button type="submit">Add note</button></p>
+</form>`
+    : "";
+  const action = actionFor(access);
+  const sendLinks =
+    participation.editTier === "edit" && action !== null
+      ? html`<form method="post" action="${EVENTS_PATH}/${event.id}/links">
+  <input type="hidden" name="csrf" value="${csrf}" />
+  <p><button type="submit">${action === "vote" ? "Email everyone a link to vote" : "Email everyone a link to say if they're coming"}</button>
+  <span class="muted">No account needed to answer.</span></p>
+</form>`
+      : "";
+  return html`${scheduled ? html`<h2>Are you coming?</h2>${attendanceForm}${tally}` : ""}
+<h2>Notes</h2>
+${notes.length === 0 ? html`<p class="muted">No notes yet.</p>` : html`<ul>${notes.map((n) => html`<li><span class="muted">${n.at.slice(0, 16).replace("T", " ")}</span> · ${label(n)}: <span style="white-space:pre-wrap">${n.body}</span></li>`)}</ul>`}
+${noteForm}
+${sendLinks}`;
+}
+
 interface PollFormValues extends FormValues {
   readonly slots: readonly { readonly start: string; readonly end: string }[];
 }
@@ -366,6 +451,7 @@ ${
           html`<li>${p.displayName ?? p.email}${p.editTier === "edit" ? html` <span class="muted">· can edit</span>` : ""}</li>`,
       )}</ul>`
 }
+${await responsesSection(deps, access, csrf)}
 <h2>History</h2>
 <ul>${history.map(
       (h) =>
@@ -648,5 +734,110 @@ ${pollForm(`/groups/${membership.group.id}/polls`, me.csrfToken, values, errorMe
           409,
         );
     }
+  });
+
+  app.post(`${EVENTS_PATH}/:id/attendance`, async (c) => {
+    const me = requireSignedIn(c);
+    if (me instanceof Response) return me;
+    const form = await c.req.parseBody();
+    if (!(await verifyFormCsrf(me, form))) return c.html(rejected(), 403);
+    const access = await findEventForParticipant(deps.storage, c.req.param("id"), me.personId);
+    if (access === null || access.participation.visibility === "HIDDEN")
+      return c.html(notFound(), 404);
+    const attendance = attendanceSchema.safeParse(form.attendance);
+    if (!attendance.success)
+      return c.html(await eventPage(deps, access, me.csrfToken, "Pick one of the answers."), 400);
+    const result = await setAttendance(deps.storage, access, {
+      attendance: attendance.data,
+      now: deps.now(),
+    });
+    if (result.kind !== "recorded")
+      return c.html(
+        await eventPage(deps, access, me.csrfToken, "This event isn't taking answers."),
+        409,
+      );
+    return c.redirect(`${EVENTS_PATH}/${access.event.id}`, 303);
+  });
+
+  app.post(`${EVENTS_PATH}/:id/feedback`, async (c) => {
+    const me = requireSignedIn(c);
+    if (me instanceof Response) return me;
+    const form = await c.req.parseBody();
+    if (!(await verifyFormCsrf(me, form))) return c.html(rejected(), 403);
+    const access = await findEventForParticipant(deps.storage, c.req.param("id"), me.personId);
+    if (access === null || access.participation.visibility === "HIDDEN")
+      return c.html(notFound(), 404);
+    const result = await addFeedback(deps.storage, access, {
+      body: str(form, "note"),
+      now: deps.now(),
+    });
+    switch (result.kind) {
+      case "recorded":
+        return c.redirect(`${EVENTS_PATH}/${access.event.id}`, 303);
+      case "invalid":
+        return c.html(await eventPage(deps, access, me.csrfToken, result.reason), 400);
+      case "closed":
+      case "forbidden":
+        return c.html(
+          await eventPage(deps, access, me.csrfToken, "This event isn't taking notes."),
+          409,
+        );
+    }
+  });
+
+  app.post(`${EVENTS_PATH}/:id/links`, async (c) => {
+    const me = requireSignedIn(c);
+    if (me instanceof Response) return me;
+    const form = await c.req.parseBody();
+    if (!(await verifyFormCsrf(me, form))) return c.html(rejected(), 403);
+    const access = await findEventForParticipant(deps.storage, c.req.param("id"), me.personId);
+    if (access === null || access.participation.visibility === "HIDDEN")
+      return c.html(notFound(), 404);
+    const issued = await issueResponseLinks(deps.storage, access, { now: deps.now() });
+    if (issued.kind === "forbidden")
+      return c.html(
+        renderPage("Not allowed", html`<h1>Only the organizers can send these</h1>`),
+        403,
+      );
+    if (issued.kind === "closed")
+      return c.html(
+        await eventPage(deps, access, me.csrfToken, "This event has nothing to ask right now."),
+        409,
+      );
+
+    let sent = 0;
+    let failed = 0;
+    let capped = false;
+    for (const link of issued.links) {
+      if (capped) {
+        // The cap was reached: don't even try, but withdraw the link so a later retry
+        // isn't throttled for someone who never got it.
+        await revokeUndeliveredLink(deps.storage, link);
+        failed += 1;
+        continue;
+      }
+      try {
+        await sendResponseLink(deps.mail, {
+          link,
+          access,
+          from: me.email,
+          publicBaseUrl: deps.publicBaseUrl,
+        });
+        sent += 1;
+      } catch (error) {
+        await revokeUndeliveredLink(deps.storage, link);
+        failed += 1;
+        if (error instanceof MailCapReachedError) capped = true;
+      }
+    }
+    const parts = [
+      `Sent to ${sent} ${sent === 1 ? "person" : "people"}.`,
+      issued.throttled > 0 ? `${issued.throttled} already got a link in the last hour.` : "",
+      failed > 0 ? `Couldn't send to ${failed} — please try again later.` : "",
+    ].filter((p) => p !== "");
+    return c.html(
+      await eventPage(deps, access, me.csrfToken, parts.join(" ")),
+      failed > 0 ? 503 : 200,
+    );
   });
 }

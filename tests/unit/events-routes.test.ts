@@ -2,6 +2,7 @@
 import { createClient } from "@libsql/client";
 import { expect, it } from "vitest";
 import { sqliteStoragePort } from "../../src/db/sqlite.js";
+import { MailCapReachedError } from "../../src/mail/capped.js";
 import type { MailMessage } from "../../src/mail/port.js";
 import { createApp } from "../../src/web/app.js";
 import { CONFIRM_PATH, SIGN_IN_PATH } from "../../src/web/routes/auth.js";
@@ -17,11 +18,14 @@ async function harness() {
   for (const sql of await loadMigrationSql()) await client.executeMultiple(sql);
   const storage = sqliteStoragePort(client);
   const sent: MailMessage[] = [];
+  // Set to make every send fail — the mail cap, a provider outage.
+  const mailFailure: { error: Error | null } = { error: null };
   const app = createApp({
     auth: {
       storage,
       mail: {
         send: (m) => {
+          if (mailFailure.error !== null) return Promise.reject(mailFailure.error);
           sent.push(m);
           return Promise.resolve();
         },
@@ -31,7 +35,7 @@ async function harness() {
       now: () => new Date().toISOString(),
     },
   });
-  return { app, sent };
+  return { app, sent, mailFailure };
 }
 type H = Awaited<ReturnType<typeof harness>>;
 interface Who {
@@ -516,4 +520,213 @@ it("poll actions require CSRF and membership", async () => {
     ).status,
   ).toBe(404);
   expect((await get(h, `${group}/polls/new`, stranger)).status).toBe(404);
+});
+
+// --- account-less responses (slice 2D) ------------------------------------------------
+
+/** The emailed response link for this address, from the most recent mail to it. */
+function linkFor(h: H, email: string): string {
+  const mail = [...h.sent].reverse().find((m) => m.to === email);
+  const url = /https?:\/\/\S+\/respond\?t=\S+/.exec(mail?.text ?? "")?.[0];
+  if (url === undefined) throw new Error(`no response link for ${email}`);
+  const parsed = new URL(url);
+  return `${parsed.pathname}${parsed.search}`;
+}
+
+const tokenOf = (path: string) => new URL(path, "http://x").searchParams.get("t") ?? "";
+
+async function sendLinks(h: H, dm: Who, event: string) {
+  return h.app.request(`${event}/links`, post({ csrf: dm.csrf }, dm.cookie));
+}
+
+it("an organizer emails vote links: everyone but themself, and no title in a BUSY inbox", async () => {
+  const h = await harness();
+  const { dm, group } = await setup(h);
+  await join(h, dm, group, "ann@example.org", "view", "FULL");
+  await join(h, dm, group, "grandma@example.org", "view", "BUSY");
+  const poll = await startPoll(h, dm, group);
+  const before = h.sent.length;
+  const res = await sendLinks(h, dm, poll);
+  expect(res.status).toBe(200);
+  expect(await res.text()).toContain("Sent to 2 people.");
+  const mails = h.sent.slice(before);
+  expect(mails.map((m) => m.to).sort()).toEqual(["ann@example.org", "grandma@example.org"]);
+  const ann = mails.find((m) => m.to === "ann@example.org");
+  const grandma = mails.find((m) => m.to === "grandma@example.org");
+  expect(ann?.subject).toContain("Session 13");
+  expect(`${grandma?.subject} ${grandma?.text}`).not.toContain("Session 13");
+});
+
+it("a player votes from the link with no account: GET changes nothing, POST saves, nobody is signed in", async () => {
+  const h = await harness();
+  const { dm, group } = await setup(h);
+  await join(h, dm, group, "ann@example.org", "view", "FULL");
+  const poll = await startPoll(h, dm, group);
+  await sendLinks(h, dm, poll);
+  const link = linkFor(h, "ann@example.org");
+
+  // No cookie at all: the link is the identity. Opening it (twice, like a mail
+  // scanner) records nothing and sets no session.
+  for (let i = 0; i < 2; i++) {
+    const page = await h.app.request(link);
+    expect(page.status).toBe(200);
+    expect(page.headers.get("set-cookie")).toBeNull();
+    expect(page.headers.get("referrer-policy")).toBe("no-referrer");
+    expect(page.headers.get("cache-control")).toBe("no-store");
+    expect(await page.text()).toContain("Which times work for you?");
+  }
+  expect(await text(h, poll, dm)).toContain("0 yes · 0 if need be · 0 no");
+
+  const res = await h.app.request(
+    "/respond",
+    post({ t: tokenOf(link), slot_0: "yes", slot_1: "no", note: "Thursday's bad for me" }),
+  );
+  expect(res.status).toBe(303);
+  expect(res.headers.get("set-cookie")).toBeNull();
+  expect(await (await h.app.request(res.headers.get("location") ?? "")).text()).toContain(
+    "your answer is saved",
+  );
+
+  const dmPage = await text(h, poll, dm);
+  expect(dmPage).toContain("ann@example.org: Yes");
+  // The note is user text: escaped, inside its own element.
+  expect(dmPage).toMatch(/ann@example\.org: <span[^>]*>Thursday&#39;s bad for me<\/span>/);
+});
+
+it("a response link answers only for its own event and person — and a dead link says so", async () => {
+  const h = await harness();
+  const { dm, group } = await setup(h);
+  await join(h, dm, group, "ann@example.org", "view", "FULL");
+  const poll = await startPoll(h, dm, group);
+  await sendLinks(h, dm, poll);
+  const t = tokenOf(linkFor(h, "ann@example.org"));
+  // The link can't be turned on another event by path or body: there is no event id to send.
+  const other = await startPoll(h, dm, group, { ...POLL, title: "Another" });
+  await h.app.request("/respond", post({ t, slot_0: "yes" }));
+  expect(await text(h, other, dm)).toContain("0 yes · 0 if need be · 0 no");
+  for (const bad of ["/respond?t=not-a-token", "/respond", `/respond?t=${t}x`]) {
+    const res = await h.app.request(bad);
+    expect(res.status).toBe(404);
+    expect(await res.text()).toContain("This link no longer works");
+  }
+  expect((await h.app.request("/respond", post({ t: "nope", slot_0: "yes" }))).status).toBe(404);
+});
+
+it("after the time is picked, a vote link says so and refuses a late vote", async () => {
+  const h = await harness();
+  const { dm, group } = await setup(h);
+  await join(h, dm, group, "ann@example.org", "view", "FULL");
+  const poll = await startPoll(h, dm, group);
+  await sendLinks(h, dm, poll);
+  const link = linkFor(h, "ann@example.org");
+  const revision = await revisionOnPage(h, poll, dm);
+  await h.app.request(`${poll}/confirm`, post({ csrf: dm.csrf, revision, slot: "0" }, dm.cookie));
+  expect(await (await h.app.request(link)).text()).toContain("Voting has closed.");
+  expect((await h.app.request("/respond", post({ t: tokenOf(link), slot_0: "no" }))).status).toBe(
+    409,
+  );
+});
+
+it("attendance and notes by link; a DETAILS member sees the counts but not who or their notes", async () => {
+  const h = await harness();
+  const { dm, group } = await setup(h);
+  await join(h, dm, group, "ann@example.org", "view", "FULL");
+  const petra = await join(h, dm, group, "petra@example.org", "view", "DETAILS");
+  const event = await createVia(h, dm, group);
+  await sendLinks(h, dm, event);
+  const link = linkFor(h, "ann@example.org");
+  expect(await (await h.app.request(link)).text()).toContain("Are you coming?");
+  const res = await h.app.request(
+    "/respond",
+    post({ t: tokenOf(link), attendance: "maybe", note: "NOTE-7: running late" }),
+  );
+  expect(res.status).toBe(303);
+
+  const dmPage = await text(h, event, dm);
+  expect(dmPage).toContain("ann@example.org: Maybe");
+  expect(dmPage).toContain("ann@example.org: <span");
+  expect(dmPage).toContain("NOTE-7: running late");
+  const petraPage = await text(h, event, petra);
+  expect(petraPage).toContain("0 going · 1 maybe · 0 can't make it"); // literal template text
+  expect(petraPage).not.toContain("ann@example.org");
+  // A marker, not "might be late": the note form's own example text says that.
+  expect(petraPage).not.toContain("NOTE-7");
+});
+
+it("a resend within the hour sends nothing new; a failed send can be retried at once", async () => {
+  const h = await harness();
+  const { dm, group } = await setup(h);
+  await join(h, dm, group, "ann@example.org", "view", "FULL");
+  const event = await createVia(h, dm, group);
+
+  // The cap is hit: nothing goes out, and the page says so.
+  h.mailFailure.error = new MailCapReachedError({ daily: 1, monthly: 1 });
+  const capped = await sendLinks(h, dm, event);
+  expect(capped.status).toBe(503);
+  expect(await capped.text()).toContain("Sent to 0 people. Couldn&#39;t send to 1");
+  // Mail is back: the retry goes out immediately — the undelivered link was withdrawn,
+  // so the resend throttle doesn't lock Ann out for an hour.
+  h.mailFailure.error = null;
+  expect(await (await sendLinks(h, dm, event)).text()).toContain("Sent to 1 person.");
+  const before = h.sent.length;
+  expect(await (await sendLinks(h, dm, event)).text()).toContain(
+    "1 already got a link in the last hour.",
+  );
+  expect(h.sent.length).toBe(before);
+});
+
+it("signed in: say you're coming and leave a note from the event page", async () => {
+  const h = await harness();
+  const { dm, group } = await setup(h);
+  const ann = await join(h, dm, group, "ann@example.org", "view", "FULL");
+  const event = await createVia(h, dm, group);
+  expect(
+    (
+      await h.app.request(
+        `${event}/attendance`,
+        post({ csrf: ann.csrf, attendance: "going" }, ann.cookie),
+      )
+    ).status,
+  ).toBe(303);
+  expect(
+    (
+      await h.app.request(
+        `${event}/feedback`,
+        post({ csrf: ann.csrf, note: "bringing dice" }, ann.cookie),
+      )
+    ).status,
+  ).toBe(303);
+  const page = await text(h, event, dm);
+  expect(page).toContain("ann@example.org: Going");
+  expect(page).toContain("bringing dice");
+  // Ann's own answer is pre-selected for her.
+  expect(await text(h, event, ann)).toMatch(/name="attendance" value="going" checked/);
+});
+
+it("response routes require CSRF, membership, and an editor to send links", async () => {
+  const h = await harness();
+  const { dm, group } = await setup(h);
+  const ann = await join(h, dm, group, "ann@example.org", "view", "FULL");
+  const event = await createVia(h, dm, group);
+  const stranger = await signIn(h, "stranger@example.org");
+  for (const path of ["attendance", "feedback", "links"]) {
+    expect(
+      (await h.app.request(`${event}/${path}`, post({ attendance: "going", note: "x" }, dm.cookie)))
+        .status,
+    ).toBe(403);
+    expect(
+      (
+        await h.app.request(
+          `${event}/${path}`,
+          post({ csrf: stranger.csrf, attendance: "going", note: "x" }, stranger.cookie),
+        )
+      ).status,
+    ).toBe(404);
+  }
+  expect(await text(h, event, ann)).not.toContain("Email everyone");
+  const before = h.sent.length;
+  expect((await h.app.request(`${event}/links`, post({ csrf: ann.csrf }, ann.cookie))).status).toBe(
+    403,
+  );
+  expect(h.sent.length).toBe(before);
 });

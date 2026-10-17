@@ -5,6 +5,7 @@ import { type AuthDeps, registerAuthRoutes, SIGN_IN_PATH, SIGN_OUT_PATH } from "
 import { registerEventRoutes } from "./routes/events.js";
 import { GROUPS_PATH, registerGroupRoutes } from "./routes/groups.js";
 import { CONNECT_PATH, type OAuthRouteDeps, registerOAuthRoutes } from "./routes/oauth.js";
+import { registerRespondRoutes } from "./routes/respond.js";
 import { type AppEnv, sessionMiddleware } from "./session.js";
 
 // The Hono app is shared verbatim by both deployments (DESIGN.md §6): workerd mounts
@@ -77,6 +78,7 @@ ${connect}`,
     registerAuthRoutes(app, auth);
     registerGroupRoutes(app, auth);
     registerEventRoutes(app, auth);
+    registerRespondRoutes(app, auth);
   }
   if (oauth !== undefined) registerOAuthRoutes(app, oauth);
 
