@@ -314,6 +314,8 @@ export const eventParticipation = sqliteTable(
     createdAt: text("created_at").notNull(),
     // When attendance was last stated (DESIGN §10 rc12: responses carry their own time).
     respondedAt: text("responded_at"),
+    // When response_state last changed — "seen ✓ 14:02" (DESIGN §10 rc13, US-4).
+    responseStateAt: text("response_state_at"),
   },
   (t) => [
     unique("event_participation_uq").on(t.canonicalEventId, t.personId),

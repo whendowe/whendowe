@@ -1,0 +1,1 @@
+ALTER TABLE `event_participation` ADD `response_state_at` text;

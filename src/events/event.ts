@@ -5,7 +5,12 @@ import { type Diff, diff } from "../changelog.js";
 import type { SqlStatement, StoragePort } from "../db/port.js";
 import { uuidv7 } from "../ids.js";
 import type { GroupMembership } from "../people/group.js";
-import { groupDefaults, type Participation, toParticipation } from "./participation.js";
+import {
+  groupDefaults,
+  PARTICIPATION_COLUMNS,
+  type Participation,
+  toParticipation,
+} from "./participation.js";
 
 // Canonical events (MVP-2, DESIGN §10/§11). Every accepted change bumps `revision`
 // and appends a change_log row IN THE SAME BATCH — the attribution feed and the
@@ -113,6 +118,16 @@ const eventRowSchema = z.object({
   updated_at: z.string(),
 });
 
+/**
+ * WORKFLOWS §5 / US-3: a proposal is between its parties. While an event is `proposed`
+ * — and after it was `declined` or `withdrawn` — only its creator and the people asked
+ * to decide (agree, or vote on a poll) can see it; everyone else sees scheduled
+ * reality only. Part of the single access gate, so no page can forget it. A constant
+ * fragment, never built from input.
+ */
+export const PARTY_RULE = `(e.status NOT IN ('proposed', 'declined', 'withdrawn')
+  OR e.owner_id = ep.person_id OR ep.response_kind IN ('accept', 'slot_vote'))`;
+
 const EVENT_COLUMNS = `e.id, e.revision, e.status, e.owner_id, e.group_id, e.title, e.description,
   e.location, e.all_day, e.start_local, e.end_local, e.tzid, e.created_at, e.updated_at`;
 
@@ -176,11 +191,25 @@ export async function createEvent(
     readonly fields: EventFieldsInput;
     readonly now: string;
     readonly newId?: () => string;
+    /**
+     * Who must agree ("accept") or should acknowledge ("ack") — DESIGN §10 rc13. Anyone
+     * asked to agree makes the event a `proposed` one until the last of them accepts.
+     * Ids that aren't fellow group members (or are the creator) are ignored.
+     */
+    readonly requests?: ReadonlyMap<string, "accept" | "ack">;
   },
 ): Promise<CanonicalEvent> {
+  const members =
+    input.group === null ? [] : (await groupDefaults(storage, input.group)).map((m) => m.personId);
+  const requests = new Map(
+    [...(input.requests ?? new Map<string, "accept" | "ack">())].filter(
+      ([id]) => id !== input.creatorId && members.includes(id),
+    ),
+  );
+  const needsAgreement = [...requests.values()].includes("accept");
   return createEventWith(
     storage,
-    { ...input, status: "scheduled", responseKind: "none" },
+    { ...input, status: needsAgreement ? "proposed" : "scheduled", responseKind: "none", requests },
     () => [],
   );
 }
@@ -198,6 +227,7 @@ export async function createEventWith(
     readonly fields: EventFieldsInput;
     readonly status: EventStatus;
     readonly responseKind: "none" | "slot_vote";
+    readonly requests?: ReadonlyMap<string, "accept" | "ack">;
     readonly now: string;
     readonly newId?: () => string;
   },
@@ -238,11 +268,23 @@ export async function createEventWith(
             VALUES (?, ?, 'edit', 'FULL', ?, ?)`,
       params: [id, input.creatorId, input.responseKind, input.now],
     },
-    ...others.map((m) => ({
-      sql: `INSERT INTO event_participation (canonical_event_id, person_id, edit_tier, visibility, response_kind, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)`,
-      params: [id, m.personId, m.editTier, m.visibility, input.responseKind, input.now],
-    })),
+    ...others.map((m) => {
+      const requested = input.requests?.get(m.personId);
+      return {
+        sql: `INSERT INTO event_participation
+                (canonical_event_id, person_id, edit_tier, visibility, response_kind, response_state, created_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        params: [
+          id,
+          m.personId,
+          m.editTier,
+          m.visibility,
+          requested ?? input.responseKind,
+          requested === undefined ? null : "pending",
+          input.now,
+        ],
+      };
+    }),
     ...extra(id),
     logRow(id, 1, input.creatorId, diff({}, { ...flatten(fields), status }), input.now),
   ]);
@@ -266,9 +308,9 @@ export async function findEventForParticipant(
   personId: string,
 ): Promise<EventAccess | null> {
   const rows = await storage.query({
-    sql: `SELECT ${EVENT_COLUMNS}, ep.canonical_event_id, ep.person_id, ep.edit_tier, ep.visibility, ep.attendance
+    sql: `SELECT ${EVENT_COLUMNS}, ${PARTICIPATION_COLUMNS}
           FROM canonical_event e JOIN event_participation ep ON ep.canonical_event_id = e.id
-          WHERE e.id = ? AND ep.person_id = ?`,
+          WHERE e.id = ? AND ep.person_id = ? AND ${PARTY_RULE}`,
     params: [eventId, personId],
   });
   if (rows[0] === undefined) return null;
@@ -286,13 +328,26 @@ export async function listGroupEvents(
   personId: string,
 ): Promise<EventAccess[]> {
   const rows = await storage.query({
-    sql: `SELECT ${EVENT_COLUMNS}, ep.canonical_event_id, ep.person_id, ep.edit_tier, ep.visibility, ep.attendance
+    sql: `SELECT ${EVENT_COLUMNS}, ${PARTICIPATION_COLUMNS}
           FROM canonical_event e JOIN event_participation ep ON ep.canonical_event_id = e.id
-          WHERE e.group_id = ? AND ep.person_id = ? AND ep.visibility <> 'HIDDEN'
+          WHERE e.group_id = ? AND ep.person_id = ? AND ep.visibility <> 'HIDDEN' AND ${PARTY_RULE}
           ORDER BY e.start_local, e.id`,
     params: [membership.group.id, personId],
   });
   return rows.map((row) => ({ event: toEvent(row), participation: toParticipation(row) }));
+}
+
+/** Fields whose change alters someone's plans (DESIGN §10 rc13): not title, not notes. */
+const MATERIAL_FIELDS: ReadonlySet<string> = new Set([
+  "startLocal",
+  "endLocal",
+  "tzid",
+  "allDay",
+  "location",
+]);
+
+export function isMaterial(change: Diff): boolean {
+  return Object.keys(change).some((field) => MATERIAL_FIELDS.has(field));
 }
 
 export type EditResult =
@@ -370,6 +425,19 @@ export async function editEvent(
               SELECT ?, ?, ?, 'ui', ?, ? WHERE changes() = 1`,
         params: log.params,
       },
+      // A material change (time, date, place — DESIGN §10 rc13) asks everyone who had
+      // agreed or acknowledged to look again. Guarded by changes() on the log insert,
+      // so it happens exactly when the edit did.
+      ...(isMaterial(change)
+        ? [
+            {
+              sql: `UPDATE event_participation SET response_state = 'reack'
+                    WHERE canonical_event_id = ? AND response_state IN ('accepted', 'acknowledged')
+                      AND changes() = 1`,
+              params: [access.event.id],
+            },
+          ]
+        : []),
     ]);
   } catch {
     // UNIQUE(event, revision): a rival committed revision `next` first.
@@ -435,5 +503,97 @@ export async function listHistory(
       change: diffSchema.parse(JSON.parse(r.diff)),
       at: r.created_at,
     };
+  });
+}
+
+// --- Lifecycle transitions (WORKFLOWS §5, DESIGN §10 rc13) ------------------------------
+
+/**
+ * The two statements every lifecycle transition ends with: flip the status — only from
+ * `from`, only if `gate` — and log it, attributed, only if the flip happened. When a
+ * caller puts a statement before these (an answer being recorded), the flip is further
+ * gated on THAT having changed a row: no answer recorded, no transition.
+ */
+export function transitionStatements(input: {
+  readonly eventId: string;
+  readonly from: EventStatus;
+  readonly to: EventStatus;
+  readonly actorId: string;
+  readonly now: string;
+  readonly afterPrevious: boolean;
+  readonly gate?: SqlStatement;
+}): SqlStatement[] {
+  const change = diff({ status: input.from }, { status: input.to });
+  return [
+    {
+      sql: `UPDATE canonical_event SET status = ?, revision = revision + 1, updated_at = ?
+            WHERE id = ? AND status = ?${input.afterPrevious ? " AND changes() = 1" : ""}${
+              input.gate === undefined ? "" : ` AND ${input.gate.sql}`
+            }`,
+      params: [input.to, input.now, input.eventId, input.from, ...(input.gate?.params ?? [])],
+    },
+    {
+      sql: `INSERT INTO change_log (canonical_event_id, revision, actor, source, diff, created_at)
+            SELECT ?, (SELECT revision FROM canonical_event WHERE id = ?), ?, 'ui', ?, ?
+            WHERE changes() = 1`,
+      params: [input.eventId, input.eventId, input.actorId, JSON.stringify(change), input.now],
+    },
+  ];
+}
+
+export type TransitionResult =
+  | { readonly kind: "done"; readonly status: EventStatus }
+  | { readonly kind: "forbidden" }
+  | { readonly kind: "closed" };
+
+async function currentStatus(storage: StoragePort, eventId: string): Promise<EventStatus> {
+  const rows = await storage.query({
+    sql: "SELECT status FROM canonical_event WHERE id = ?",
+    params: [eventId],
+  });
+  return statusSchema.parse(rows[0]?.status);
+}
+
+async function runTransition(
+  storage: StoragePort,
+  access: EventAccess,
+  from: EventStatus,
+  to: EventStatus,
+  input: { readonly actorId: string; readonly now: string },
+): Promise<TransitionResult> {
+  if (access.event.status !== from) return { kind: "closed" };
+  await storage.batch(
+    transitionStatements({ eventId: access.event.id, from, to, ...input, afterPrevious: false }),
+  );
+  const status = await currentStatus(storage, access.event.id);
+  return status === to ? { kind: "done", status } : { kind: "closed" };
+}
+
+/** The creator takes back a proposal (or a poll) nobody has settled yet. */
+export async function withdrawProposal(
+  storage: StoragePort,
+  access: EventAccess,
+  input: { readonly now: string },
+): Promise<TransitionResult> {
+  if (access.event.ownerId !== access.participation.personId) return { kind: "forbidden" };
+  return runTransition(storage, access, "proposed", "withdrawn", {
+    actorId: access.participation.personId,
+    now: input.now,
+  });
+}
+
+/** Editors cancel a scheduled event, or restore a cancelled one (US-9), attributed. */
+export async function setCancelled(
+  storage: StoragePort,
+  access: EventAccess,
+  input: { readonly cancelled: boolean; readonly now: string },
+): Promise<TransitionResult> {
+  if (access.participation.editTier !== "edit") return { kind: "forbidden" };
+  const [from, to]: [EventStatus, EventStatus] = input.cancelled
+    ? ["scheduled", "cancelled"]
+    : ["cancelled", "scheduled"];
+  return runTransition(storage, access, from, to, {
+    actorId: access.participation.personId,
+    now: input.now,
   });
 }

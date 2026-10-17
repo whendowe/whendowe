@@ -4,7 +4,19 @@ import type { StoragePort } from "../db/port.js";
 import { uuidv7 } from "../ids.js";
 import { type Visibility, visibilitySchema } from "../people/invite.js";
 import { hashToken, issueToken } from "../people/tokens.js";
-import { type EventAccess, findEventForParticipant } from "./event.js";
+import {
+  type EventAccess,
+  type EventStatus,
+  findEventForParticipant,
+  PARTY_RULE,
+  transitionStatements,
+} from "./event.js";
+import {
+  type ResponseKind,
+  type ResponseState,
+  responseKindSchema,
+  responseStateSchema,
+} from "./participation.js";
 
 // Responses (MVP-2 slice 2D): attendance and feedback from every tier, and the
 // account-less links that let someone vote or say whether they're coming without
@@ -243,7 +255,9 @@ export async function issueResponseLinks(
     await storage.query({
       sql: `SELECT ep.person_id, p.email, p.display_name, ep.visibility
             FROM event_participation ep JOIN person p ON p.id = ep.person_id
+              JOIN canonical_event e ON e.id = ep.canonical_event_id
             WHERE ep.canonical_event_id = ? AND ep.visibility <> 'HIDDEN' AND ep.person_id <> ?
+              AND ${PARTY_RULE}
             ORDER BY p.email`,
       params: [access.event.id, access.participation.personId],
     })
@@ -333,4 +347,152 @@ export async function resolveResponseLink(
   const access = await findEventForParticipant(storage, row.canonical_event_id, row.person_id);
   if (access === null || access.participation.visibility === "HIDDEN") return null;
   return { access, action: row.action };
+}
+
+// --- Agreement & acknowledgment (slice 2E-1, DESIGN §10 rc13) -----------------------------
+
+export type AnswerResult =
+  | { readonly kind: "recorded"; readonly status: EventStatus }
+  | { readonly kind: "forbidden" }
+  | { readonly kind: "closed" };
+
+/**
+ * Agree to, or turn down, a proposal you were asked to decide on. One batch:
+ *   1. record the answer — only while the event is still `proposed`;
+ *   2. accept: schedule it if (and only if) that was the LAST agreement missing;
+ *      decline: one "no" declines it;
+ *   3. log the transition, attributed to the person whose answer caused it.
+ * Each step is gated on the one before having changed a row, so concurrent answers
+ * can't both "be last", and nothing transitions on an answer that didn't land.
+ */
+export async function answerProposal(
+  storage: StoragePort,
+  access: EventAccess,
+  input: { readonly answer: "accept" | "decline"; readonly now: string },
+): Promise<AnswerResult> {
+  const { event, participation } = access;
+  if (participation.visibility === "HIDDEN" || participation.responseKind !== "accept")
+    return { kind: "forbidden" };
+  if (event.status !== "proposed") return { kind: "closed" };
+  const state: ResponseState = input.answer === "accept" ? "accepted" : "declined";
+  const actor = {
+    eventId: event.id,
+    actorId: participation.personId,
+    now: input.now,
+    from: "proposed" as const,
+  };
+  await storage.batch([
+    {
+      sql: `UPDATE event_participation SET response_state = ?, response_state_at = ?
+            WHERE canonical_event_id = ? AND person_id = ? AND response_kind = 'accept'
+              AND response_state IN ('pending', 'accepted')
+              AND EXISTS (SELECT 1 FROM canonical_event WHERE id = ? AND status = 'proposed')`,
+      params: [state, input.now, event.id, participation.personId, event.id],
+    },
+    ...(input.answer === "accept"
+      ? transitionStatements({
+          ...actor,
+          to: "scheduled",
+          afterPrevious: true,
+          gate: {
+            sql: `NOT EXISTS (SELECT 1 FROM event_participation WHERE canonical_event_id = ?
+                    AND response_kind = 'accept' AND response_state IS NOT 'accepted')`,
+            params: [event.id],
+          },
+        })
+      : transitionStatements({ ...actor, to: "declined", afterPrevious: true })),
+  ]);
+  const rows = await storage.query({
+    sql: `SELECT ep.response_state, e.status FROM event_participation ep
+            JOIN canonical_event e ON e.id = ep.canonical_event_id
+          WHERE ep.canonical_event_id = ? AND ep.person_id = ?`,
+    params: [event.id, participation.personId],
+  });
+  const row = z
+    .object({ response_state: responseStateSchema.nullable(), status: z.string() })
+    .parse(rows[0]);
+  if (row.response_state !== state) return { kind: "closed" };
+  const status = z
+    .enum(["draft", "proposed", "scheduled", "declined", "withdrawn", "cancelled"])
+    .parse(row.status);
+  return { kind: "recorded", status };
+}
+
+/** Whether this person has something to acknowledge on a scheduled event right now. */
+export function needsAcknowledgment(access: EventAccess): boolean {
+  const { responseKind, responseState } = access.participation;
+  if (access.event.status !== "scheduled") return false;
+  return (
+    (responseKind === "ack" && (responseState === "pending" || responseState === "reack")) ||
+    (responseKind === "accept" && responseState === "reack")
+  );
+}
+
+/**
+ * "Seen ✓" — for an acknowledgment request, or to re-confirm after a material change
+ * (an `accept` participant returns to `accepted`). Never gates the event.
+ */
+export async function acknowledge(
+  storage: StoragePort,
+  access: EventAccess,
+  input: { readonly now: string },
+): Promise<ResponseResult> {
+  if (access.participation.visibility === "HIDDEN") return { kind: "forbidden" };
+  if (!needsAcknowledgment(access))
+    return { kind: "invalid", reason: "There's nothing to acknowledge." };
+  const written = await storage.query({
+    sql: `UPDATE event_participation
+          SET response_state = CASE response_kind WHEN 'ack' THEN 'acknowledged' ELSE 'accepted' END,
+              response_state_at = ?
+          WHERE canonical_event_id = ? AND person_id = ?
+            AND ((response_kind = 'ack' AND response_state IN ('pending', 'reack'))
+              OR (response_kind = 'accept' AND response_state = 'reack'))
+            AND EXISTS (SELECT 1 FROM canonical_event WHERE id = ? AND status = 'scheduled')
+          RETURNING person_id`,
+    params: [input.now, access.event.id, access.participation.personId, access.event.id],
+  });
+  return written.length === 1 ? { kind: "recorded" } : { kind: "closed" };
+}
+
+export interface RequestEntry {
+  readonly personId: string;
+  readonly email: string;
+  readonly displayName: string | null;
+  readonly kind: Extract<ResponseKind, "accept" | "ack">;
+  readonly state: ResponseState;
+  readonly at: string | null;
+}
+
+const requestRowSchema = z.object({
+  person_id: z.string(),
+  email: z.string(),
+  display_name: z.string().nullable(),
+  response_kind: responseKindSchema.extract(["accept", "ack"]),
+  response_state: responseStateSchema,
+  response_state_at: z.string().nullable(),
+});
+
+/** Who was asked to agree or acknowledge, and where each stands — for proven access. */
+export async function listRequests(
+  storage: StoragePort,
+  access: EventAccess,
+): Promise<RequestEntry[]> {
+  const rows = await storage.query({
+    sql: `SELECT ep.person_id, p.email, p.display_name, ep.response_kind, ep.response_state, ep.response_state_at
+          FROM event_participation ep JOIN person p ON p.id = ep.person_id
+          WHERE ep.canonical_event_id = ? AND ep.response_kind IN ('accept', 'ack')
+          ORDER BY p.email`,
+    params: [access.event.id],
+  });
+  return rows.map((row) => {
+    const r = requestRowSchema.parse(row);
+    return {
+      personId: r.person_id,
+      email: r.email,
+      displayName: r.display_name,
+      kind: r.response_kind,
+      state: r.response_state,
+      at: r.response_state_at,
+    };
+  });
 }

@@ -12,13 +12,35 @@ import {
 // Who takes part in an event, and on what terms (DESIGN §10 rc7). Two independent
 // axes per person: what they may CHANGE (edit tier) and what they SEE (visibility).
 
+export const responseKindSchema = z.enum(["none", "ack", "accept", "slot_vote"]);
+export type ResponseKind = z.infer<typeof responseKindSchema>;
+/**
+ * DESIGN §10 rc13. The column has no CHECK (SQLite can't add one without a rebuild,
+ * §16), so THIS is the constraint: every read of response_state goes through it.
+ */
+export const responseStateSchema = z.enum([
+  "pending",
+  "accepted",
+  "declined",
+  "acknowledged",
+  "reack",
+]);
+export type ResponseState = z.infer<typeof responseStateSchema>;
+
 export interface Participation {
   readonly eventId: string;
   readonly personId: string;
   readonly editTier: EditTier;
   readonly visibility: Visibility;
   readonly attendance: "going" | "maybe" | "not_going" | null;
+  /** What the organizer asked this person for, and their answer so far. */
+  readonly responseKind: ResponseKind;
+  readonly responseState: ResponseState | null;
 }
+
+/** The SQL column list toParticipation reads, aliased `ep`. */
+export const PARTICIPATION_COLUMNS =
+  "ep.canonical_event_id, ep.person_id, ep.edit_tier, ep.visibility, ep.attendance, ep.response_kind, ep.response_state";
 
 export interface ParticipantView extends Participation {
   readonly email: string;
@@ -62,6 +84,8 @@ export const participationRowSchema = z.object({
   edit_tier: editTierSchema,
   visibility: visibilitySchema,
   attendance: z.enum(["going", "maybe", "not_going"]).nullable(),
+  response_kind: responseKindSchema,
+  response_state: responseStateSchema.nullable(),
 });
 
 export function toParticipation(row: unknown): Participation {
@@ -72,6 +96,8 @@ export function toParticipation(row: unknown): Participation {
     editTier: r.edit_tier,
     visibility: r.visibility,
     attendance: r.attendance,
+    responseKind: r.response_kind,
+    responseState: r.response_state,
   };
 }
 
@@ -86,7 +112,7 @@ export async function listParticipants(
   eventId: string,
 ): Promise<ParticipantView[]> {
   const rows = await storage.query({
-    sql: `SELECT ep.canonical_event_id, ep.person_id, ep.edit_tier, ep.visibility, ep.attendance,
+    sql: `SELECT ${PARTICIPATION_COLUMNS},
                  p.email, p.display_name
           FROM event_participation ep JOIN person p ON p.id = ep.person_id
           WHERE ep.canonical_event_id = ?
