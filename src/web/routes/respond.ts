@@ -7,9 +7,12 @@ import { canSee } from "../../events/participation.js";
 import { type Answer, answerSchema, pollResults, vote } from "../../events/poll.js";
 import {
   type Attendance,
+  acknowledge,
   addFeedback,
+  answerProposal,
   attendanceSchema,
   type IssuedLink,
+  needsAcknowledgment,
   RESPONSE_TOKEN_TTL_MS,
   type ResolvedLink,
   resolveResponseLink,
@@ -63,7 +66,7 @@ function header(access: EventAccess): Html {
   const { event, participation } = access;
   const title = canSee(participation.visibility, "title") ? event.title : BUSY_LABEL;
   const when =
-    event.status === "proposed"
+    event.status === "proposed" && participation.responseKind === "slot_vote"
       ? html`<p>Voting on a time.</p>`
       : html`<p>${formatWhen(event)}${event.status === "cancelled" ? " — cancelled" : ""}</p>`;
   const where =
@@ -86,7 +89,19 @@ async function respondPage(
     (action === "attend" && event.status === "scheduled");
 
   let question: Html | string = "";
-  if (action === "vote" && open) {
+  if (action === "vote" && open && participation.responseKind === "accept") {
+    // A consent proposal (DESIGN §10 rc13): one time, agree or decline.
+    const current = participation.responseState;
+    question = html`<h2>Do you agree?</h2>
+<p>${[
+      ["accept", "I agree", current === "accepted"],
+      ["decline", "I don't agree", current === "declined"],
+    ].map(
+      ([value, label, checked]) =>
+        html`<label style="margin-right:.8em"><input type="radio" name="decision" value="${String(value)}" ${checked === true ? html`checked` : ""} /> ${String(label)}</label>`,
+    )}</p>
+<p class="muted">It goes ahead only when everyone asked agrees; one "no" turns it down.</p>`;
+  } else if (action === "vote" && open) {
     const poll = await pollResults(storage, access);
     question = html`<h2>Which times work for you?</h2>
 <ul style="list-style:none;padding-left:0">${poll.candidates.map(
@@ -101,9 +116,20 @@ ${answerSchema.options.map(
 <p>${attendanceSchema.options.map(
       (a) =>
         html`<label style="margin-right:.8em"><input type="radio" name="attendance" value="${a}" ${participation.attendance === a ? html`checked` : ""} /> ${ATTENDANCE_LABEL[a]}</label>`,
-    )}</p>`;
+    )}</p>${
+      needsAcknowledgment(access)
+        ? html`<p><label><input type="checkbox" name="ack" value="on" /> ${
+            participation.responseState === "reack"
+              ? "I've seen what changed"
+              : "I've seen this (the organizer asked you to confirm)"
+          }</label></p>`
+        : ""
+    }`;
   } else if (action === "vote" && event.status === "scheduled") {
-    question = html`<p><strong>Voting has closed.</strong> The time is ${formatWhen(event)}.</p>`;
+    question =
+      participation.responseKind === "accept"
+        ? html`<p><strong>It's settled.</strong> The time is ${formatWhen(event)}.</p>`
+        : html`<p><strong>Voting has closed.</strong> The time is ${formatWhen(event)}.</p>`;
   } else {
     question = html`<p><strong>There's nothing to answer here any more.</strong></p>`;
   }
@@ -158,7 +184,15 @@ export function registerRespondRoutes(app: Hono<AppEnv>, deps: RespondRouteDeps)
       c.html(respondPage(deps.storage, link, token, html`<p class="error">${message}</p>`), status);
 
     let answered = false;
-    if (action === "vote") {
+    if (action === "vote" && access.participation.responseKind === "accept") {
+      const decision =
+        form.decision === "accept" || form.decision === "decline" ? form.decision : null;
+      if (decision !== null) {
+        answered = true;
+        const result = await answerProposal(deps.storage, access, { answer: decision, now });
+        if (result.kind !== "recorded") return problem("This has already been settled.", 409);
+      }
+    } else if (action === "vote") {
       const answers = new Map<number, Answer>();
       for (const [key, value] of Object.entries(form)) {
         const slot = /^slot_(\d{1,2})$/.exec(key)?.[1];
@@ -182,6 +216,12 @@ export function registerRespondRoutes(app: Hono<AppEnv>, deps: RespondRouteDeps)
           attendance: attendance.data,
           now,
         });
+        if (result.kind !== "recorded")
+          return problem("This event can't take answers any more.", 409);
+      }
+      if (form.ack === "on" && needsAcknowledgment(access)) {
+        answered = true;
+        const result = await acknowledge(deps.storage, access, { now });
         if (result.kind !== "recorded")
           return problem("This event can't take answers any more.", 409);
       }
@@ -224,8 +264,19 @@ export async function sendResponseLink(
   const titled = canSee(link.visibility, "title");
   const title = access.event.title;
   const days = RESPONSE_TOKEN_TTL_MS / (24 * 60 * 60 * 1000);
-  const [subject, ask] =
-    link.action === "vote"
+  const consent = link.action === "vote" && access.participation.responseKind !== "slot_vote";
+  const when = formatWhen(access.event);
+  const [subject, ask] = consent
+    ? titled
+      ? [
+          `${from} asks you to agree: "${title}"`,
+          `${from} proposes "${title}" (${when}) and asks whether you agree.`,
+        ]
+      : [
+          `${from} asks you to agree (${when})`,
+          `${from} proposes something for ${when} and asks whether you agree.`,
+        ]
+    : link.action === "vote"
       ? titled
         ? [
             `When can you make "${title}"?`,

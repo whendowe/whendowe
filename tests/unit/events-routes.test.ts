@@ -730,3 +730,188 @@ it("response routes require CSRF, membership, and an editor to send links", asyn
   );
   expect(h.sent.length).toBe(before);
 });
+
+// --- agreement & acknowledgment (slice 2E-1) ------------------------------------------
+
+/** The person id behind a member's "Ask people" select on the new-event form. */
+async function memberId(h: H, dm: Who, group: string, email: string): Promise<string> {
+  const formPage = await text(h, `${group}/events/new`, dm);
+  const id = new RegExp(
+    `${email.replace(/\./g, "\\.")}\\s*<select name="req_([0-9a-f-]{36})"`,
+  ).exec(formPage)?.[1];
+  if (id === undefined) throw new Error(`no request select for ${email}`);
+  return id;
+}
+
+async function household(h: H) {
+  const { dm: mara, group } = await setup(h);
+  const david = await join(h, mara, group, "david@example.org", "view", "FULL");
+  const petra = await join(h, mara, group, "petra@example.org", "view", "DETAILS");
+  return {
+    mara,
+    group,
+    david,
+    petra,
+    davidId: await memberId(h, mara, group, "david@example.org"),
+  };
+}
+
+const act = (h: H, event: string, who: Who, path: string, fields: Record<string, string> = {}) =>
+  h.app.request(`${event}/${path}`, post({ csrf: who.csrf, ...fields }, who.cookie));
+
+it("asking someone to agree: only the parties see it until they do, then everyone does", async () => {
+  const h = await harness();
+  const { mara, group, david, petra, davidId } = await household(h);
+  const event = await createVia(h, mara, group, { ...NIGHT, [`req_${davidId}`]: "accept" });
+
+  expect(await text(h, event, mara)).toContain("(waiting for agreement)");
+  expect(await text(h, event, mara)).toContain("david@example.org: must agree — not answered yet");
+  expect((await get(h, event, petra)).status).toBe(404); // US-3: scheduled reality only
+  expect(await text(h, group, petra)).not.toContain(event);
+  const davidPage = await text(h, event, david);
+  expect(davidPage).toContain("You're asked to agree to this.");
+
+  expect((await act(h, event, david, "answer", { answer: "accept" })).status).toBe(303);
+  expect((await get(h, event, petra)).status).toBe(200);
+  const after = await text(h, event, mara);
+  expect(after).not.toContain("waiting for agreement");
+  expect(after).toContain("david@example.org: must agree — agreed ✓");
+  expect(after).toContain("status: proposed → scheduled");
+});
+
+it("one decline turns it down; the creator sees who and can no longer withdraw", async () => {
+  const h = await harness();
+  const { mara, group, david, davidId } = await household(h);
+  const event = await createVia(h, mara, group, { ...NIGHT, [`req_${davidId}`]: "accept" });
+  expect(await text(h, event, david)).not.toContain("Withdraw");
+  expect((await act(h, event, david, "answer", { answer: "decline" })).status).toBe(303);
+  const page = await text(h, event, mara);
+  expect(page).toContain("(declined)");
+  expect(page).toMatch(/david@example\.org changed<ul><li>status: proposed → declined/);
+  expect(page).not.toContain("Withdraw");
+  expect((await act(h, event, mara, "withdraw")).status).toBe(409);
+});
+
+it("the creator withdraws a proposal nobody answered", async () => {
+  const h = await harness();
+  const { mara, group, david, davidId } = await household(h);
+  const event = await createVia(h, mara, group, { ...NIGHT, [`req_${davidId}`]: "accept" });
+  expect((await act(h, event, david, "withdraw")).status).toBe(403);
+  expect((await act(h, event, mara, "withdraw")).status).toBe(303);
+  expect(await text(h, event, mara)).toContain("(withdrawn)");
+  expect((await act(h, event, david, "answer", { answer: "accept" })).status).toBe(409);
+});
+
+it("an acknowledgment request: scheduled at once, 'seen ✓' with a time, asked again after a move", async () => {
+  const h = await harness();
+  const { mara, group, david, petra, davidId } = await household(h);
+  const event = await createVia(h, mara, group, { ...NIGHT, [`req_${davidId}`]: "ack" });
+  expect((await get(h, event, petra)).status).toBe(200); // never gates
+  expect(await text(h, event, david)).toContain("You&#39;re asked to acknowledge this."); // an interpolated string: escaped
+  expect((await act(h, event, david, "acknowledge")).status).toBe(303);
+  expect(await text(h, event, mara)).toMatch(
+    /david@example\.org: please acknowledge — seen ✓ <span class="muted">\d{4}-/,
+  );
+  expect((await act(h, event, david, "acknowledge")).status).toBe(400); // nothing left to acknowledge
+
+  // A retitle doesn't nag; a move does.
+  const revision = async () =>
+    /name="revision" value="(\d+)"/.exec(await text(h, `${event}/edit`, mara))?.[1] ?? "";
+  await h.app.request(
+    event,
+    post({ csrf: mara.csrf, revision: await revision(), ...NIGHT, title: "Renamed" }, mara.cookie),
+  );
+  expect(await text(h, event, david)).not.toContain("please look again");
+  await h.app.request(
+    event,
+    post(
+      {
+        csrf: mara.csrf,
+        revision: await revision(),
+        ...NIGHT,
+        title: "Renamed",
+        start: "2101-10-20T20:00",
+      },
+      mara.cookie,
+    ),
+  );
+  expect(await text(h, event, david)).toContain(
+    "This changed since you last saw it — please look again.",
+  );
+  expect(await text(h, event, mara)).toContain(
+    "david@example.org: please acknowledge — asked to look again",
+  );
+});
+
+it("a DETAILS member sees only their own request line, not everyone's", async () => {
+  const h = await harness();
+  const { mara, group, petra, davidId } = await household(h);
+  const petraId = await memberId(h, mara, group, "petra@example.org");
+  const event = await createVia(h, mara, group, {
+    ...NIGHT,
+    [`req_${davidId}`]: "ack",
+    [`req_${petraId}`]: "ack",
+  });
+  const page = await text(h, event, petra);
+  expect(page).toContain("petra@example.org: please acknowledge");
+  expect(page).not.toContain("david@example.org: please acknowledge");
+});
+
+it("editors cancel and restore; others don't get the buttons and are refused", async () => {
+  const h = await harness();
+  const { mara, group, david } = await household(h);
+  const event = await createVia(h, mara, group);
+  expect(await text(h, event, david)).not.toContain("Cancel the event");
+  expect((await act(h, event, david, "cancel")).status).toBe(403);
+  expect((await act(h, event, mara, "cancel")).status).toBe(303);
+  expect(await text(h, event, david)).toContain("(cancelled)");
+  expect(await text(h, group, david)).toContain("(cancelled)");
+  expect((await act(h, event, mara, "restore")).status).toBe(303);
+  const page = await text(h, event, mara);
+  expect(page).toContain("status: cancelled → scheduled");
+  expect(page).toContain("Cancel the event");
+});
+
+it("by emailed link: David agrees with no account; acknowledgment by link too", async () => {
+  const h = await harness();
+  const { mara, group, davidId } = await household(h);
+  const proposal = await createVia(h, mara, group, { ...NIGHT, [`req_${davidId}`]: "accept" });
+  const before = h.sent.length;
+  expect(await (await sendLinks(h, mara, proposal)).text()).toContain("Sent to 1 person."); // not Petra
+  expect(h.sent.slice(before).map((m) => [m.to, m.subject])).toEqual([
+    ["david@example.org", 'dm@example.org asks you to agree: "Session 12: the Sunken Keep"'],
+  ]);
+  const link = linkFor(h, "david@example.org");
+  expect(await (await h.app.request(link)).text()).toContain("Do you agree?");
+  expect(
+    (await h.app.request("/respond", post({ t: tokenOf(link), decision: "accept" }))).status,
+  ).toBe(303);
+  expect(await (await h.app.request(link)).text()).toContain("It's settled.");
+  expect(await text(h, proposal, mara)).toContain("david@example.org: must agree — agreed ✓");
+
+  const fyi = await createVia(h, mara, group, {
+    ...NIGHT,
+    title: "Dentist",
+    [`req_${davidId}`]: "ack",
+  });
+  await sendLinks(h, mara, fyi);
+  const ackLink = linkFor(h, "david@example.org");
+  expect(await (await h.app.request(ackLink)).text()).toContain("I&#39;ve seen this");
+  expect((await h.app.request("/respond", post({ t: tokenOf(ackLink), ack: "on" }))).status).toBe(
+    303,
+  );
+  expect(await text(h, fyi, mara)).toContain("david@example.org: please acknowledge — seen ✓");
+});
+
+it("lifecycle buttons require CSRF and membership", async () => {
+  const h = await harness();
+  const { mara, group } = await household(h);
+  const event = await createVia(h, mara, group);
+  const stranger = await signIn(h, "stranger@example.org");
+  for (const path of ["answer", "acknowledge", "withdraw", "cancel", "restore"]) {
+    expect(
+      (await h.app.request(`${event}/${path}`, post({ answer: "accept" }, mara.cookie))).status,
+    ).toBe(403);
+    expect((await act(h, event, stranger, path, { answer: "accept" })).status).toBe(404);
+  }
+});

@@ -11,6 +11,9 @@ import {
   editEvent,
   findEventForParticipant,
   listHistory,
+  setCancelled,
+  type TransitionResult,
+  withdrawProposal,
 } from "../../events/event.js";
 import { canSee, canSeeField, listParticipants } from "../../events/participation.js";
 import {
@@ -26,17 +29,21 @@ import {
 } from "../../events/poll.js";
 import {
   type Attendance,
+  acknowledge,
   actionFor,
   addFeedback,
+  answerProposal,
   attendanceSchema,
   issueResponseLinks,
+  listRequests,
   listResponses,
+  needsAcknowledgment,
   revokeUndeliveredLink,
   setAttendance,
 } from "../../events/response.js";
 import { MailCapReachedError } from "../../mail/capped.js";
 import type { MailPort } from "../../mail/port.js";
-import { findGroupForMember } from "../../people/group.js";
+import { findGroupForMember, type GroupMembership, listMembers } from "../../people/group.js";
 import { type Html, html, renderPage } from "../layout.js";
 import { type AppEnv, requireSignedIn, verifyFormCsrf } from "../session.js";
 import { sendResponseLink } from "./respond.js";
@@ -84,15 +91,35 @@ export function formatWhen(
   return `${startDate} ${startTime.slice(0, 5)} – ${end} · ${e.tzid ?? ""}`;
 }
 
+/**
+ * A poll is the one kind of proposal whose own time is a placeholder. Everyone in a
+ * poll — its creator included — takes part as `slot_vote` (poll.ts), so the viewer's
+ * own row says which kind this is without another query.
+ */
+function isPoll(access: EventAccess): boolean {
+  return access.participation.responseKind === "slot_vote";
+}
+
+/** "(cancelled)", "(waiting for agreement)", … — empty for an ordinary scheduled event. */
+function statusBadge(access: EventAccess): Html | string {
+  const label: Record<string, string> = {
+    cancelled: "cancelled",
+    declined: "declined",
+    withdrawn: "withdrawn",
+    proposed: isPoll(access) ? "" : "waiting for agreement",
+  };
+  const text = label[access.event.status] ?? "";
+  return text === "" ? "" : html` <span class="muted">(${text})</span>`;
+}
+
 /** One line for a list, at the viewer's tier. */
 export function eventSummary(access: EventAccess): Html {
   const { event, participation } = access;
   const title = canSee(participation.visibility, "title") ? event.title : BUSY_LABEL;
-  const cancelled =
-    event.status === "cancelled" ? html` <span class="muted">(cancelled)</span>` : "";
   // An open poll's own time is only a placeholder: never show it as "the" time.
-  const when = event.status === "proposed" ? "voting on a time" : formatWhen(event);
-  return html`<a href="${EVENTS_PATH}/${event.id}">${title}</a>${cancelled} <span class="muted">· ${when}</span>`;
+  const when =
+    isPoll(access) && event.status === "proposed" ? "voting on a time" : formatWhen(event);
+  return html`<a href="${EVENTS_PATH}/${event.id}">${title}</a>${statusBadge(access)} <span class="muted">· ${when}</span>`;
 }
 
 interface FormValues {
@@ -210,6 +237,44 @@ function eventForm(
   var tz = document.getElementById("tzid");
   if (tz && !tz.value) tz.value = Intl.DateTimeFormat().resolvedOptions().timeZone;
 </script>`;
+}
+
+type Request = "accept" | "ack";
+const REQUESTS: readonly Request[] = ["accept", "ack"];
+const REQUEST_LABEL: Record<Request, string> = { accept: "must agree", ack: "please acknowledge" };
+
+/**
+ * On create: who must agree and who should acknowledge (DESIGN §10 rc13). One select
+ * per fellow member; field names carry the person id, validated against the group by
+ * createEvent itself.
+ */
+async function requestsFieldset(
+  deps: EventRouteDeps,
+  membership: GroupMembership,
+  meId: string,
+  chosen: ReadonlyMap<string, Request>,
+): Promise<Html | string> {
+  const others = (await listMembers(deps.storage, membership)).filter((m) => m.personId !== meId);
+  if (others.length === 0) return "";
+  return html`<fieldset style="margin-bottom:1em"><legend>Ask people <span class="muted">(optional)</span></legend>
+<p class="muted">If anyone must agree, the event waits — and only they and you see it — until all of them do. "Please acknowledge" never holds it up.</p>
+${others.map(
+  (m) => html`<p><label>${m.displayName ?? m.email}
+  <select name="req_${m.personId}">
+    <option value="">—</option>
+    ${REQUESTS.map((r) => html`<option value="${r}" ${chosen.get(m.personId) === r ? html`selected` : ""}>${REQUEST_LABEL[r]}</option>`)}
+  </select></label></p>`,
+)}
+</fieldset>`;
+}
+
+function readRequests(form: Record<string, unknown>): Map<string, Request> {
+  const requests = new Map<string, Request>();
+  for (const [key, value] of Object.entries(form)) {
+    const id = /^req_([0-9a-f-]{36})$/.exec(key)?.[1];
+    if (id !== undefined && (value === "accept" || value === "ack")) requests.set(id, value);
+  }
+  return requests;
 }
 
 const EMPTY: FormValues = {
@@ -332,7 +397,7 @@ async function responsesSection(
     participation.editTier === "edit" && action !== null
       ? html`<form method="post" action="${EVENTS_PATH}/${event.id}/links">
   <input type="hidden" name="csrf" value="${csrf}" />
-  <p><button type="submit">${action === "vote" ? "Email everyone a link to vote" : "Email everyone a link to say if they're coming"}</button>
+  <p><button type="submit">${action === "attend" ? "Email everyone a link to say if they're coming" : isPoll(access) ? "Email everyone a link to vote" : "Email a link to agree or decline"}</button>
   <span class="muted">No account needed to answer.</span></p>
 </form>`
       : "";
@@ -341,6 +406,87 @@ async function responsesSection(
 ${notes.length === 0 ? html`<p class="muted">No notes yet.</p>` : html`<ul>${notes.map((n) => html`<li><span class="muted">${n.at.slice(0, 16).replace("T", " ")}</span> · ${label(n)}: <span style="white-space:pre-wrap">${n.body}</span></li>`)}</ul>`}
 ${noteForm}
 ${sendLinks}`;
+}
+
+// --- Agreement & acknowledgment (slice 2E-1) -----------------------------------------
+
+const STATE_LABEL: Record<string, string> = {
+  pending: "not answered yet",
+  accepted: "agreed ✓",
+  declined: "declined",
+  acknowledged: "seen ✓",
+  reack: "asked to look again",
+};
+
+function button(
+  eventId: string,
+  path: string,
+  csrf: string,
+  label: string,
+  fields: Record<string, string> = {},
+): Html {
+  return html`<form method="post" action="${EVENTS_PATH}/${eventId}/${path}" style="display:inline-block;margin:0 .5em .5em 0">
+  <input type="hidden" name="csrf" value="${csrf}" />
+  ${Object.entries(fields).map(([k, v]) => html`<input type="hidden" name="${k}" value="${v}" />`)}
+  <button type="submit">${label}</button>
+</form>`;
+}
+
+/**
+ * What this person is asked to do, who stands where (names only for tiers that see
+ * participants — their own line always), and the organizer's lifecycle buttons.
+ */
+async function requestsSection(
+  deps: EventRouteDeps,
+  access: EventAccess,
+  csrf: string,
+): Promise<Html | string> {
+  const { event, participation } = access;
+  const me = participation.personId;
+  const names = canSee(participation.visibility, "participants");
+  const requests = (await listRequests(deps.storage, access)).filter(
+    (r) => names || r.personId === me,
+  );
+
+  const mine: Html[] = [];
+  if (event.status === "proposed" && participation.responseKind === "accept") {
+    mine.push(html`<p><strong>You're asked to agree to this.</strong></p>
+${button(event.id, "answer", csrf, "Agree", { answer: "accept" })}${button(event.id, "answer", csrf, "Decline", { answer: "decline" })}`);
+  }
+  if (needsAcknowledgment(access)) {
+    const again = participation.responseState === "reack";
+    mine.push(html`<p><strong>${again ? "This changed since you last saw it — please look again." : "You're asked to acknowledge this."}</strong></p>
+${button(event.id, "acknowledge", csrf, again ? "I've seen the change" : "Seen it")}`);
+  }
+  const organizer: Html[] = [];
+  if (event.status === "proposed" && event.ownerId === me) {
+    organizer.push(
+      button(
+        event.id,
+        "withdraw",
+        csrf,
+        isPoll(access) ? "Withdraw the poll" : "Withdraw the proposal",
+      ),
+    );
+  }
+  if (participation.editTier === "edit" && event.status === "scheduled") {
+    organizer.push(button(event.id, "cancel", csrf, "Cancel the event"));
+  }
+  if (participation.editTier === "edit" && event.status === "cancelled") {
+    organizer.push(button(event.id, "restore", csrf, "Restore the event"));
+  }
+  const list =
+    requests.length === 0
+      ? ""
+      : html`<h2>Asked</h2><ul>${requests.map(
+          (r) =>
+            html`<li>${r.displayName ?? r.email}: ${REQUEST_LABEL[r.kind]} — ${STATE_LABEL[r.state] ?? r.state}${
+              r.at === null
+                ? ""
+                : html` <span class="muted">${r.at.slice(0, 16).replace("T", " ")}</span>`
+            }</li>`,
+        )}</ul>`;
+  return html`${mine}${list}${organizer.length === 0 ? "" : html`<p>${organizer}</p>`}`;
 }
 
 interface PollFormValues extends FormValues {
@@ -422,7 +568,7 @@ async function eventPage(
   const { event, participation } = access;
   const vis = participation.visibility;
   const see = (part: Parameters<typeof canSee>[1]) => canSee(vis, part);
-  const voting = event.status === "proposed";
+  const voting = event.status === "proposed" && isPoll(access);
   const poll = voting ? await pollResults(deps.storage, access) : null;
 
   const people = see("participants") ? await listParticipants(deps.storage, event.id) : [];
@@ -437,12 +583,13 @@ async function eventPage(
   return renderPage(
     see("title") ? event.title : BUSY_LABEL,
     html`<p>${event.groupId === null ? html`<a href="/groups">← Your groups</a>` : html`<a href="/groups/${event.groupId}">← Back to the group</a>`}</p>
-<h1>${see("title") ? event.title : BUSY_LABEL}${event.status === "cancelled" ? html` <span class="muted">(cancelled)</span>` : ""}</h1>
+<h1>${see("title") ? event.title : BUSY_LABEL}${statusBadge(access)}</h1>
 ${notice === null ? "" : html`<p class="error">${notice}</p>`}
 ${poll === null ? html`<p>${formatWhen(event)}</p>` : pollSection(access, poll, csrf, see("participants"))}
 ${see("location") && event.location !== null ? html`<p>📍 ${event.location}</p>` : ""}
 ${see("description") && event.description !== null ? html`<p style="white-space:pre-wrap">${event.description}</p>` : ""}
-${participation.editTier === "edit" && !voting ? html`<p><a href="${EVENTS_PATH}/${event.id}/edit">Edit</a></p>` : ""}
+${participation.editTier === "edit" && (event.status === "scheduled" || event.status === "cancelled") ? html`<p><a href="${EVENTS_PATH}/${event.id}/edit">Edit</a></p>` : ""}
+${await requestsSection(deps, access, csrf)}
 ${
   people.length === 0
     ? ""
@@ -475,7 +622,7 @@ export function registerEventRoutes(app: Hono<AppEnv>, deps: EventRouteDeps): vo
         "New event",
         html`<p><a href="/groups/${membership.group.id}">← ${membership.group.name}</a></p>
 <h1>New event for ${membership.group.name}</h1>
-${eventForm(`/groups/${membership.group.id}/events`, me.csrfToken, EMPTY, "", null, "Create event")}`,
+${eventForm(`/groups/${membership.group.id}/events`, me.csrfToken, EMPTY, await requestsFieldset(deps, membership, me.personId, new Map()), null, "Create event")}`,
       ),
     );
   });
@@ -488,12 +635,14 @@ ${eventForm(`/groups/${membership.group.id}/events`, me.csrfToken, EMPTY, "", nu
     const membership = await findGroupForMember(deps.storage, c.req.param("groupId"), me.personId);
     if (membership === null) return c.html(notFound(), 404);
     const values = readForm(form);
+    const requests = readRequests(form);
     try {
       const event = await createEvent(deps.storage, {
         creatorId: me.personId,
         group: membership,
         fields: toFields(values),
         now: deps.now(),
+        requests,
       });
       return c.redirect(`${EVENTS_PATH}/${event.id}`, 303);
     } catch (error) {
@@ -501,7 +650,7 @@ ${eventForm(`/groups/${membership.group.id}/events`, me.csrfToken, EMPTY, "", nu
         renderPage(
           "New event",
           html`<h1>New event for ${membership.group.name}</h1>
-${eventForm(`/groups/${membership.group.id}/events`, me.csrfToken, values, "", errorMessage(error), "Create event")}`,
+${eventForm(`/groups/${membership.group.id}/events`, me.csrfToken, values, await requestsFieldset(deps, membership, me.personId, requests), errorMessage(error), "Create event")}`,
         ),
         400,
       );
@@ -840,4 +989,74 @@ ${pollForm(`/groups/${membership.group.id}/polls`, me.csrfToken, values, errorMe
       failed > 0 ? 503 : 200,
     );
   });
+
+  /** The shared shape of the lifecycle buttons: resolve, act, redirect or explain. */
+  const lifecycle = (
+    path: string,
+    act: (
+      access: EventAccess,
+      form: Record<string, unknown>,
+      now: string,
+    ) => Promise<TransitionResult | { readonly kind: "invalid" }>,
+  ) =>
+    app.post(`${EVENTS_PATH}/:id/${path}`, async (c) => {
+      const me = requireSignedIn(c);
+      if (me instanceof Response) return me;
+      const form = await c.req.parseBody();
+      if (!(await verifyFormCsrf(me, form))) return c.html(rejected(), 403);
+      const access = await findEventForParticipant(deps.storage, c.req.param("id"), me.personId);
+      if (access === null || access.participation.visibility === "HIDDEN")
+        return c.html(notFound(), 404);
+      const result = await act(access, form, deps.now());
+      const fresh = async () =>
+        (await findEventForParticipant(deps.storage, access.event.id, me.personId)) ?? access;
+      switch (result.kind) {
+        case "done":
+          // The person may no longer be a party (e.g. a declined proposal they weren't
+          // asked about): back to the event if they can still see it, else the group.
+          return (await findEventForParticipant(deps.storage, access.event.id, me.personId)) ===
+            null
+            ? c.redirect(
+                access.event.groupId === null ? "/groups" : `/groups/${access.event.groupId}`,
+                303,
+              )
+            : c.redirect(`${EVENTS_PATH}/${access.event.id}`, 303);
+        case "forbidden":
+          return c.html(renderPage("Not allowed", html`<h1>That isn't yours to do</h1>`), 403);
+        case "invalid":
+          return c.html(
+            await eventPage(deps, await fresh(), me.csrfToken, "There's nothing to do here."),
+            400,
+          );
+        case "closed":
+          return c.html(
+            await eventPage(
+              deps,
+              await fresh(),
+              me.csrfToken,
+              "This changed while you were looking — here it is as it stands now.",
+            ),
+            409,
+          );
+      }
+    });
+
+  lifecycle("answer", async (access, form, now) => {
+    const answer = form.answer === "accept" || form.answer === "decline" ? form.answer : null;
+    if (answer === null) return { kind: "invalid" };
+    const result = await answerProposal(deps.storage, access, { answer, now });
+    return result.kind === "recorded" ? { kind: "done", status: result.status } : result;
+  });
+  lifecycle("acknowledge", async (access, _form, now) => {
+    const result = await acknowledge(deps.storage, access, { now });
+    if (result.kind === "recorded") return { kind: "done", status: access.event.status };
+    return result.kind === "invalid" ? { kind: "invalid" } : result;
+  });
+  lifecycle("withdraw", (access, _form, now) => withdrawProposal(deps.storage, access, { now }));
+  lifecycle("cancel", (access, _form, now) =>
+    setCancelled(deps.storage, access, { cancelled: true, now }),
+  );
+  lifecycle("restore", (access, _form, now) =>
+    setCancelled(deps.storage, access, { cancelled: false, now }),
+  );
 }
