@@ -50,7 +50,7 @@ No MVP code may *target* Ring 1–2; no MVP shape may *preclude* them. (Naming: 
 ## 3. Concepts the stories introduce (beyond DESIGN.md)
 
 - **Person** — a human identity in the system. Owns one or more calendar connections. (DESIGN.md has `owner_id` but no person model; the stories force one.)
-- **Group (rc7)** — a reusable set of people with per-member default tiers: a household, a D&D table. Creating an event for a group copies those defaults onto the event's participants; they stay editable per event.
+- **Group (rc7; rc15)** — a reusable set of people with per-member default tiers: a household, a D&D table. Since DESIGN rc15 a group is an *address book*, not a container: an event names its people directly, and "add the people from this group" copies the members and their defaults onto the event, editable per event. Joining a group later does not add you to its earlier events; an editor adds you to the events you should be on.
 - **Edit tier (rc7)** — what a person may *change*, per event. Replaces the old organizer/participant/viewer roles, which conflated changing with seeing:
   - **`edit`** — changes apply directly (UI or, with two-way sync, their own calendar). The organizer has it; others can be granted it.
   - **`propose`** — changes become proposals the group accepts (§5). The "other co-parent" default.
