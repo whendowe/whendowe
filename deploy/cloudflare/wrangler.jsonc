@@ -33,6 +33,11 @@
       "new_sqlite_classes": ["ConnectionDO"]
     }
   ],
+  // Outbound mail (DESIGN §13). Declared here so an instance overlay can RESTRICT it
+  // (allowed_destination_addresses before Workers Paid) — §18 refuses an overlay
+  // that names a binding this template does not declare. Nothing sends through it
+  // unless the instance also sets MAIL_PROVIDER=cloudflare; the default is disabled.
+  "send_email": [{ "name": "EMAIL" }],
   "triggers": {
     // Regular reconcile ticks are cron fan-out; DO alarms are retry backoff ONLY (§11).
     "crons": ["* * * * *"]

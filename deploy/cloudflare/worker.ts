@@ -25,9 +25,9 @@ export interface Env {
   GOOGLE_REDIRECT_URI?: string;
   TOKEN_ENCRYPTION_KEY?: string;
   LOG_LEVEL?: string;
-  // Sign-in and mail (MVP-1). EMAIL is a send_email binding, declared by the
-  // instance's wrangler config in whendowe/deployments — never in this template, and
-  // absent until the account is on Workers Paid (DESIGN rc9).
+  // Sign-in and mail (MVP-1). EMAIL is the send_email binding the template declares;
+  // an instance overlay may restrict it to verified recipients before Workers Paid
+  // (DESIGN §13/§18 rc14). It is used only when MAIL_PROVIDER=cloudflare.
   PUBLIC_BASE_URL?: string;
   MAIL_PROVIDER?: string;
   MAIL_FROM_ADDRESS?: string;
