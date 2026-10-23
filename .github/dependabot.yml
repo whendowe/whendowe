@@ -1,0 +1,14 @@
+# Keeps the SHA-pinned actions current (the org requires full-SHA pins). Actions
+# only: npm dependency bumps stay owner-driven (AGENTS.md: owner review, one-line
+# justification), and the cooldown keeps a just-published release out for a week.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ["*"]
