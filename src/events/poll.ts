@@ -45,7 +45,7 @@ export interface CandidateTimeInput {
  * Validate every candidate exactly as an event's own time is validated (same schema,
  * same messages), then sort them chronologically and refuse duplicates.
  */
-function validateCandidates(
+export function validateCandidates(
   fields: Omit<EventFieldsInput, "startLocal" | "endLocal">,
   times: readonly CandidateTimeInput[],
 ): Omit<Candidate, "slotIndex">[] {

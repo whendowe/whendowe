@@ -693,6 +693,20 @@ ${pickerAssets()}`;
 }
 
 /** Poll form → domain input: shared fields once, a time pair per filled row. */
+/**
+ * The event form's fields as the server reads them, before validation. Exported for
+ * the client–server agreement properties (DESIGN §9 rc17): whatever the picker writes
+ * into the plain fields must survive exactly this.
+ */
+export function eventInputFromForm(form: Record<string, unknown>): EventFieldsInput {
+  return toFields(readForm(form));
+}
+
+/** The poll form's fields as the server reads them, before validation (as above). */
+export function pollInputFromForm(form: Record<string, unknown>) {
+  return toPollInput(readPollForm(form));
+}
+
 function toPollInput(v: PollFormValues) {
   const filled = v.slots.filter((s) => s.start !== "" || s.end !== "");
   const times = filled.map((s) => {

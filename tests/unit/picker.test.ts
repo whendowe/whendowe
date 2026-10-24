@@ -1,70 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import { runInNewContext } from "node:vm";
 import { describe, expect, it } from "vitest";
-import { z } from "zod";
 import { pickerAssets } from "../../src/web/picker.js";
+import { loadPicker, type Pick, type Poll } from "../property/picker-script.js";
 
-// The picker ships as a script inside the page (src/web/picker.ts). These tests run
-// THAT script — extracted from the rendered assets — in a fresh context without a
-// document, and call the date logic it publishes. What is tested is what browsers get.
+// The picker's date logic, by example. The shipped script is loaded by
+// tests/property/picker-script.ts; the properties over the same logic live in
+// tests/property/picker.property.test.ts (DESIGN §9 rc17).
 
-const weekSchema = z.object({
-  week: z.number(),
-  days: z.array(z.object({ key: z.string(), inMonth: z.boolean() })),
-});
-const fieldsSchema = z.object({ allDay: z.boolean(), start: z.string(), end: z.string() });
-const pickSchema = z.object({
-  date: z.string(),
-  to: z.string(),
-  time: z.string(),
-  length: z.union([z.number(), z.literal("allday"), z.literal("days")]),
-});
-const summarySchema = z.object({ main: z.string(), sub: z.string() });
-const rowSchema = z.object({ start: z.string(), end: z.string() });
-const pollSchema = z.object({
-  kind: z.enum(["times", "days"]),
-  start: z.string(),
-  length: z.number(),
-  times: z.array(z.object({ date: z.string(), own: z.string().nullable() })),
-  days: z.array(z.object({ from: z.string(), to: z.string() })),
-});
-type Poll = z.infer<typeof pollSchema>;
-type Pick = z.infer<typeof pickSchema>;
-const fn = z.custom<(...args: unknown[]) => unknown>((v) => typeof v === "function");
-
-function load() {
-  const assets = pickerAssets().value;
-  const open = assets.indexOf("<script>");
-  const close = assets.lastIndexOf("</script>");
-  const source = assets.slice(open + "<script>".length, close);
-  const sandbox: { WhenDoWePicker?: unknown } = {};
-  runInNewContext(source, sandbox);
-  const api = z
-    .object({
-      monthGrid: fn,
-      isoWeek: fn,
-      toFields: fn,
-      fromFields: fn,
-      summary: fn,
-      pollRows: fn,
-      pollFromRows: fn,
-    })
-    .parse(sandbox.WhenDoWePicker);
-  // Results cross from the sandbox's realm; parse them back into this one.
-  return {
-    monthGrid: (y: number, m: number) => z.array(weekSchema).parse(api.monthGrid(y, m)),
-    isoWeek: (key: string) => z.number().parse(api.isoWeek(key)),
-    toFields: (p: Pick) => fieldsSchema.parse(api.toFields(p)),
-    fromFields: (f: z.infer<typeof fieldsSchema>, today: string) =>
-      pickSchema.parse(api.fromFields(f, today)),
-    summary: (p: Pick) => summarySchema.parse(api.summary(p)),
-    pollRows: (poll: Poll) => z.array(rowSchema).parse(api.pollRows(poll)),
-    pollFromRows: (allDay: boolean, rows: z.infer<typeof rowSchema>[]) =>
-      pollSchema.parse(api.pollFromRows(allDay, rows)),
-  };
-}
-
-const picker = load();
+const picker = loadPicker();
 
 describe("the shipped script", () => {
   it("holds nothing a tagged template would cook (backslash, backtick, dollar-brace)", () => {
@@ -117,7 +60,11 @@ describe("monthGrid: whole Monday-to-Sunday weeks", () => {
 });
 
 describe("picks and the plain fields the server reads", () => {
-  const cases: readonly { name: string; pick: Pick; fields: z.infer<typeof fieldsSchema> }[] = [
+  const cases: readonly {
+    name: string;
+    pick: Pick;
+    fields: { allDay: boolean; start: string; end: string };
+  }[] = [
     {
       name: "an evening",
       pick: { date: "2026-10-30", to: "2026-10-30", time: "19:00", length: 180 },
