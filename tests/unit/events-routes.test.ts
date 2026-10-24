@@ -1161,3 +1161,115 @@ it("refuses an unsupported rule and a series that ends before it starts", async 
     "must end after its first date",
   );
 });
+
+// --- people on an existing event (DESIGN rc15, slice 2F) ------------------------------
+
+const addVia = (h: H, who: Who, event: string, email: string, extra = {}) =>
+  h.app.request(
+    `${event}/people`,
+    post({ csrf: who.csrf, email, editTier: "view", visibility: "FULL", ...extra }, who.cookie),
+  );
+
+it("an editor adds someone by email: they're mailed a link, and can then sign in to it", async () => {
+  const h = await harness();
+  const { dm, group } = await setup(h);
+  const event = await createVia(h, dm, group);
+  const before = h.sent.length;
+  const res = await addVia(h, dm, event, "Newcomer@Example.org");
+  expect(res.status).toBe(303);
+  expect(h.sent.slice(before).map((m) => m.to)).toEqual(["newcomer@example.org"]);
+  expect(h.sent.at(-1)?.text).toMatch(/https:\/\/whendowe\.example\/respond\?t=/);
+
+  const page = await text(h, event, dm);
+  expect(page).toContain("<li>newcomer@example.org");
+  expect(page).toContain("dm@example.org added newcomer@example.org");
+  // Not in the group: joining an event is not joining its group.
+  const newcomer = await signIn(h, "newcomer@example.org");
+  expect((await get(h, event, newcomer)).status).toBe(200);
+  expect((await get(h, group, newcomer)).status).toBe(404);
+});
+
+it("who was added is in the trail only for a tier that sees the people", async () => {
+  const h = await harness();
+  const { dm, group } = await setup(h);
+  const petra = await join(h, dm, group, "petra@example.org", "view", "DETAILS");
+  const event = await createVia(h, dm, group);
+  expect((await addVia(h, dm, event, "secret-guest@example.org")).status).toBe(303);
+  const page = await text(h, event, petra);
+  expect(page).toContain("Session 12"); // she does see the event…
+  expect(page).not.toContain("secret-guest"); // …but not who was added to it
+  expect(page).not.toContain("Add someone by email");
+});
+
+it("only editors add or remove; the creator has no Remove button", async () => {
+  const h = await harness();
+  const { dm, group } = await setup(h);
+  const ann = await join(h, dm, group, "ann@example.org", "propose", "FULL");
+  const event = await createVia(h, dm, group);
+  const asAnn = await text(h, event, ann);
+  expect(asAnn).not.toContain("Add someone by email");
+  expect(asAnn).not.toContain(">Remove<");
+  expect((await addVia(h, ann, event, "x@example.org")).status).toBe(403);
+
+  const asDm = await text(h, event, dm);
+  const removable = [...asDm.matchAll(/name="person" value="([^"]+)"/g)].map((m) => m[1]);
+  expect(removable).toHaveLength(1); // Ann, not the DM
+  const refused = await h.app.request(
+    `${event}/people/remove`,
+    post({ csrf: ann.csrf, person: removable[0] ?? "" }, ann.cookie),
+  );
+  expect(refused.status).toBe(403);
+});
+
+it("removing someone ends their access and their emailed link", async () => {
+  const h = await harness();
+  const { dm, group } = await setup(h);
+  const event = await createVia(h, dm, group);
+  await addVia(h, dm, event, "guest@example.org");
+  const link = /https?:\/\/\S+\/respond\?t=\S+/.exec(h.sent.at(-1)?.text ?? "")?.[0] ?? "";
+  expect((await h.app.request(new URL(link).pathname + new URL(link).search)).status).toBe(200);
+  const guest = await signIn(h, "guest@example.org");
+
+  const person = /name="person" value="([^"]+)"/.exec(await text(h, event, dm))?.[1] ?? "";
+  const res = await h.app.request(
+    `${event}/people/remove`,
+    post({ csrf: dm.csrf, person }, dm.cookie),
+  );
+  expect(res.status).toBe(303);
+  expect((await get(h, event, guest)).status).toBe(404);
+  expect((await h.app.request(new URL(link).pathname + new URL(link).search)).status).not.toBe(200);
+  expect(await text(h, event, dm)).toContain("dm@example.org removed guest@example.org");
+});
+
+it("a failed mail keeps the person and says so; a resend then works at once", async () => {
+  const h = await harness();
+  const { dm, group } = await setup(h);
+  const event = await createVia(h, dm, group);
+  h.mailFailure.error = new MailCapReachedError({ daily: 1, monthly: 1 });
+  const res = await addVia(h, dm, event, "unlucky@example.org");
+  expect(res.status).toBe(503);
+  expect(await res.text()).toContain("Added unlucky@example.org, but couldn&#39;t email them");
+  expect(await text(h, event, dm)).toContain("<li>unlucky@example.org");
+
+  h.mailFailure.error = null;
+  const before = h.sent.length;
+  await h.app.request(`${event}/links`, post({ csrf: dm.csrf }, dm.cookie));
+  expect(h.sent.slice(before).map((m) => m.to)).toContain("unlucky@example.org");
+});
+
+it("refuses a bad address, someone already there, a hidden tier, and no CSRF", async () => {
+  const h = await harness();
+  const { dm, group } = await setup(h);
+  const event = await createVia(h, dm, group);
+  expect((await addVia(h, dm, event, "not an address")).status).toBe(400);
+  expect((await addVia(h, dm, event, "dm@example.org")).status).toBe(409);
+  expect((await addVia(h, dm, event, "h@example.org", { visibility: "HIDDEN" })).status).toBe(400);
+  expect(
+    (
+      await h.app.request(
+        `${event}/people`,
+        post({ email: "c@example.org", editTier: "view", visibility: "FULL" }, dm.cookie),
+      )
+    ).status,
+  ).toBe(403);
+});

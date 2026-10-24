@@ -10,12 +10,22 @@ import {
   type EventFieldsInput,
   editEvent,
   findEventForParticipant,
+  type HistoryEntry,
   listHistory,
   setCancelled,
   type TransitionResult,
   withdrawProposal,
 } from "../../events/event.js";
-import { canSee, canSeeField, listParticipants } from "../../events/participation.js";
+import {
+  addParticipant,
+  canSee,
+  canSeeField,
+  listParticipantChanges,
+  listParticipants,
+  type ParticipantView,
+  removeParticipant,
+  TAKES_PEOPLE,
+} from "../../events/participation.js";
 import {
   type Answer,
   answerSchema,
@@ -51,6 +61,8 @@ import {
 import { MailCapReachedError } from "../../mail/capped.js";
 import type { MailPort } from "../../mail/port.js";
 import { findGroupForMember, type GroupMembership, listMembers } from "../../people/group.js";
+import { editTierSchema, visibilitySchema } from "../../people/invite.js";
+import { normalizeEmail } from "../../people/person.js";
 import {
   formatRRule,
   parseRRule,
@@ -819,6 +831,76 @@ function seriesSection(event: CanonicalEvent, now: string): Html | string {
   }`;
 }
 
+/** One edit in the trail, already filtered to the fields this viewer may see. */
+function historyEntry(
+  h: HistoryEntry & { readonly fields: [string, HistoryEntry["change"][string]][] },
+): Html {
+  return html`<span class="muted">${h.at.slice(0, 16).replace("T", " ")}</span> · ${h.actorEmail ?? "someone"} ${
+    h.revision === 1
+      ? "created it"
+      : h.proposedByEmail === null
+        ? "changed"
+        : `accepted ${h.proposedByEmail}'s proposal`
+  }${
+    h.revision === 1
+      ? ""
+      : html`<ul>${h.fields.map(([field, c]) => html`<li>${field}: ${renderHistoryValue(field, c.before)} → ${renderHistoryValue(field, c.after)}</li>`)}</ul>`
+  }`;
+}
+
+/**
+ * Who takes part. An `edit` participant also adds people by email and removes them
+ * (DESIGN rc15): never the creator, and never someone a proposal still waits on.
+ */
+function peopleSection(
+  access: EventAccess,
+  people: readonly ParticipantView[],
+  csrf: string,
+): Html {
+  const { event } = access;
+  const editing = access.participation.editTier === "edit";
+  const removable = (p: ParticipantView) =>
+    editing &&
+    p.personId !== event.ownerId &&
+    !(event.status === "proposed" && p.responseKind === "accept");
+  return html`<h2>Taking part</h2><ul>${people.map(
+    (p) =>
+      html`<li>${p.displayName ?? p.email}${p.editTier === "edit" ? html` <span class="muted">· can edit</span>` : ""}${
+        removable(p)
+          ? html` <form method="post" action="${EVENTS_PATH}/${event.id}/people/remove" style="display:inline"><input type="hidden" name="csrf" value="${csrf}" /><input type="hidden" name="person" value="${p.personId}" /><button type="submit">Remove</button></form>`
+          : ""
+      }</li>`,
+  )}</ul>
+${
+  editing && TAKES_PEOPLE.has(event.status)
+    ? html`<form method="post" action="${EVENTS_PATH}/${event.id}/people">
+  <input type="hidden" name="csrf" value="${csrf}" />
+  <label for="add-email">Add someone by email</label>
+  <input id="add-email" name="email" type="email" required />
+  <p>
+    <label>Can change it:
+      <select name="editTier">
+        <option value="view" selected>no — view only</option>
+        <option value="propose">propose changes</option>
+        <option value="edit">yes — edit directly</option>
+      </select>
+    </label>
+  </p>
+  <p>
+    <label>Sees:
+      <select name="visibility">
+        <option value="FULL" selected>everything</option>
+        <option value="DETAILS">title, time and place</option>
+        <option value="BUSY">only that time is taken</option>
+      </select>
+    </label>
+  </p>
+  <p><button type="submit">Add and email them a link</button></p>
+</form>`
+    : ""
+}`;
+}
+
 async function eventPage(
   c: Context<AppEnv>,
   deps: EventRouteDeps,
@@ -833,13 +915,25 @@ async function eventPage(
   const poll = voting ? await pollResults(deps.storage, access) : null;
 
   const people = see("participants") ? await listParticipants(deps.storage, event.id) : [];
-  const history = (await listHistory(deps.storage, access))
+  const edits = (await listHistory(deps.storage, access))
     .map((entry) => ({
       ...entry,
       // The integrity rule applied to history: drop every field this tier can't see.
       fields: Object.entries(entry.change).filter(([field]) => canSeeField(vis, field)),
     }))
     .filter((entry) => entry.fields.length > 0);
+  // Who was added and removed names people: only for a tier that sees them.
+  const peopleChanges = see("participants")
+    ? await listParticipantChanges(deps.storage, access)
+    : [];
+  // One attributed trail, newest first (DESIGN rc15): edits and people changes together.
+  const history = [
+    ...edits.map((h) => ({ at: h.at, entry: historyEntry(h) })),
+    ...peopleChanges.map((h) => ({
+      at: h.at,
+      entry: html`<span class="muted">${h.at.slice(0, 16).replace("T", " ")}</span> · ${h.actorEmail} ${h.action === "added" ? "added" : "removed"} ${h.personEmail}`,
+    })),
+  ].sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
 
   return page(
     c,
@@ -861,30 +955,10 @@ ${
 }
 ${await requestsSection(deps, access, csrf)}
 ${await proposalsSection(deps, access, csrf)}
-${
-  people.length === 0
-    ? ""
-    : html`<h2>Taking part</h2><ul>${people.map(
-        (p) =>
-          html`<li>${p.displayName ?? p.email}${p.editTier === "edit" ? html` <span class="muted">· can edit</span>` : ""}</li>`,
-      )}</ul>`
-}
+${people.length === 0 ? "" : peopleSection(access, people, csrf)}
 ${await responsesSection(deps, access, csrf)}
 <h2>History</h2>
-<ul>${history.map(
-      (h) =>
-        html`<li><span class="muted">${h.at.slice(0, 16).replace("T", " ")}</span> · ${h.actorEmail ?? "someone"} ${
-          h.revision === 1
-            ? "created it"
-            : h.proposedByEmail === null
-              ? "changed"
-              : `accepted ${h.proposedByEmail}'s proposal`
-        }${
-          h.revision === 1
-            ? ""
-            : html`<ul>${h.fields.map(([field, c]) => html`<li>${field}: ${renderHistoryValue(field, c.before)} → ${renderHistoryValue(field, c.after)}</li>`)}</ul>`
-        }</li>`,
-    )}</ul>`,
+<ul>${history.map((h) => html`<li>${h.entry}</li>`)}</ul>`,
   );
 }
 
@@ -1253,6 +1327,153 @@ ${pollForm(`/groups/${membership.group.id}/polls`, me.csrfToken, values, errorMe
           await eventPage(c, deps, access, me.csrfToken, "This event isn't taking notes."),
           409,
         );
+    }
+  });
+
+  // People on an existing event (DESIGN rc15, slice 2F): its `edit` participants add by
+  // email and remove. The participation is written first and is the truth; the mail
+  // that follows can fail, and the page then says so.
+  app.post(`${EVENTS_PATH}/:id/people`, async (c) => {
+    const me = requireSignedIn(c);
+    if (me instanceof Response) return me;
+    const form = await c.req.parseBody();
+    if (!(await verifyFormCsrf(me, form))) return rejectedPage(c, form);
+    const access = await findEventForParticipant(deps.storage, c.req.param("id"), me.personId);
+    if (access === null || access.participation.visibility === "HIDDEN")
+      return c.html(notFound(c), 404);
+    const editTier = editTierSchema.safeParse(form.editTier);
+    const visibility = visibilitySchema.exclude(["HIDDEN"]).safeParse(form.visibility);
+    let email: string;
+    try {
+      email = normalizeEmail(str(form, "email"));
+    } catch {
+      return c.html(
+        await eventPage(c, deps, access, me.csrfToken, "That isn't an email address."),
+        400,
+      );
+    }
+    if (!editTier.success || !visibility.success)
+      return c.html(await eventPage(c, deps, access, me.csrfToken, "Please try again."), 400);
+
+    const added = await addParticipant(deps.storage, access, {
+      email,
+      editTier: editTier.data,
+      visibility: visibility.data,
+      now: deps.now(),
+    });
+    switch (added.kind) {
+      case "forbidden":
+        return c.html(
+          page(c, "Not allowed", html`<h1>Only people who can edit it add people</h1>`),
+          403,
+        );
+      case "closed":
+        return c.html(
+          await eventPage(
+            c,
+            deps,
+            access,
+            me.csrfToken,
+            "This event is over; it takes no one new.",
+          ),
+          409,
+        );
+      case "already":
+        return c.html(
+          await eventPage(c, deps, access, me.csrfToken, `${email} is already taking part.`),
+          409,
+        );
+      case "rate_limited":
+        return c.html(
+          await eventPage(
+            c,
+            deps,
+            access,
+            me.csrfToken,
+            "Too many people added to this event today. Please try again tomorrow.",
+          ),
+          429,
+        );
+      case "added":
+        break;
+    }
+
+    const issued = await issueResponseLinks(deps.storage, access, {
+      now: deps.now(),
+      only: added.personId,
+    });
+    const link = issued.kind === "issued" ? issued.links[0] : undefined;
+    if (link === undefined)
+      return c.html(
+        await eventPage(
+          c,
+          deps,
+          access,
+          me.csrfToken,
+          `Added ${added.email}. There's nothing to ask them yet, so no email was sent.`,
+        ),
+      );
+    try {
+      await sendResponseLink(deps.mail, {
+        link,
+        access,
+        from: me.email,
+        publicBaseUrl: deps.publicBaseUrl,
+      });
+    } catch {
+      // Withdraw the unsent link so "Email everyone a link" isn't throttled for them.
+      await revokeUndeliveredLink(deps.storage, link);
+      return c.html(
+        await eventPage(
+          c,
+          deps,
+          access,
+          me.csrfToken,
+          `Added ${added.email}, but couldn't email them. Use "Email everyone a link" to try again later.`,
+        ),
+        503,
+      );
+    }
+    return c.redirect(`${EVENTS_PATH}/${access.event.id}`, 303);
+  });
+
+  app.post(`${EVENTS_PATH}/:id/people/remove`, async (c) => {
+    const me = requireSignedIn(c);
+    if (me instanceof Response) return me;
+    const form = await c.req.parseBody();
+    if (!(await verifyFormCsrf(me, form))) return rejectedPage(c, form);
+    const access = await findEventForParticipant(deps.storage, c.req.param("id"), me.personId);
+    if (access === null || access.participation.visibility === "HIDDEN")
+      return c.html(notFound(c), 404);
+    const removed = await removeParticipant(deps.storage, access, {
+      personId: str(form, "person"),
+      now: deps.now(),
+    });
+    const refused = (notice: string, status: 403 | 409) =>
+      eventPage(c, deps, access, me.csrfToken, notice).then((body) => c.html(body, status));
+    switch (removed.kind) {
+      case "removed":
+        // Removing yourself leaves a page you can no longer see.
+        return c.redirect(
+          str(form, "person") === me.personId ? "/" : `${EVENTS_PATH}/${access.event.id}`,
+          303,
+        );
+      case "forbidden":
+        return c.html(
+          page(c, "Not allowed", html`<h1>Only people who can edit it remove people</h1>`),
+          403,
+        );
+      case "creator":
+        return refused("Whoever created the event can't be removed from it.", 409);
+      case "last_editor":
+        return refused("Someone has to be able to edit the event; add another editor first.", 409);
+      case "awaited":
+        return refused(
+          "The event is waiting for their agreement. Withdraw the proposal instead.",
+          409,
+        );
+      case "not_taking_part":
+        return refused("They aren't taking part.", 409);
     }
   });
 

@@ -242,7 +242,12 @@ const recipientRowSchema = z.object({
 export async function issueResponseLinks(
   storage: StoragePort,
   access: EventAccess,
-  input: { readonly now: string; readonly newToken?: typeof issueToken },
+  input: {
+    readonly now: string;
+    readonly newToken?: typeof issueToken;
+    /** Just this person — someone an editor has added (DESIGN rc15). */
+    readonly only?: string;
+  },
 ): Promise<IssueLinksResult> {
   if (access.participation.editTier !== "edit") return { kind: "forbidden" };
   const action = actionFor(access);
@@ -257,9 +262,14 @@ export async function issueResponseLinks(
             FROM event_participation ep JOIN person p ON p.id = ep.person_id
               JOIN canonical_event e ON e.id = ep.canonical_event_id
             WHERE ep.canonical_event_id = ? AND ep.visibility <> 'HIDDEN' AND ep.person_id <> ?
-              AND ${PARTY_RULE}
+              AND ${PARTY_RULE} AND (? IS NULL OR ep.person_id = ?)
             ORDER BY p.email`,
-      params: [access.event.id, access.participation.personId],
+      params: [
+        access.event.id,
+        access.participation.personId,
+        input.only ?? null,
+        input.only ?? null,
+      ],
     })
   ).map((row) => recipientRowSchema.parse(row));
 

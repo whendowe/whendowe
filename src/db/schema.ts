@@ -457,6 +457,31 @@ export const eventChangeProposal = sqliteTable(
   ],
 );
 
+// Who was added to or removed from an event, by whom (DESIGN rc15, slice 2F). Not a
+// revision: a change_log row would bump the revision and turn a concurrent field edit
+// into a conflict. Append-only; shown in the event's one attributed trail.
+export const eventParticipantChange = sqliteTable(
+  "event_participant_change",
+  {
+    id: text("id").primaryKey(),
+    canonicalEventId: text("canonical_event_id")
+      .notNull()
+      .references(() => canonicalEvent.id, { onDelete: "cascade" }),
+    personId: text("person_id")
+      .notNull()
+      .references(() => person.id, { onDelete: "cascade" }),
+    action: text("action").notNull(),
+    actorId: text("actor_id")
+      .notNull()
+      .references(() => person.id, { onDelete: "cascade" }),
+    createdAt: text("created_at").notNull(),
+  },
+  (t) => [
+    index("event_participant_change_event_idx").on(t.canonicalEventId, t.createdAt),
+    check("event_participant_change_action_chk", sql`${t.action} IN ('added', 'removed')`),
+  ],
+);
+
 export type CalendarConnectionRow = typeof calendarConnection.$inferSelect;
 export type CanonicalEventRow = typeof canonicalEvent.$inferSelect;
 export type EventOverrideRow = typeof eventOverride.$inferSelect;

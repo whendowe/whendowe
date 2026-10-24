@@ -67,7 +67,9 @@ export async function findPersonByEmail(
  * INSERT … ON CONFLICT DO NOTHING then SELECT: two first logins racing for the same
  * new address both insert-or-skip against UNIQUE(email) and both read the single
  * row that won. A select-then-insert would let both see "absent" and one would fail.
- * Called only AFTER an address is proven (a consumed magic link), never on request.
+ * Called after an address is proven (a consumed magic link), or when an event's editor
+ * adds an address to it (DESIGN rc15, §2: a person exists with zero connections). Never
+ * on a sign-in REQUEST: asking for a link creates no one.
  */
 export async function findOrCreatePerson(
   storage: StoragePort,
