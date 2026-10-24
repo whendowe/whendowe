@@ -45,11 +45,21 @@ function must(value: string | null | undefined, what: string): string {
   return value;
 }
 
-await app.request(SIGN_IN_PATH, post({ email: "dm@example.org" }));
-const link = must(/https?:\/\/\S+/.exec(sent.at(-1)?.text ?? "")?.[0], "sign-in link");
-const token = must(new URL(link).searchParams.get("t"), "sign-in token");
-const confirmed = await app.request(CONFIRM_PATH, post({ t: token }));
-const cookie = must(confirmed.headers.get("set-cookie")?.split(";")[0], "session cookie");
+/** Sign this "browser" in as one more account (DESIGN §13 rc18); returns its cookie. */
+async function signIn(email: string, cookie?: string): Promise<string> {
+  await app.request(SIGN_IN_PATH, post({ email }, cookie));
+  const link = must(/https?:\/\/\S+/.exec(sent.at(-1)?.text ?? "")?.[0], "sign-in link");
+  const token = must(new URL(link).searchParams.get("t"), "sign-in token");
+  const confirmed = await app.request(CONFIRM_PATH, post({ t: token }, cookie));
+  return must(confirmed.headers.get("set-cookie")?.split(";")[0], "session cookie");
+}
+
+// Three accounts on this browser, so the header's menu has someone to switch to; the
+// DM, signed in last, is the one in use.
+const cookie = await signIn(
+  "dm@example.org",
+  await signIn("lea@example.org", await signIn("dm.work@example.org")),
+);
 const home = await (await app.request("/", { headers: { cookie } })).text();
 const csrf = must(/name="csrf" value="([^"]+)"/.exec(home)?.[1], "CSRF token");
 
@@ -72,6 +82,7 @@ const evening = await app.request(
 const event = must(evening.headers.get("location"), "event location");
 
 const pages: Record<string, string> = {
+  home: "/",
   "event-new": `${group}/events/new`,
   "event-edit": `${event}/edit`,
   "poll-new": `${group}/polls/new`,

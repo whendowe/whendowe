@@ -20,6 +20,15 @@ const value = (page: Page, name: string) => page.locator(`[name="${name}"]`).inp
 const checked = (page: Page, name: string) => page.locator(`[name="${name}"]`).isChecked();
 const day = (page: Page, label: string) => page.getByRole("button", { name: label, exact: true });
 const form = (page: Page) => page.locator("form[data-picker]");
+/**
+ * The form as a reference screenshot. The pointer stays wherever the last click left
+ * it, and a page scrolled for the capture can slide a control under it and draw that
+ * control hovered. Off the page first, so the image never depends on the pointer.
+ */
+async function shot(page: Page, name: string): Promise<void> {
+  await page.mouse.move(0, 0);
+  await expect(form(page)).toHaveScreenshot(name);
+}
 // Scoped to the picker: the hidden plain fields carry the same labels.
 const picker = (page: Page) => page.locator(".wd-picker");
 
@@ -27,7 +36,7 @@ test.describe("event form", () => {
   test("a new event: one tap, a start and a length", async ({ page }) => {
     const errors = await open(page, "event-new");
     await expect(page.locator("[data-picker-plain]")).toBeHidden();
-    await expect(form(page)).toHaveScreenshot("event-new.png");
+    await shot(page, "event-new.png");
 
     await day(page, "Fri 30 Oct").click();
     await picker(page).getByLabel("Starts").fill("23:15");
@@ -51,7 +60,7 @@ test.describe("event form", () => {
     expect(await checked(page, "allDay")).toBe(true);
     expect(await value(page, "start")).toBe("2026-10-31T00:00");
     expect(await value(page, "end")).toBe("2026-11-02T00:00");
-    await expect(form(page)).toHaveScreenshot("event-several-days.png");
+    await shot(page, "event-several-days.png");
     expect(errors).toEqual([]);
   });
 
@@ -59,7 +68,7 @@ test.describe("event form", () => {
     const errors = await open(page, "event-edit");
     await expect(page.locator(".wd-summary")).toContainText("Fri 30 Oct · 19:00–22:00");
     await expect(picker(page).getByLabel("Length")).toHaveValue("180");
-    await expect(form(page)).toHaveScreenshot("event-edit.png");
+    await shot(page, "event-edit.png");
     expect(errors).toEqual([]);
   });
 });
@@ -80,7 +89,7 @@ test.describe("poll form", () => {
 
     await day(page, "Fri 30 Oct").click(); // two times: ask, don't remove
     await expect(page.locator(".wd-chooser")).toContainText("Fri 30 Oct has 2 times");
-    await expect(form(page)).toHaveScreenshot("poll-times-asking.png");
+    await shot(page, "poll-times-asking.png");
     await page.getByRole("button", { name: "B · 21:00–00:00" }).click();
     expect(await value(page, "start_1")).toBe("2026-10-31T18:00");
     expect(await value(page, "start_2")).toBe("");
@@ -119,7 +128,7 @@ test.describe("poll form", () => {
     await expect(
       page.getByRole("button", { name: "Wed 11 Nov, in option A and B and C" }),
     ).toBeVisible();
-    await expect(form(page)).toHaveScreenshot("poll-days-overlap.png");
+    await shot(page, "poll-days-overlap.png");
     expect(errors).toEqual([]);
   });
 });
@@ -135,8 +144,9 @@ test.describe("without JavaScript (DESIGN rc15: every form works without it)", (
       await expect(page.locator('[name="allDay"]')).toBeVisible();
       const firstStart = name === "event-new" ? "start" : "start_0";
       await expect(page.locator(`[name="${firstStart}"]`)).toBeVisible();
-      await expect(page.locator('button[type="submit"]')).toBeVisible();
-      await expect(form(page)).toHaveScreenshot(`${name}-no-js.png`);
+      // The form's own button: the page header has buttons too (rc18).
+      await expect(form(page).locator('button[type="submit"]')).toBeVisible();
+      await shot(page, `${name}-no-js.png`);
     });
   }
 });
