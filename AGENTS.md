@@ -8,8 +8,9 @@ Read order: `DESIGN.md` before any work; `WORKFLOWS.md` before anything M3+; `BU
 ```
 npm ci                      # setup (devcontainer recommended; Hegel requires Linux/macOS)
 npm run check               # THE GATE: biome + tsc --noEmit + vitest (unit/property/contract) + workers-pool tests
-npm run test:browser        # browser tier (DESIGN §9 rc16): page scripts + reference screenshots, in the pinned image
+npm run test:browser        # browser tier (DESIGN §9 rc16–17): page scripts, reference screenshots, the picker state machine + coverage, in the pinned image
 npm run soak                # long-budget property/simulation run (nightly; not part of the gate)
+npm run soak:browser        # the picker state machine at soak budget (nightly)
 npm run dev:cf              # wrangler dev
 npm run dev:node            # node deployment target locally
 npm run migrate:new <name>  # generate a plain-SQL migration via drizzle-kit

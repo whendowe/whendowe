@@ -460,6 +460,19 @@ const PICKER_SCRIPT = html`<script>
     function startOf(t) { return t.own === null ? poll.start : t.own; }
     function endOf(t) { return fromMin(toMin(startOf(t)) + poll.length); }
     function canAdd() { full = options().length >= max; return !full; }
+    /**
+     * The same option twice is one option: the server refuses a poll that repeats one.
+     * After any change (a tap, an edited time, +1 week) the earlier copy is kept and
+     * the later one dropped; returns how many were.
+     */
+    function keepOnce() {
+      var seen = {};
+      var before = poll.kind === DAYS ? poll.days.length : poll.times.length;
+      function first(k) { if (seen[k]) return false; seen[k] = true; return true; }
+      if (poll.kind === DAYS) poll.days = poll.days.filter(function (d) { return first(d.from + "/" + d.to); });
+      else poll.times = poll.times.filter(function (t) { return first(t.date + "/" + startOf(t)); });
+      return before - (poll.kind === DAYS ? poll.days.length : poll.times.length);
+    }
 
     function paint(key, btn) {
       if (poll.kind === DAYS) {
@@ -622,8 +635,11 @@ const PICKER_SCRIPT = html`<script>
       kindTimes.setAttribute("aria-pressed", String(poll.kind !== DAYS));
       kindDays.setAttribute("aria-pressed", String(poll.kind === DAYS));
       row.hidden = poll.kind === DAYS;
+      var merged = keepOnce();
       canAdd();
-      hint.textContent = full
+      hint.textContent = merged > 0
+        ? "That is already an option, so it is listed once."
+        : full
         ? "That is the most options a poll can offer (" + max + "). Remove one to add another."
         : poll.kind === DAYS
           ? (pending ? "Starts " + dayLabel(pending) + ". Now tap the last day of this option." : "Tap the first day of an option, then its last day. Options may overlap.")

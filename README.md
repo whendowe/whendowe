@@ -42,6 +42,7 @@ npm ci            # devcontainer recommended (Hegel requires Linux/macOS)
 npm run check     # THE GATE: biome + tsc + vitest + workers-pool tests
 npm run test:browser         # the browser tier, in the pinned Playwright image (podman/docker)
 npm run test:browser:update  # same, rewriting the reference screenshots after a deliberate change
+npm run soak:browser         # the poll picker's state machine at soak budget
 npm run dev:node  # Node target locally
 npm run dev:cf    # Cloudflare target locally (wrangler dev)
 ```

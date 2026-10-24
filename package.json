@@ -19,6 +19,7 @@
     "test:browser:run": "tsx tests/browser/pages.ts && playwright test -c tests/browser/playwright.config.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p deploy/cloudflare/tsconfig.json && tsc --noEmit -p tests/workers/tsconfig.json",
     "soak": "SOAK=1 vitest run --project property",
+    "soak:browser": "SOAK=1 sh scripts/browser.sh --grep @machine",
     "dev:cf": "wrangler dev -c deploy/cloudflare/wrangler.jsonc",
     "dev:node": "tsx watch deploy/node/server.ts",
     "build:node": "tsc -p deploy/node/tsconfig.build.json",
