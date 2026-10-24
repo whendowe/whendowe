@@ -175,7 +175,8 @@ ${createForm(me.csrfToken, "", null)}`,
       );
     }
     const members = await listMembers(deps.storage, membership);
-    // Each event rendered at THIS viewer's visibility tier (eventSummary → canSee).
+    // Events from this group or shared with its members (DESIGN rc15); each rendered
+    // at THIS viewer's visibility tier (eventSummary → canSee).
     const events = await listGroupEvents(deps.storage, membership, me.personId);
     return c.html(
       page(
@@ -183,7 +184,7 @@ ${createForm(me.csrfToken, "", null)}`,
         membership.group.name,
         html`<p><a href="${GROUPS_PATH}">← Your groups</a></p>
 <h1>${membership.group.name}</h1>
-<h2>Events</h2>
+<h2>Events with these people</h2>
 ${events.length === 0 ? html`<p class="muted">Nothing planned yet.</p>` : html`<ul>${events.map((a) => html`<li>${eventSummary(a)}</li>`)}</ul>`}
 <p><a href="${GROUPS_PATH}/${membership.group.id}/events/new">+ New event</a> · <a href="${GROUPS_PATH}/${membership.group.id}/polls/new">+ Find a time (poll)</a></p>
 <h2>People</h2>

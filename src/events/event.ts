@@ -365,9 +365,17 @@ export async function findEventForParticipant(
 }
 
 /**
- * Events in a group that this person takes part in, soonest first — each WITH that
- * person's participation, because a list must render every event at the viewer's own
- * visibility tier, never at the event's full detail.
+ * A group page's events, soonest first (DESIGN rc15): those this person takes part in
+ * that were created from this group (`group_id`, provenance), and any other they share
+ * with at least one other current member — an event made by email with the same people
+ * is here too. Not a feed of "the group's events": joining a group never adds you to
+ * its earlier events, and an event you aren't on is never listed.
+ *
+ * Who else takes part is part of an event's `participants`, which not every tier may
+ * see (WORKFLOWS US-6). So the shared-with-members rule applies only at FULL: the list
+ * never tells a viewer about a member they couldn't see on the event's own page.
+ *
+ * Each WITH this person's participation, to render at their own tier.
  */
 export async function listGroupEvents(
   storage: StoragePort,
@@ -377,9 +385,13 @@ export async function listGroupEvents(
   const rows = await storage.query({
     sql: `SELECT ${EVENT_COLUMNS}, ${PARTICIPATION_COLUMNS}
           FROM canonical_event e JOIN event_participation ep ON ep.canonical_event_id = e.id
-          WHERE e.group_id = ? AND ep.person_id = ? AND ep.visibility <> 'HIDDEN' AND ${PARTY_RULE}
+          WHERE ep.person_id = ? AND ep.visibility <> 'HIDDEN' AND ${PARTY_RULE}
+            AND (e.group_id = ? OR (ep.visibility = 'FULL'
+              AND EXISTS (SELECT 1 FROM event_participation o
+                            JOIN group_member m ON m.person_id = o.person_id AND m.group_id = ?
+                          WHERE o.canonical_event_id = e.id AND o.person_id <> ?)))
           ORDER BY e.start_local, e.id`,
-    params: [membership.group.id, personId],
+    params: [personId, membership.group.id, membership.group.id, personId],
   });
   return rows.map((row) => ({ event: toEvent(row), participation: toParticipation(row) }));
 }

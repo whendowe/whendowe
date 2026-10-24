@@ -7,6 +7,7 @@ import {
   type EventFieldsInput,
   findEventForParticipant,
   listEventsFor,
+  listGroupEvents,
   listHistory,
 } from "../../src/events/event.js";
 import {
@@ -150,6 +151,57 @@ export function runParticipantsContract(makePort: () => Promise<StoragePort>): v
         "pp-cat-named@example.org view DETAILS",
         "pp-mara-named@example.org edit FULL",
       ]);
+    });
+
+    it("a group page lists events shared with its members — at FULL — and its own", async () => {
+      const port = await makePort();
+      const mara = await findOrCreatePerson(port, "pp-mara-shared@example.org", { now: T0 });
+      const group = await createGroup(port, { name: "Pair", creatorId: mara.id, now: T0 });
+      const membership = await findGroupForMember(port, group.id, mara.id);
+      if (membership === null) throw new Error("expected membership");
+      const invite = await createInvite(port, membership, {
+        email: "pp-dan-shared@example.org",
+        invitedBy: mara.id,
+        editTier: "view",
+        visibility: "FULL",
+        now: T0,
+      });
+      if (!invite.ok) throw new Error(invite.reason);
+      const dan = (await acceptInvite(port, invite.token, T0))?.personId ?? "";
+      const byEmail = async (title: string, rows: Parameters<typeof resolveInvitees>[1]) =>
+        createEvent(port, {
+          creatorId: mara.id,
+          group: null,
+          fields: { ...DINNER, title },
+          now: T0,
+          people: await resolveInvitees(port, rows, { now: T0 }),
+        });
+      const withDan = await byEmail("with Dan", [
+        { email: "pp-dan-shared@example.org", editTier: "view", visibility: "FULL" },
+      ]);
+      const withoutDan = await byEmail("without Dan", [
+        { email: "pp-eve-shared@example.org", editTier: "view", visibility: "FULL" },
+      ]);
+      const ownOnly = await createEvent(port, {
+        creatorId: mara.id,
+        group: membership,
+        fields: { ...DINNER, title: "from the group" },
+        now: T0,
+        people: [],
+      });
+      const listed = async (who: string) =>
+        (await listGroupEvents(port, membership, who)).map((a) => a.event.title).sort();
+      expect(await listed(mara.id)).toEqual(["from the group", "with Dan"]);
+      expect(await listed(dan)).toEqual(["from the group", "with Dan"]);
+      expect(ownOnly.groupId).toBe(group.id);
+      expect(withoutDan.groupId).toBeNull();
+
+      // Below FULL, Dan can't see who else is on "with Dan", so it isn't listed for him.
+      await port.query({
+        sql: "UPDATE event_participation SET visibility = 'DETAILS' WHERE canonical_event_id = ? AND person_id = ?",
+        params: [withDan.id, dan],
+      });
+      expect(await listed(dan)).toEqual(["from the group"]);
     });
 
     it("only the edit tier adds and removes", async () => {
