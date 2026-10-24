@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import type { Hono } from "hono";
+import type { Context, Hono } from "hono";
 import { z } from "zod";
 import type { TokenCipher } from "../../crypto/tokens.js";
 import type { StoragePort } from "../../db/port.js";
@@ -17,8 +17,8 @@ import type { FetchLike } from "../../oauth/http.js";
 import { createPkcePair, createState, timingSafeEqual } from "../../oauth/pkce.js";
 import { fetchPrimaryCalendar } from "../../oauth/primary-calendar.js";
 import { exchangeAuthorizationCode } from "../../oauth/token-exchange.js";
-import { type Html, html, renderPage } from "../layout.js";
-import { type AppEnv, requireSignedIn, verifyFormCsrf } from "../session.js";
+import { type Html, html } from "../layout.js";
+import { type AppEnv, page, requireSignedIn, verifyFormCsrf } from "../session.js";
 
 // The Google connect flow (DESIGN.md §12/§13), owned by a signed-in person (MVP-1 E).
 //
@@ -75,8 +75,8 @@ function secondsSinceEpoch(nowIso: string): number {
   return Math.floor(new Date(nowIso).getTime() / 1000);
 }
 
-function result(title: string, body: Html): string {
-  return renderPage(title, html`<h1>${title}</h1>${body}<p><a href="/">← Home</a></p>`);
+function result(c: Context<AppEnv>, title: string, body: Html): string {
+  return page(c, title, html`<h1>${title}</h1>${body}<p><a href="/">← Home</a></p>`);
 }
 
 const EXPIRED = html`<p>This connection attempt is no longer valid. Please start again.</p>`;
@@ -91,7 +91,7 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: OAuthRouteDeps): vo
     const me = requireSignedIn(c);
     if (me instanceof Response) return me;
     if (!(await verifyFormCsrf(me, await c.req.parseBody()))) {
-      return c.html(result("Request rejected", html`<p>Please try again.</p>`), 403);
+      return c.html(result(c, "Request rejected", html`<p>Please try again.</p>`), 403);
     }
 
     const pkce = await createPkcePair();
@@ -128,7 +128,7 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: OAuthRouteDeps): vo
       error: c.req.query("error"),
     });
     if (!query.success) {
-      return c.html(result("Connection failed", html`<p>The callback was malformed.</p>`), 400);
+      return c.html(result(c, "Connection failed", html`<p>The callback was malformed.</p>`), 400);
     }
 
     // The user declined, or Google refused. Anyone can craft this value; `html`
@@ -136,6 +136,7 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: OAuthRouteDeps): vo
     if (query.data.error !== undefined) {
       return c.html(
         result(
+          c,
           "Connection cancelled",
           html`<p>Google reported: <code>${shortCode(query.data.error)}</code></p>`,
         ),
@@ -145,11 +146,11 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: OAuthRouteDeps): vo
 
     const { code, state } = query.data;
     if (code === undefined || state === undefined) {
-      return c.html(result("Connection failed", html`<p>The callback was incomplete.</p>`), 400);
+      return c.html(result(c, "Connection failed", html`<p>The callback was incomplete.</p>`), 400);
     }
 
     const cookie = readFlowCookie(c.req.header("cookie"));
-    if (cookie === null) return c.html(result("Connection expired", EXPIRED), 400);
+    if (cookie === null) return c.html(result(c, "Connection expired", EXPIRED), 400);
 
     let flow: Awaited<ReturnType<typeof unsealFlow>>;
     try {
@@ -158,13 +159,13 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: OAuthRouteDeps): vo
       // Tampered, expired, or sealed under a rotated key. The reason is not shown
       // to the caller — it would be a probing oracle — and is not logged here
       // either, because the message could name fields of a hostile cookie.
-      return c.html(result("Connection expired", EXPIRED), 400);
+      return c.html(result(c, "Connection expired", EXPIRED), 400);
     }
 
     // THE login-CSRF check (§13). Without it an attacker can feed their own
     // authorization code to a victim's callback and graft their calendar on.
     if (!timingSafeEqual(state, flow.state)) {
-      return c.html(result("Connection failed", html`<p>Request verification failed.</p>`), 400);
+      return c.html(result(c, "Connection failed", html`<p>Request verification failed.</p>`), 400);
     }
 
     // The person who started the flow must be the person signed in now. Checked
@@ -173,6 +174,7 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: OAuthRouteDeps): vo
     if (me === null || me.personId !== flow.personId) {
       return c.html(
         result(
+          c,
           "Connection stopped",
           html`<p>You're no longer signed in as the person who started this. Sign in and try again.</p>`,
         ),
@@ -233,6 +235,7 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: OAuthRouteDeps): vo
     // untrusted, escaped by `html` (§13).
     return c.html(
       result(
+        c,
         "Calendar connected",
         html`<p>Connected <strong>${calendar.summary ?? calendar.id}</strong>.</p>`,
       ),

@@ -3,6 +3,7 @@ import { z } from "zod";
 import type { StoragePort } from "../db/port.js";
 import { uuidv7 } from "../ids.js";
 import { timingSafeEqual } from "../oauth/pkce.js";
+import { type Account, MAX_ACCOUNTS } from "./accounts.js";
 import { csrfTokenFor, hashToken, issueToken } from "./tokens.js";
 
 // Sessions (DESIGN §13). The cookie carries a random token; only its hash is stored.
@@ -63,6 +64,55 @@ export async function resolveSession(
   if (rows[0] === undefined) return null;
   const row = sessionRowSchema.parse(rows[0]);
   return { sessionId: row.id, personId: row.person_id, csrfToken: await csrfTokenFor(token) };
+}
+
+// A fixed statement: one slot per account a cookie may hold. Constant text, so the
+// query is still parameterised; this throws at load if the limit and the slots drift.
+const SLOTS = "?, ?, ?, ?";
+if (SLOTS.split("?").length - 1 !== MAX_ACCOUNTS) throw new Error("SLOTS must match MAX_ACCOUNTS");
+
+const accountRowSchema = z.object({
+  id: z.string(),
+  person_id: z.string(),
+  email: z.string(),
+  token_hash: z.string(),
+});
+
+/**
+ * The live sessions among a browser's tokens (DESIGN §13 rc18), in the order given,
+ * with each one's person. Unknown, expired and revoked tokens are left out. One read,
+ * whatever the count: the statement always has MAX_ACCOUNTS slots, and unused ones
+ * hold an empty string, which no token hashes to.
+ */
+export async function resolveAccounts(
+  storage: StoragePort,
+  tokens: readonly string[],
+  options: { readonly now: string },
+): Promise<Account[]> {
+  const wanted = tokens.slice(0, MAX_ACCOUNTS);
+  if (wanted.length === 0) return [];
+  const hashes = await Promise.all(wanted.map(hashToken));
+  const slots = Array.from({ length: MAX_ACCOUNTS }, (_, i) => hashes[i] ?? "");
+  const rows = await storage.query({
+    sql: `SELECT session.id, session.person_id, person.email, session.token_hash
+          FROM session JOIN person ON person.id = session.person_id
+          WHERE session.token_hash IN (${SLOTS})
+            AND session.revoked_at IS NULL AND session.expires_at > ?`,
+    params: [...slots, options.now],
+  });
+  const byHash = new Map<string, z.infer<typeof accountRowSchema>>();
+  for (const r of rows) {
+    const row = accountRowSchema.parse(r);
+    byHash.set(row.token_hash, row);
+  }
+  const accounts: Account[] = [];
+  wanted.forEach((token, i) => {
+    const row = byHash.get(hashes[i] ?? "");
+    if (row !== undefined) {
+      accounts.push({ token, sessionId: row.id, personId: row.person_id, email: row.email });
+    }
+  });
+  return accounts;
 }
 
 /** Constant-time check of a submitted CSRF token against the session's. */

@@ -204,28 +204,33 @@ it("an invite works once", async () => {
   expect((await h.app.request("/invite", post({ t }))).status).toBe(400);
 });
 
-it("joining while signed in as someone else switches accounts and kills the old session", async () => {
+// rc18 (DESIGN §13): this used to sign the other account out. A browser now holds
+// several accounts, so joining adds the invited one and keeps the other.
+it("joining while signed in as someone else adds the invited account and keeps the other", async () => {
   const h = await harness();
   const dm = await signIn(h, "inv-dm4@example.org");
   const group = await createGroupVia(h, dm, "G");
   await inviteVia(h, dm, group, "newbie4@example.org");
   const link = inviteLink(h);
 
-  // The DM opens the link in their own browser by mistake: the page warns.
+  // The DM opens the link in their own browser by mistake: the page says what happens.
   const preview = await (
     await h.app.request(`${link.pathname}${link.search}`, { headers: { cookie: dm.cookie } })
   ).text();
   expect(preview).toContain("You're signed in as inv-dm4@example.org");
+  expect(preview).toContain("Joining also signs this browser in as newbie4@example.org");
 
   const joined = await h.app.request(
     "/invite",
     post({ t: link.searchParams.get("t") ?? "" }, dm.cookie),
   );
-  const newCookie = (joined.headers.get("set-cookie") ?? "").split(";")[0] ?? "";
-  expect(newCookie).not.toBe(dm.cookie);
-  // The DM's old session is revoked server-side, not merely replaced in this browser.
-  expect(await (await h.app.request("/", { headers: { cookie: dm.cookie } })).text()).not.toContain(
-    "Signed in as",
+  const both = (joined.headers.get("set-cookie") ?? "").split(";")[0] ?? "";
+  const home = await (await h.app.request("/", { headers: { cookie: both } })).text();
+  expect(home).toMatch(/<summary>.*<strong>newbie4@example\.org<\/strong>/s);
+  expect(home).toContain("Switch to <strong>inv-dm4@example.org</strong>");
+  // The DM's own session is still alive, and still theirs.
+  expect(await (await h.app.request("/", { headers: { cookie: dm.cookie } })).text()).toMatch(
+    /<summary>.*<strong>inv-dm4@example\.org<\/strong>/s,
   );
 });
 

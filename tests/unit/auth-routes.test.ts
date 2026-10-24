@@ -95,7 +95,7 @@ it("emails a link, confirms on POST, and signs the person in", async () => {
   const h = await harness();
   const cookie = await signIn(h, "Ann@Example.org");
   const home = await (await h.app.request("/", { headers: { cookie } })).text();
-  expect(home).toContain("Signed in as <strong>ann@example.org</strong>");
+  expect(home).toMatch(/<summary>.*Signed in as.*<strong>ann@example\.org<\/strong>/s);
   expect(h.sent[0]?.to).toBe("ann@example.org");
 });
 

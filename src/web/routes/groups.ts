@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import type { Hono } from "hono";
+import type { Context, Hono } from "hono";
 import type { StoragePort } from "../../db/port.js";
 import { listGroupEvents } from "../../events/event.js";
 import { MailCapReachedError } from "../../mail/capped.js";
@@ -20,9 +20,15 @@ import {
   visibilitySchema,
 } from "../../people/invite.js";
 import { normalizeEmail } from "../../people/person.js";
-import { createSession, revokeSession } from "../../people/session.js";
-import { html, renderPage } from "../layout.js";
-import { type AppEnv, requireSignedIn, setSessionCookie, verifyFormCsrf } from "../session.js";
+import { html } from "../layout.js";
+import {
+  type AppEnv,
+  page,
+  rejectedPage,
+  requireSignedIn,
+  signInAs,
+  verifyFormCsrf,
+} from "../session.js";
 import { eventSummary } from "./events.js";
 
 // Groups (MVP-1 slice D1). Every route needs a signed-in person; every group page
@@ -83,16 +89,18 @@ function sensitive(c: { header: (name: string, value: string) => void }): void {
   c.header("Cache-Control", "no-store");
 }
 
-function inviteExpired() {
-  return renderPage(
+function inviteExpired(c: Context<AppEnv>) {
+  return page(
+    c,
     "Invite expired",
     html`<h1>This invite has expired or was already used</h1>
 <p>Ask whoever invited you to send a new one. Invites last ${DAYS} days and work once.</p>`,
   );
 }
 
-function notFound() {
-  return renderPage(
+function notFound(c: Context<AppEnv>) {
+  return page(
+    c,
     "Not found",
     html`<h1>Not found</h1><p><a href="${GROUPS_PATH}">Your groups</a></p>`,
   );
@@ -115,7 +123,8 @@ export function registerGroupRoutes(app: Hono<AppEnv>, deps: GroupDeps): void {
     if (me instanceof Response) return me;
     const groups = await listGroupsFor(deps.storage, me.personId);
     return c.html(
-      renderPage(
+      page(
+        c,
         "Your groups",
         html`<p><a href="/">← Home</a></p>
 <h1>Your groups</h1>
@@ -137,10 +146,7 @@ ${createForm(me.csrfToken, "", null)}`,
     if (me instanceof Response) return me;
     const form = await c.req.parseBody();
     if (!(await verifyFormCsrf(me, form))) {
-      return c.html(
-        renderPage("Request rejected", html`<h1>Request rejected</h1><p>Please try again.</p>`),
-        403,
-      );
+      return rejectedPage(c, form);
     }
     const raw = typeof form.name === "string" ? form.name : "";
     try {
@@ -152,10 +158,7 @@ ${createForm(me.csrfToken, "", null)}`,
       return c.redirect(`${GROUPS_PATH}/${group.id}`, 303);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Could not create the group.";
-      return c.html(
-        renderPage("New group", createForm(me.csrfToken, raw.slice(0, 80), message)),
-        400,
-      );
+      return c.html(page(c, "New group", createForm(me.csrfToken, raw.slice(0, 80), message)), 400);
     }
   });
 
@@ -163,12 +166,13 @@ ${createForm(me.csrfToken, "", null)}`,
     const me = requireSignedIn(c);
     if (me instanceof Response) return me;
     const membership = await findGroupForMember(deps.storage, c.req.param("id"), me.personId);
-    if (membership === null) return c.html(notFound(), 404);
+    if (membership === null) return c.html(notFound(c), 404);
     const members = await listMembers(deps.storage, membership);
     // Each event rendered at THIS viewer's visibility tier (eventSummary → canSee).
     const events = await listGroupEvents(deps.storage, membership, me.personId);
     return c.html(
-      renderPage(
+      page(
+        c,
         membership.group.name,
         html`<p><a href="${GROUPS_PATH}">← Your groups</a></p>
 <h1>${membership.group.name}</h1>
@@ -190,23 +194,21 @@ ${membership.role === "organizer" ? inviteForm(membership, me.csrfToken, null) :
     if (me instanceof Response) return me;
     const form = await c.req.parseBody();
     if (!(await verifyFormCsrf(me, form))) {
-      return c.html(
-        renderPage("Request rejected", html`<h1>Request rejected</h1><p>Please try again.</p>`),
-        403,
-      );
+      return rejectedPage(c, form);
     }
     const membership = await findGroupForMember(deps.storage, c.req.param("id"), me.personId);
-    if (membership === null) return c.html(notFound(), 404);
+    if (membership === null) return c.html(notFound(c), 404);
     if (membership.role !== "organizer") {
       return c.html(
-        renderPage("Not allowed", html`<h1>Only the group's organizer can invite people</h1>`),
+        page(c, "Not allowed", html`<h1>Only the group's organizer can invite people</h1>`),
         403,
       );
     }
 
-    const page = (status: 200 | 400 | 409 | 429 | 502 | 503, notice: ReturnType<typeof html>) =>
+    const reply = (status: 200 | 400 | 409 | 429 | 502 | 503, notice: ReturnType<typeof html>) =>
       c.html(
-        renderPage(
+        page(
+          c,
           membership.group.name,
           html`<p><a href="${GROUPS_PATH}/${membership.group.id}">← ${membership.group.name}</a></p>
 ${inviteForm(membership, me.csrfToken, notice)}`,
@@ -221,10 +223,10 @@ ${inviteForm(membership, me.csrfToken, notice)}`,
     try {
       email = normalizeEmail(raw);
     } catch {
-      return page(400, html`<p class="error">That doesn't look like an email address.</p>`);
+      return reply(400, html`<p class="error">That doesn't look like an email address.</p>`);
     }
     if (!editTier.success || !visibility.success) {
-      return page(400, html`<p class="error">Choose what they can change and see.</p>`);
+      return reply(400, html`<p class="error">Choose what they can change and see.</p>`);
     }
 
     const invite = await createInvite(deps.storage, membership, {
@@ -236,14 +238,14 @@ ${inviteForm(membership, me.csrfToken, notice)}`,
     });
     if (!invite.ok) {
       if (invite.reason === "already_member")
-        return page(409, html`<p class="error">${email} is already in this group.</p>`);
+        return reply(409, html`<p class="error">${email} is already in this group.</p>`);
       if (invite.reason === "rate_limited")
-        return page(
+        return reply(
           429,
           html`<p class="error">That's a lot of invites today. Try again tomorrow.</p>`,
         );
       return c.html(
-        renderPage("Not allowed", html`<h1>Only the group's organizer can invite people</h1>`),
+        page(c, "Not allowed", html`<h1>Only the group's organizer can invite people</h1>`),
         403,
       );
     }
@@ -270,16 +272,16 @@ ${inviteForm(membership, me.csrfToken, notice)}`,
       });
     } catch (error) {
       if (error instanceof MailCapReachedError)
-        return page(
+        return reply(
           503,
           html`<p class="error">We can't send email right now. Please try again later.</p>`,
         );
-      return page(
+      return reply(
         502,
         html`<p class="error">We couldn't send the invite. Please check the address and try again.</p>`,
       );
     }
-    return page(200, html`<p>Invite sent to <strong>${invite.email}</strong>.</p>`);
+    return reply(200, html`<p>Invite sent to <strong>${invite.email}</strong>.</p>`);
   });
 
   app.get(INVITE_PATH, async (c) => {
@@ -289,16 +291,17 @@ ${inviteForm(membership, me.csrfToken, notice)}`,
       token === undefined || token.length > 256
         ? null
         : await peekInvite(deps.storage, token, deps.now());
-    if (token === undefined || preview === null) return c.html(inviteExpired(), 400);
+    if (token === undefined || preview === null) return c.html(inviteExpired(c), 400);
     const signedIn = c.get("signedIn");
     return c.html(
-      renderPage(
+      page(
+        c,
         "Join group",
         html`<h1>Join “${preview.groupName}”?</h1>
 <p><strong>${preview.inviterEmail}</strong> invited <strong>${preview.email}</strong>.</p>
 ${
   signedIn !== null && signedIn.email !== preview.email
-    ? html`<p class="muted">You're signed in as ${signedIn.email}. Joining signs this browser in as ${preview.email} instead.</p>`
+    ? html`<p class="muted">You're signed in as ${signedIn.email}. Joining also signs this browser in as ${preview.email}, and you can switch between them from the menu at the top.</p>`
     : html`<p class="muted">Joining also signs you in as ${preview.email}.</p>`
 }
 <form method="post" action="${INVITE_PATH}">
@@ -315,17 +318,21 @@ ${
     const token = typeof form.t === "string" && form.t.length <= 256 ? form.t : null;
     const now = deps.now();
     const accepted = token === null ? null : await acceptInvite(deps.storage, token, now);
-    if (accepted === null) return c.html(inviteExpired(), 400);
+    if (accepted === null) return c.html(inviteExpired(c), 400);
 
-    // Switch the browser to the invited account. A different person's session here is
-    // revoked server-side, not just replaced in the cookie jar.
+    // Sign the browser in as the invited account too (§13 rc18): it joins this browser's
+    // accounts, the others stay. With four others already here the invite still counts,
+    // but signing in waits until there is room.
     const current = c.get("signedIn");
-    if (current !== null && current.personId !== accepted.personId) {
-      await revokeSession(deps.storage, current.sessionToken, now);
-    }
-    if (current === null || current.personId !== accepted.personId) {
-      const session = await createSession(deps.storage, accepted.personId, { now });
-      setSessionCookie(c, session.token, deps.secureCookies);
+    if (current?.personId !== accepted.personId && !(await signInAs(c, deps, accepted.personId))) {
+      return c.html(
+        page(
+          c,
+          "Joined",
+          html`<h1>You've joined</h1>
+<p>Four accounts are already signed in on this browser, the most it holds, so this one isn't yet. Sign out of one from the menu at the top, then sign in as the invited address.</p>`,
+        ),
+      );
     }
     return c.redirect(`${GROUPS_PATH}/${accepted.groupId}`, 303);
   });

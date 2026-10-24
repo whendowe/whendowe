@@ -14,6 +14,7 @@ import {
 } from "../../src/people/person.js";
 import {
   createSession,
+  resolveAccounts,
   resolveSession,
   revokeAllSessions,
   revokeSession,
@@ -178,6 +179,39 @@ export function runPeopleContract(makePort: () => Promise<StoragePort>): void {
       expect(await resolveSession(port, a.token, { now: at(2) })).toBeNull();
       expect(await resolveSession(port, b.token, { now: at(2) })).toBeNull();
       expect(await resolveSession(port, c.token, { now: at(2) })).not.toBeNull();
+    });
+
+    it("resolves a browser's accounts in one read, in order, dropping dead ones (rc18)", async () => {
+      const port = await makePort();
+      const ann = await findOrCreatePerson(port, "acc-ann@example.org", { now: T0 });
+      const bob = await findOrCreatePerson(port, "acc-bob@example.org", { now: T0 });
+      const a = await createSession(port, ann.id, { now: T0 });
+      const b = await createSession(port, bob.id, { now: T0 });
+      const gone = await createSession(port, bob.id, { now: T0 });
+      await revokeSession(port, gone.token, at(1));
+      let reads = 0;
+      const counting: StoragePort = {
+        query: (s) => {
+          reads += 1;
+          return port.query(s);
+        },
+        batch: (stmts) => port.batch(stmts),
+      };
+      const accounts = await resolveAccounts(
+        counting,
+        [b.token, "not-a-session", gone.token, a.token],
+        { now: at(2) },
+      );
+      expect(accounts.map((x) => [x.email, x.sessionId, x.token])).toEqual([
+        ["acc-bob@example.org", b.sessionId, b.token],
+        ["acc-ann@example.org", a.sessionId, a.token],
+      ]);
+      expect(reads).toBe(1);
+      // A month on, every one has expired.
+      expect(await resolveAccounts(port, [a.token, b.token], { now: at(31 * 24 * 60) })).toEqual(
+        [],
+      );
+      expect(await resolveAccounts(port, [], { now: at(2) })).toEqual([]);
     });
 
     it("issues a CSRF token bound to the session", async () => {

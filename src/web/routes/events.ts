@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import type { Hono } from "hono";
+import type { Context, Hono } from "hono";
 import { Temporal } from "temporal-polyfill";
 import { ZodError } from "zod";
 import type { StoragePort } from "../../db/port.js";
@@ -57,9 +57,9 @@ import {
   type RRuleSubset,
   upcomingOccurrences,
 } from "../../recurrence.js";
-import { type Html, html, renderPage } from "../layout.js";
+import { type Html, html } from "../layout.js";
 import { pickerAssets } from "../picker.js";
-import { type AppEnv, requireSignedIn, verifyFormCsrf } from "../session.js";
+import { type AppEnv, page, rejectedPage, requireSignedIn, verifyFormCsrf } from "../session.js";
 import { sendResponseLink } from "./respond.js";
 
 // Event pages (MVP-2 slice 2B). Every read goes through findEventForParticipant (no
@@ -80,12 +80,8 @@ export interface EventRouteDeps {
 
 export const BUSY_LABEL = "Busy";
 
-function notFound(): string {
-  return renderPage("Not found", html`<h1>Not found</h1><p><a href="/groups">Your groups</a></p>`);
-}
-
-function rejected(): string {
-  return renderPage("Request rejected", html`<h1>Request rejected</h1><p>Please try again.</p>`);
+function notFound(c: Context<AppEnv>): string {
+  return page(c, "Not found", html`<h1>Not found</h1><p><a href="/groups">Your groups</a></p>`);
 }
 
 /** "2101-10-20 19:00 – 23:00 · Europe/Prague", or a date range for all-day events. */
@@ -803,6 +799,7 @@ function seriesSection(event: CanonicalEvent, now: string): Html | string {
 }
 
 async function eventPage(
+  c: Context<AppEnv>,
   deps: EventRouteDeps,
   access: EventAccess,
   csrf: string,
@@ -823,7 +820,8 @@ async function eventPage(
     }))
     .filter((entry) => entry.fields.length > 0);
 
-  return renderPage(
+  return page(
+    c,
     see("title") ? event.title : BUSY_LABEL,
     html`<p>${event.groupId === null ? html`<a href="/groups">← Your groups</a>` : html`<a href="/groups/${event.groupId}">← Back to the group</a>`}</p>
 <h1>${see("title") ? event.title : BUSY_LABEL}${statusBadge(access)}</h1>
@@ -874,9 +872,10 @@ export function registerEventRoutes(app: Hono<AppEnv>, deps: EventRouteDeps): vo
     const me = requireSignedIn(c);
     if (me instanceof Response) return me;
     const membership = await findGroupForMember(deps.storage, c.req.param("groupId"), me.personId);
-    if (membership === null) return c.html(notFound(), 404);
+    if (membership === null) return c.html(notFound(c), 404);
     return c.html(
-      renderPage(
+      page(
+        c,
         "New event",
         html`<p><a href="/groups/${membership.group.id}">← ${membership.group.name}</a></p>
 <h1>New event for ${membership.group.name}</h1>
@@ -889,9 +888,9 @@ ${eventForm(`/groups/${membership.group.id}/events`, me.csrfToken, EMPTY, await 
     const me = requireSignedIn(c);
     if (me instanceof Response) return me;
     const form = await c.req.parseBody();
-    if (!(await verifyFormCsrf(me, form))) return c.html(rejected(), 403);
+    if (!(await verifyFormCsrf(me, form))) return rejectedPage(c, form);
     const membership = await findGroupForMember(deps.storage, c.req.param("groupId"), me.personId);
-    if (membership === null) return c.html(notFound(), 404);
+    if (membership === null) return c.html(notFound(c), 404);
     const values = readForm(form);
     const requests = readRequests(form);
     try {
@@ -905,7 +904,8 @@ ${eventForm(`/groups/${membership.group.id}/events`, me.csrfToken, EMPTY, await 
       return c.redirect(`${EVENTS_PATH}/${event.id}`, 303);
     } catch (error) {
       return c.html(
-        renderPage(
+        page(
+          c,
           "New event",
           html`<h1>New event for ${membership.group.name}</h1>
 ${eventForm(`/groups/${membership.group.id}/events`, me.csrfToken, values, await requestsFieldset(deps, membership, me.personId, requests), errorMessage(error), "Create event")}`,
@@ -921,8 +921,8 @@ ${eventForm(`/groups/${membership.group.id}/events`, me.csrfToken, values, await
     const access = await findEventForParticipant(deps.storage, c.req.param("id"), me.personId);
     // HIDDEN means "no projection at all" (WORKFLOWS §3): indistinguishable from absent.
     if (access === null || access.participation.visibility === "HIDDEN")
-      return c.html(notFound(), 404);
-    return c.html(await eventPage(deps, access, me.csrfToken));
+      return c.html(notFound(c), 404);
+    return c.html(await eventPage(c, deps, access, me.csrfToken));
   });
 
   app.get(`${EVENTS_PATH}/:id/edit`, async (c) => {
@@ -930,13 +930,14 @@ ${eventForm(`/groups/${membership.group.id}/events`, me.csrfToken, values, await
     if (me instanceof Response) return me;
     const access = await findEventForParticipant(deps.storage, c.req.param("id"), me.personId);
     if (access === null || access.participation.visibility === "HIDDEN")
-      return c.html(notFound(), 404);
+      return c.html(notFound(c), 404);
     const proposing = access.participation.editTier === "propose";
     if (access.participation.editTier === "view")
-      return c.html(renderPage("Not allowed", html`<h1>You can't edit this event</h1>`), 403);
+      return c.html(page(c, "Not allowed", html`<h1>You can't edit this event</h1>`), 403);
     if (proposing && access.event.status !== "scheduled")
       return c.html(
-        renderPage(
+        page(
+          c,
           "Not now",
           html`<h1>Changes can't be proposed right now</h1><p>Only a scheduled event takes proposals. <a href="${EVENTS_PATH}/${access.event.id}">Back to the event</a></p>`,
         ),
@@ -944,7 +945,8 @@ ${eventForm(`/groups/${membership.group.id}/events`, me.csrfToken, values, await
       );
     if (access.event.status === "proposed")
       return c.html(
-        renderPage(
+        page(
+          c,
           "Voting open",
           html`<h1>Voting is still open</h1><p>Its time is chosen by confirming one of the options. <a href="${EVENTS_PATH}/${access.event.id}">Back to the poll</a></p>`,
         ),
@@ -953,7 +955,8 @@ ${eventForm(`/groups/${membership.group.id}/events`, me.csrfToken, values, await
     const { event } = access;
     const vis = access.participation.visibility;
     return c.html(
-      renderPage(
+      page(
+        c,
         canSee(vis, "title") ? `Edit ${event.title}` : "Edit",
         html`<p><a href="${EVENTS_PATH}/${event.id}">← ${canSee(vis, "title") ? event.title : BUSY_LABEL}</a></p>
 ${editHeading(proposing)}
@@ -966,17 +969,18 @@ ${eventForm(`${EVENTS_PATH}/${event.id}`, me.csrfToken, valuesFrom(event), html`
     const me = requireSignedIn(c);
     if (me instanceof Response) return me;
     const form = await c.req.parseBody();
-    if (!(await verifyFormCsrf(me, form))) return c.html(rejected(), 403);
+    if (!(await verifyFormCsrf(me, form))) return rejectedPage(c, form);
     const access = await findEventForParticipant(deps.storage, c.req.param("id"), me.personId);
     if (access === null || access.participation.visibility === "HIDDEN")
-      return c.html(notFound(), 404);
+      return c.html(notFound(c), 404);
 
     const seen = Number.parseInt(str(form, "revision"), 10);
     const values = readForm(form);
     const proposing = access.participation.editTier === "propose";
     const vis = access.participation.visibility;
     const editForm = (error: string, v: FormValues, revision: number) =>
-      renderPage(
+      page(
+        c,
         canSee(vis, "title") ? `Edit ${access.event.title}` : "Edit",
         html`${editHeading(proposing)}
 ${eventForm(`${EVENTS_PATH}/${access.event.id}`, me.csrfToken, v, html`<input type="hidden" name="revision" value="${revision}" />`, error, proposing ? "Send proposal" : "Save", vis)}`,
@@ -1004,10 +1008,10 @@ ${eventForm(`${EVENTS_PATH}/${access.event.id}`, me.csrfToken, v, html`<input ty
       case "proposed":
         return c.redirect(`${EVENTS_PATH}/${access.event.id}`, 303);
       case "forbidden":
-        return c.html(renderPage("Not allowed", html`<h1>You can't edit this event</h1>`), 403);
+        return c.html(page(c, "Not allowed", html`<h1>You can't edit this event</h1>`), 403);
       case "closed":
         return c.html(
-          await eventPage(deps, access, me.csrfToken, "Only a scheduled event takes proposals."),
+          await eventPage(c, deps, access, me.csrfToken, "Only a scheduled event takes proposals."),
           409,
         );
       case "limit":
@@ -1040,9 +1044,10 @@ ${eventForm(`${EVENTS_PATH}/${access.event.id}`, me.csrfToken, v, html`<input ty
     const me = requireSignedIn(c);
     if (me instanceof Response) return me;
     const membership = await findGroupForMember(deps.storage, c.req.param("groupId"), me.personId);
-    if (membership === null) return c.html(notFound(), 404);
+    if (membership === null) return c.html(notFound(c), 404);
     return c.html(
-      renderPage(
+      page(
+        c,
         "Find a time",
         html`<p><a href="/groups/${membership.group.id}">← ${membership.group.name}</a></p>
 <h1>Find a time with ${membership.group.name}</h1>
@@ -1055,9 +1060,9 @@ ${pollForm(`/groups/${membership.group.id}/polls`, me.csrfToken, { ...EMPTY, slo
     const me = requireSignedIn(c);
     if (me instanceof Response) return me;
     const form = await c.req.parseBody();
-    if (!(await verifyFormCsrf(me, form))) return c.html(rejected(), 403);
+    if (!(await verifyFormCsrf(me, form))) return rejectedPage(c, form);
     const membership = await findGroupForMember(deps.storage, c.req.param("groupId"), me.personId);
-    if (membership === null) return c.html(notFound(), 404);
+    if (membership === null) return c.html(notFound(c), 404);
     const values = readPollForm(form);
     try {
       const input = toPollInput(values);
@@ -1071,7 +1076,8 @@ ${pollForm(`/groups/${membership.group.id}/polls`, me.csrfToken, { ...EMPTY, slo
       return c.redirect(`${EVENTS_PATH}/${event.id}`, 303);
     } catch (error) {
       return c.html(
-        renderPage(
+        page(
+          c,
           "Find a time",
           html`<h1>Find a time with ${membership.group.name}</h1>
 ${pollForm(`/groups/${membership.group.id}/polls`, me.csrfToken, values, errorMessage(error))}`,
@@ -1085,10 +1091,10 @@ ${pollForm(`/groups/${membership.group.id}/polls`, me.csrfToken, values, errorMe
     const me = requireSignedIn(c);
     if (me instanceof Response) return me;
     const form = await c.req.parseBody();
-    if (!(await verifyFormCsrf(me, form))) return c.html(rejected(), 403);
+    if (!(await verifyFormCsrf(me, form))) return rejectedPage(c, form);
     const access = await findEventForParticipant(deps.storage, c.req.param("id"), me.personId);
     if (access === null || access.participation.visibility === "HIDDEN")
-      return c.html(notFound(), 404);
+      return c.html(notFound(c), 404);
 
     const answers = new Map<number, Answer>();
     for (const [key, value] of Object.entries(form)) {
@@ -1103,6 +1109,7 @@ ${pollForm(`/groups/${membership.group.id}/polls`, me.csrfToken, values, errorMe
       case "invalid":
         return c.html(
           await eventPage(
+            c,
             deps,
             access,
             me.csrfToken,
@@ -1115,6 +1122,7 @@ ${pollForm(`/groups/${membership.group.id}/polls`, me.csrfToken, values, errorMe
           (await findEventForParticipant(deps.storage, access.event.id, me.personId)) ?? access;
         return c.html(
           await eventPage(
+            c,
             deps,
             fresh,
             me.csrfToken,
@@ -1124,7 +1132,7 @@ ${pollForm(`/groups/${membership.group.id}/polls`, me.csrfToken, values, errorMe
         );
       }
       case "forbidden":
-        return c.html(notFound(), 404);
+        return c.html(notFound(c), 404);
     }
   });
 
@@ -1132,10 +1140,10 @@ ${pollForm(`/groups/${membership.group.id}/polls`, me.csrfToken, values, errorMe
     const me = requireSignedIn(c);
     if (me instanceof Response) return me;
     const form = await c.req.parseBody();
-    if (!(await verifyFormCsrf(me, form))) return c.html(rejected(), 403);
+    if (!(await verifyFormCsrf(me, form))) return rejectedPage(c, form);
     const access = await findEventForParticipant(deps.storage, c.req.param("id"), me.personId);
     if (access === null || access.participation.visibility === "HIDDEN")
-      return c.html(notFound(), 404);
+      return c.html(notFound(c), 404);
     const seen = Number.parseInt(str(form, "revision"), 10);
     const slot = Number.parseInt(str(form, "slot"), 10);
     const result = await confirmCandidate(deps.storage, access, {
@@ -1152,18 +1160,19 @@ ${pollForm(`/groups/${membership.group.id}/polls`, me.csrfToken, values, errorMe
         return c.redirect(`${EVENTS_PATH}/${access.event.id}`, 303);
       case "forbidden":
         return c.html(
-          renderPage("Not allowed", html`<h1>Only the organizers can pick the time</h1>`),
+          page(c, "Not allowed", html`<h1>Only the organizers can pick the time</h1>`),
           403,
         );
       case "invalid":
         return c.html(
-          await eventPage(deps, access, me.csrfToken, "That option doesn't exist."),
+          await eventPage(c, deps, access, me.csrfToken, "That option doesn't exist."),
           400,
         );
       case "closed":
       case "conflict":
         return c.html(
           await eventPage(
+            c,
             deps,
             await fresh(),
             me.csrfToken,
@@ -1178,20 +1187,23 @@ ${pollForm(`/groups/${membership.group.id}/polls`, me.csrfToken, values, errorMe
     const me = requireSignedIn(c);
     if (me instanceof Response) return me;
     const form = await c.req.parseBody();
-    if (!(await verifyFormCsrf(me, form))) return c.html(rejected(), 403);
+    if (!(await verifyFormCsrf(me, form))) return rejectedPage(c, form);
     const access = await findEventForParticipant(deps.storage, c.req.param("id"), me.personId);
     if (access === null || access.participation.visibility === "HIDDEN")
-      return c.html(notFound(), 404);
+      return c.html(notFound(c), 404);
     const attendance = attendanceSchema.safeParse(form.attendance);
     if (!attendance.success)
-      return c.html(await eventPage(deps, access, me.csrfToken, "Pick one of the answers."), 400);
+      return c.html(
+        await eventPage(c, deps, access, me.csrfToken, "Pick one of the answers."),
+        400,
+      );
     const result = await setAttendance(deps.storage, access, {
       attendance: attendance.data,
       now: deps.now(),
     });
     if (result.kind !== "recorded")
       return c.html(
-        await eventPage(deps, access, me.csrfToken, "This event isn't taking answers."),
+        await eventPage(c, deps, access, me.csrfToken, "This event isn't taking answers."),
         409,
       );
     return c.redirect(`${EVENTS_PATH}/${access.event.id}`, 303);
@@ -1201,10 +1213,10 @@ ${pollForm(`/groups/${membership.group.id}/polls`, me.csrfToken, values, errorMe
     const me = requireSignedIn(c);
     if (me instanceof Response) return me;
     const form = await c.req.parseBody();
-    if (!(await verifyFormCsrf(me, form))) return c.html(rejected(), 403);
+    if (!(await verifyFormCsrf(me, form))) return rejectedPage(c, form);
     const access = await findEventForParticipant(deps.storage, c.req.param("id"), me.personId);
     if (access === null || access.participation.visibility === "HIDDEN")
-      return c.html(notFound(), 404);
+      return c.html(notFound(c), 404);
     const result = await addFeedback(deps.storage, access, {
       body: str(form, "note"),
       now: deps.now(),
@@ -1213,11 +1225,11 @@ ${pollForm(`/groups/${membership.group.id}/polls`, me.csrfToken, values, errorMe
       case "recorded":
         return c.redirect(`${EVENTS_PATH}/${access.event.id}`, 303);
       case "invalid":
-        return c.html(await eventPage(deps, access, me.csrfToken, result.reason), 400);
+        return c.html(await eventPage(c, deps, access, me.csrfToken, result.reason), 400);
       case "closed":
       case "forbidden":
         return c.html(
-          await eventPage(deps, access, me.csrfToken, "This event isn't taking notes."),
+          await eventPage(c, deps, access, me.csrfToken, "This event isn't taking notes."),
           409,
         );
     }
@@ -1227,19 +1239,16 @@ ${pollForm(`/groups/${membership.group.id}/polls`, me.csrfToken, values, errorMe
     const me = requireSignedIn(c);
     if (me instanceof Response) return me;
     const form = await c.req.parseBody();
-    if (!(await verifyFormCsrf(me, form))) return c.html(rejected(), 403);
+    if (!(await verifyFormCsrf(me, form))) return rejectedPage(c, form);
     const access = await findEventForParticipant(deps.storage, c.req.param("id"), me.personId);
     if (access === null || access.participation.visibility === "HIDDEN")
-      return c.html(notFound(), 404);
+      return c.html(notFound(c), 404);
     const issued = await issueResponseLinks(deps.storage, access, { now: deps.now() });
     if (issued.kind === "forbidden")
-      return c.html(
-        renderPage("Not allowed", html`<h1>Only the organizers can send these</h1>`),
-        403,
-      );
+      return c.html(page(c, "Not allowed", html`<h1>Only the organizers can send these</h1>`), 403);
     if (issued.kind === "closed")
       return c.html(
-        await eventPage(deps, access, me.csrfToken, "This event has nothing to ask right now."),
+        await eventPage(c, deps, access, me.csrfToken, "This event has nothing to ask right now."),
         409,
       );
 
@@ -1274,7 +1283,7 @@ ${pollForm(`/groups/${membership.group.id}/polls`, me.csrfToken, values, errorMe
       failed > 0 ? `Couldn't send to ${failed} — please try again later.` : "",
     ].filter((p) => p !== "");
     return c.html(
-      await eventPage(deps, access, me.csrfToken, parts.join(" ")),
+      await eventPage(c, deps, access, me.csrfToken, parts.join(" ")),
       failed > 0 ? 503 : 200,
     );
   });
@@ -1292,10 +1301,10 @@ ${pollForm(`/groups/${membership.group.id}/polls`, me.csrfToken, values, errorMe
       const me = requireSignedIn(c);
       if (me instanceof Response) return me;
       const form = await c.req.parseBody();
-      if (!(await verifyFormCsrf(me, form))) return c.html(rejected(), 403);
+      if (!(await verifyFormCsrf(me, form))) return rejectedPage(c, form);
       const access = await findEventForParticipant(deps.storage, c.req.param("id"), me.personId);
       if (access === null || access.participation.visibility === "HIDDEN")
-        return c.html(notFound(), 404);
+        return c.html(notFound(c), 404);
       const result = await act(access, form, deps.now());
       const fresh = async () =>
         (await findEventForParticipant(deps.storage, access.event.id, me.personId)) ?? access;
@@ -1311,15 +1320,16 @@ ${pollForm(`/groups/${membership.group.id}/polls`, me.csrfToken, values, errorMe
               )
             : c.redirect(`${EVENTS_PATH}/${access.event.id}`, 303);
         case "forbidden":
-          return c.html(renderPage("Not allowed", html`<h1>That isn't yours to do</h1>`), 403);
+          return c.html(page(c, "Not allowed", html`<h1>That isn't yours to do</h1>`), 403);
         case "invalid":
           return c.html(
-            await eventPage(deps, await fresh(), me.csrfToken, "There's nothing to do here."),
+            await eventPage(c, deps, await fresh(), me.csrfToken, "There's nothing to do here."),
             400,
           );
         case "closed":
           return c.html(
             await eventPage(
+              c,
               deps,
               await fresh(),
               me.csrfToken,

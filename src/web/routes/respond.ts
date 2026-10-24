@@ -54,8 +54,17 @@ function sensitive(c: Context<AppEnv>): void {
   c.header("Cache-Control", "no-store");
 }
 
+/**
+ * These pages act as the link's person, not as any account signed in on this browser
+ * (§13: the link is the identity, and never touches a session). A "Signed in as"
+ * header here would suggest the answer goes out as that account, so they have none.
+ */
+function linkPage(title: string, body: Html): string {
+  return renderPage(title, body, null);
+}
+
 function deadLink(): string {
-  return renderPage(
+  return linkPage(
     "Link no longer works",
     html`<h1>This link no longer works</h1>
 <p>It may have expired, or a newer one was sent to you. Ask the organizer to send it again.</p>`,
@@ -146,7 +155,7 @@ ${answerSchema.options.map(
 </form>`
     : question;
 
-  return renderPage(
+  return linkPage(
     "Your answer",
     html`${notice}${header(access)}
 ${form}

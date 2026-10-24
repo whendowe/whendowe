@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { Hono } from "hono";
-import { html, renderPage } from "./layout.js";
-import { type AuthDeps, registerAuthRoutes, SIGN_IN_PATH, SIGN_OUT_PATH } from "./routes/auth.js";
+import { html } from "./layout.js";
+import { type AuthDeps, registerAuthRoutes, SIGN_IN_PATH } from "./routes/auth.js";
 import { registerEventRoutes } from "./routes/events.js";
 import { GROUPS_PATH, registerGroupRoutes } from "./routes/groups.js";
 import { CONNECT_PATH, type OAuthRouteDeps, registerOAuthRoutes } from "./routes/oauth.js";
 import { registerRespondRoutes } from "./routes/respond.js";
-import { type AppEnv, sessionMiddleware } from "./session.js";
+import { type AppEnv, page, sessionMiddleware } from "./session.js";
 
 // The Hono app is shared verbatim by both deployments (DESIGN.md §6): workerd mounts
 // it in deploy/cloudflare/worker.ts, Node in deploy/node/server.ts. Pages render
@@ -26,6 +26,7 @@ export function createApp(options: AppOptions = {}): Hono<AppEnv> {
   if (auth === undefined) {
     app.use(async (c, next) => {
       c.set("signedIn", null);
+      c.set("accounts", []);
       await next();
     });
   } else {
@@ -34,18 +35,13 @@ export function createApp(options: AppOptions = {}): Hono<AppEnv> {
 
   app.get("/", (c) => {
     const signedIn = c.get("signedIn");
+    // Who is signed in, and the menu, are in every page's header (layout.ts, rc18).
     const account =
-      signedIn === null
-        ? auth === undefined
+      signedIn !== null
+        ? ""
+        : auth === undefined
           ? html`<p class="muted">Sign-in is not configured on this instance.</p>`
-          : html`<p><a href="${SIGN_IN_PATH}">Sign in</a></p>`
-        : html`<header>
-  <span>Signed in as <strong>${signedIn.email}</strong></span>
-  <form method="post" action="${SIGN_OUT_PATH}">
-    <input type="hidden" name="csrf" value="${signedIn.csrfToken}" />
-    <button type="submit">Sign out</button>
-  </form>
-</header>`;
+          : html`<p><a href="${SIGN_IN_PATH}">Sign in</a></p>`;
     // POST, not a link: starting a flow sets state, and a GET would let any page
     // trigger it with an <img> tag.
     // Connecting a calendar needs a person to own it (MVP-1 E), so the button only
@@ -60,7 +56,8 @@ export function createApp(options: AppOptions = {}): Hono<AppEnv> {
   <button type="submit">Connect Google Calendar</button>
 </form>`;
     return c.html(
-      renderPage(
+      page(
+        c,
         "Home",
         html`${account}
 <h1>WhenDoWe</h1>

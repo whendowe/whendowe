@@ -4,16 +4,25 @@ import { z } from "zod";
 import type { StoragePort } from "../../db/port.js";
 import { MailCapReachedError } from "../../mail/capped.js";
 import type { MailPort } from "../../mail/port.js";
+import { signOutActive, switchTo } from "../../people/accounts.js";
 import {
   consumeLoginToken,
   issueLoginToken,
   LOGIN_TOKEN_TTL_MS,
   peekLoginToken,
 } from "../../people/login.js";
-import { findOrCreatePerson, normalizeEmail } from "../../people/person.js";
-import { createSession, revokeSession } from "../../people/session.js";
-import { html, renderPage } from "../layout.js";
-import { type AppEnv, clearSessionCookie, setSessionCookie, verifyFormCsrf } from "../session.js";
+import { findOrCreatePerson, findPersonByEmail, normalizeEmail } from "../../people/person.js";
+import { revokeSession } from "../../people/session.js";
+import { html, SIGN_OUT_ALL_PATH, SIGN_OUT_PATH, SWITCH_PATH } from "../layout.js";
+import {
+  type AppEnv,
+  page,
+  rejectedPage,
+  roomFor,
+  signInAs,
+  verifyFormCsrf,
+  writeAccountsCookie,
+} from "../session.js";
 
 // Magic-link sign-in (MVP-1 slice C). Sign-up and sign-in are one flow.
 //
@@ -21,7 +30,13 @@ import { type AppEnv, clearSessionCookie, setSessionCookie, verifyFormCsrf } fro
 //   POST /auth/sign-in   issue a link, email it, "check your inbox"
 //   GET  /auth/confirm   "Sign in as ann@…? [Continue]" — reads, never consumes
 //   POST /auth/confirm   consume the link, create the person if new, start a session
-//   POST /auth/sign-out  revoke this session (CSRF-checked)
+//   POST /auth/sign-out      sign out of the active account; the next becomes active
+//   POST /auth/sign-out-all  sign out of every account on this browser
+//   POST /auth/switch        make another of this browser's accounts active
+//
+// A browser holds up to four accounts (DESIGN §13 rc18). Signing in while signed in
+// adds one; switching only reorders the cookie and writes nothing to storage. The
+// three POSTs above are CSRF-checked against the active account.
 //
 // Security notes, each with a test:
 // - The emailed link is built from PUBLIC_BASE_URL, NEVER from the request's Host
@@ -37,7 +52,7 @@ import { type AppEnv, clearSessionCookie, setSessionCookie, verifyFormCsrf } fro
 
 export const SIGN_IN_PATH = "/auth/sign-in";
 export const CONFIRM_PATH = "/auth/confirm";
-export const SIGN_OUT_PATH = "/auth/sign-out";
+export { SIGN_OUT_ALL_PATH, SIGN_OUT_PATH, SWITCH_PATH };
 
 export interface AuthDeps {
   readonly storage: StoragePort;
@@ -58,9 +73,15 @@ function sensitive(c: Context): void {
   c.header("Cache-Control", "no-store");
 }
 
-function signInForm(email: string, error: string | null) {
-  return html`<h1>Sign in</h1>
-<p class="muted">We'll email you a link. No password, and no account to create first.</p>
+/** The form; signed in, it adds another account rather than replacing this one. */
+function signInForm(email: string, error: string | null, signedInAs: string | null) {
+  return html`${
+    signedInAs === null
+      ? html`<h1>Sign in</h1>
+<p class="muted">We'll email you a link. No password, and no account to create first.</p>`
+      : html`<h1>Add another account</h1>
+<p class="muted">You stay signed in as ${signedInAs}. Once you open the link we email, you can switch between the two from the menu at the top.</p>`
+  }
 ${error === null ? "" : html`<p class="error">${error}</p>`}
 <form method="post" action="${SIGN_IN_PATH}">
   <label for="email">Email address</label>
@@ -69,8 +90,21 @@ ${error === null ? "" : html`<p class="error">${error}</p>`}
 </form>`;
 }
 
-function expiredPage() {
-  return renderPage(
+function full(c: Context<AppEnv>) {
+  return c.html(
+    page(
+      c,
+      "Too many accounts",
+      html`<h1>Four accounts are already signed in here</h1>
+<p>That is the most one browser holds. Sign out of one from the menu at the top, then add this one.</p>`,
+    ),
+    409,
+  );
+}
+
+function expiredPage(c: Context<AppEnv>) {
+  return page(
+    c,
     "Link expired",
     html`<h1>This link has expired or was already used</h1>
 <p>Sign-in links work once and last ${LOGIN_TOKEN_TTL_MS / 60_000} minutes.</p>
@@ -80,8 +114,8 @@ function expiredPage() {
 
 export function registerAuthRoutes(app: Hono<AppEnv>, deps: AuthDeps): void {
   app.get(SIGN_IN_PATH, (c) => {
-    if (c.get("signedIn") !== null) return c.redirect("/", 303);
-    return c.html(renderPage("Sign in", signInForm("", null)));
+    if (!roomFor(c, null)) return full(c);
+    return c.html(page(c, "Sign in", signInForm("", null, c.get("signedIn")?.email ?? null)));
   });
 
   app.post(SIGN_IN_PATH, async (c) => {
@@ -93,9 +127,14 @@ export function registerAuthRoutes(app: Hono<AppEnv>, deps: AuthDeps): void {
       email = normalizeEmail(raw);
     } catch {
       return c.html(
-        renderPage(
+        page(
+          c,
           "Sign in",
-          signInForm(raw.slice(0, 200), "That doesn't look like an email address."),
+          signInForm(
+            raw.slice(0, 200),
+            "That doesn't look like an email address.",
+            c.get("signedIn")?.email ?? null,
+          ),
         ),
         400,
       );
@@ -104,7 +143,8 @@ export function registerAuthRoutes(app: Hono<AppEnv>, deps: AuthDeps): void {
     const issued = await issueLoginToken(deps.storage, email, { now: deps.now() });
     if (!issued.ok) {
       return c.html(
-        renderPage(
+        page(
+          c,
           "Too many requests",
           html`<h1>Too many sign-in links</h1>
 <p>Several links were already sent to this address in the last hour. Use the newest one, or try again later.</p>`,
@@ -133,7 +173,8 @@ export function registerAuthRoutes(app: Hono<AppEnv>, deps: AuthDeps): void {
     } catch (error) {
       if (error instanceof MailCapReachedError) {
         return c.html(
-          renderPage(
+          page(
+            c,
             "Can't send email",
             html`<h1>We can't send email right now</h1><p>Please try again later.</p>`,
           ),
@@ -141,7 +182,8 @@ export function registerAuthRoutes(app: Hono<AppEnv>, deps: AuthDeps): void {
         );
       }
       return c.html(
-        renderPage(
+        page(
+          c,
           "Couldn't send",
           html`<h1>We couldn't send your link</h1><p>Please check the address and try again.</p>`,
         ),
@@ -150,7 +192,8 @@ export function registerAuthRoutes(app: Hono<AppEnv>, deps: AuthDeps): void {
     }
 
     return c.html(
-      renderPage(
+      page(
+        c,
         "Check your email",
         html`<h1>Check your email</h1>
 <p>We sent a sign-in link to <strong>${email}</strong>. It works once and expires in ${LOGIN_TOKEN_TTL_MS / 60_000} minutes.</p>`,
@@ -164,9 +207,10 @@ export function registerAuthRoutes(app: Hono<AppEnv>, deps: AuthDeps): void {
     const email = token.success
       ? await peekLoginToken(deps.storage, token.data, { now: deps.now() })
       : null;
-    if (!token.success || email === null) return c.html(expiredPage(), 400);
+    if (!token.success || email === null) return c.html(expiredPage(c), 400);
     return c.html(
-      renderPage(
+      page(
+        c,
         "Sign in",
         html`<h1>Sign in as ${email}?</h1>
 <p class="muted">If that isn't you, close this page — nothing happens unless you continue.</p>
@@ -183,26 +227,61 @@ export function registerAuthRoutes(app: Hono<AppEnv>, deps: AuthDeps): void {
     const form = await c.req.parseBody();
     const token = tokenSchema.safeParse(form.t);
     const now = deps.now();
+    // A full browser refuses before the link is used, so it still works after signing
+    // out of one account.
+    const peeked = token.success ? await peekLoginToken(deps.storage, token.data, { now }) : null;
+    if (peeked !== null) {
+      const known = await findPersonByEmail(deps.storage, peeked);
+      if (!roomFor(c, known?.id ?? null)) return full(c);
+    }
     const email = token.success ? await consumeLoginToken(deps.storage, token.data, { now }) : null;
-    if (email === null) return c.html(expiredPage(), 400);
+    if (email === null) return c.html(expiredPage(c), 400);
 
     const person = await findOrCreatePerson(deps.storage, email, { now });
-    const session = await createSession(deps.storage, person.id, { now });
-    setSessionCookie(c, session.token, deps.secureCookies);
+    if (!(await signInAs(c, deps, person.id))) return full(c);
     return c.redirect("/", 303);
   });
 
   app.post(SIGN_OUT_PATH, async (c) => {
     const signedIn = c.get("signedIn");
     if (signedIn === null) return c.redirect("/", 303);
-    if (!(await verifyFormCsrf(signedIn, await c.req.parseBody()))) {
-      return c.html(
-        renderPage("Request rejected", html`<h1>Request rejected</h1><p>Please try again.</p>`),
-        403,
-      );
-    }
-    await revokeSession(deps.storage, signedIn.sessionToken, deps.now());
-    clearSessionCookie(c, deps.secureCookies);
+    const form = await c.req.parseBody();
+    if (!(await verifyFormCsrf(signedIn, form))) return rejectedPage(c, form);
+    const { accounts, signedOut } = signOutActive(c.get("accounts"));
+    if (signedOut !== null) await revokeSession(deps.storage, signedOut.token, deps.now());
+    writeAccountsCookie(c, accounts, deps.secureCookies);
     return c.redirect("/", 303);
   });
+
+  app.post(SIGN_OUT_ALL_PATH, async (c) => {
+    const signedIn = c.get("signedIn");
+    if (signedIn === null) return c.redirect("/", 303);
+    const form = await c.req.parseBody();
+    if (!(await verifyFormCsrf(signedIn, form))) return rejectedPage(c, form);
+    const now = deps.now();
+    for (const a of c.get("accounts")) await revokeSession(deps.storage, a.token, now);
+    writeAccountsCookie(c, [], deps.secureCookies);
+    return c.redirect("/", 303);
+  });
+
+  // Switching changes nothing on the server: the cookie is reordered, that's all (§6).
+  app.post(SWITCH_PATH, async (c) => {
+    const signedIn = c.get("signedIn");
+    if (signedIn === null) return c.redirect("/", 303);
+    const form = await c.req.parseBody();
+    if (!(await verifyFormCsrf(signedIn, form))) return rejectedPage(c, form);
+    const target = typeof form.session === "string" ? form.session : "";
+    const accounts = switchTo(c.get("accounts"), target);
+    // Gone already (signed out in another tab, or expired): stay as we are.
+    if (accounts !== null) writeAccountsCookie(c, accounts, deps.secureCookies);
+    return c.redirect(backTo(form.back), 303);
+  });
+}
+
+/**
+ * Where a switch returns to: this site's own path, or home. Never another origin —
+ * "//evil.example" and "/\\evil.example" are protocol-relative to a browser.
+ */
+export function backTo(value: unknown): string {
+  return typeof value === "string" && /^\/(?![/\\])[^\s]{0,500}$/.test(value) ? value : "/";
 }
