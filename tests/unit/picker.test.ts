@@ -20,6 +20,15 @@ const pickSchema = z.object({
   length: z.union([z.number(), z.literal("allday"), z.literal("days")]),
 });
 const summarySchema = z.object({ main: z.string(), sub: z.string() });
+const rowSchema = z.object({ start: z.string(), end: z.string() });
+const pollSchema = z.object({
+  kind: z.enum(["times", "days"]),
+  start: z.string(),
+  length: z.number(),
+  times: z.array(z.object({ date: z.string(), own: z.string().nullable() })),
+  days: z.array(z.object({ from: z.string(), to: z.string() })),
+});
+type Poll = z.infer<typeof pollSchema>;
 type Pick = z.infer<typeof pickSchema>;
 const fn = z.custom<(...args: unknown[]) => unknown>((v) => typeof v === "function");
 
@@ -37,6 +46,8 @@ function load() {
       toFields: fn,
       fromFields: fn,
       summary: fn,
+      pollRows: fn,
+      pollFromRows: fn,
     })
     .parse(sandbox.WhenDoWePicker);
   // Results cross from the sandbox's realm; parse them back into this one.
@@ -47,6 +58,9 @@ function load() {
     fromFields: (f: z.infer<typeof fieldsSchema>, today: string) =>
       pickSchema.parse(api.fromFields(f, today)),
     summary: (p: Pick) => summarySchema.parse(api.summary(p)),
+    pollRows: (poll: Poll) => z.array(rowSchema).parse(api.pollRows(poll)),
+    pollFromRows: (allDay: boolean, rows: z.infer<typeof rowSchema>[]) =>
+      pollSchema.parse(api.pollFromRows(allDay, rows)),
   };
 }
 
@@ -171,5 +185,62 @@ describe("summary", () => {
     expect(
       picker.summary({ date: "2026-10-30", to: "2026-11-01", time: "19:00", length: "days" }),
     ).toEqual({ main: "Fri 30 Oct – Sun 1 Nov", sub: "3 days, 2 nights, all day" });
+  });
+});
+
+describe("polls and the numbered rows the server reads", () => {
+  it("times: several on one day, sorted, each from the shared start unless it has its own", () => {
+    const poll: Poll = {
+      kind: "times",
+      start: "18:00",
+      length: 180,
+      times: [
+        { date: "2026-10-31", own: null },
+        { date: "2026-10-30", own: "20:30" },
+        { date: "2026-10-30", own: null },
+      ],
+      days: [],
+    };
+    const rows = picker.pollRows(poll);
+    expect(rows).toEqual([
+      { start: "2026-10-30T18:00", end: "2026-10-30T21:00" },
+      { start: "2026-10-30T20:30", end: "2026-10-30T23:30" },
+      { start: "2026-10-31T18:00", end: "2026-10-31T21:00" },
+    ]);
+    expect(picker.pollRows(picker.pollFromRows(false, rows))).toEqual(rows);
+  });
+
+  it("days: overlapping stretches survive, ordered by first then last day", () => {
+    const poll: Poll = {
+      kind: "days",
+      start: "19:00",
+      length: 180,
+      times: [],
+      days: [
+        { from: "2026-11-07", to: "2026-11-15" }, // the whole camp
+        { from: "2026-11-11", to: "2026-11-15" }, // Wednesday to Sunday
+        { from: "2026-11-07", to: "2026-11-11" }, // Saturday to Wednesday
+      ],
+    };
+    const rows = picker.pollRows(poll);
+    expect(rows).toEqual([
+      { start: "2026-11-07T00:00", end: "2026-11-11T00:00" },
+      { start: "2026-11-07T00:00", end: "2026-11-15T00:00" },
+      { start: "2026-11-11T00:00", end: "2026-11-15T00:00" },
+    ]);
+    const back = picker.pollFromRows(true, [...rows, { start: "", end: "" }]);
+    expect(back.kind).toBe("days");
+    expect(back.days).toHaveLength(3);
+    expect(picker.pollRows(back)).toEqual(rows);
+  });
+
+  it("empty rows are not options", () => {
+    const back = picker.pollFromRows(false, [
+      { start: "", end: "" },
+      { start: "2026-10-30T19:00", end: "2026-10-30T22:00" },
+    ]);
+    expect(back.times).toEqual([{ date: "2026-10-30", own: null }]);
+    expect(back.start).toBe("19:00");
+    expect(back.length).toBe(180);
   });
 });

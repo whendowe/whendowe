@@ -664,14 +664,15 @@ function pollForm(action: string, csrf: string, v: PollFormValues, error: string
     (_, i) => v.slots[i] ?? { start: "", end: "" },
   );
   return html`${error === null ? "" : html`<p class="error">${error}</p>`}
-<form method="post" action="${action}">
+<form method="post" action="${action}" data-picker="poll" data-max="${MAX_CANDIDATES}">
   <input type="hidden" name="csrf" value="${csrf}" />
   <p><label>What<br /><input name="title" required maxlength="200" value="${v.title}" style="width:100%" /></label></p>
   <p><label>Where<br /><input name="location" maxlength="500" value="${v.location}" style="width:100%" /></label></p>
-  <p><label><input type="checkbox" name="allDay" ${v.allDay ? html`checked` : ""} /> All-day options</label></p>
   <p><label>Time zone<br /><input id="tzid" name="tzid" list="zones" value="${v.tzid}" placeholder="Europe/Prague" /></label></p>
   ${zoneOptions()}
   <h2>Options</h2>
+  <div data-picker-plain>
+  <p><label><input type="checkbox" name="allDay" ${v.allDay ? html`checked` : ""} /> All-day options</label></p>
   <p class="muted">Offer at least two. Leave the rows you don't need empty. For all-day options, "ends" is the last day.</p>
   ${slots.map(
     (
@@ -680,13 +681,15 @@ function pollForm(action: string, csrf: string, v: PollFormValues, error: string
     ) => html`<p><label>Starts <input type="datetime-local" name="start_${i}" value="${slot.start}" /></label>
   <label>Ends <input type="datetime-local" name="end_${i}" value="${slot.end}" /></label></p>`,
   )}
+  </div>
   <p><label>Notes <span class="muted">(only people who see full details see these)</span><br /><textarea name="description" rows="3" style="width:100%">${v.description}</textarea></label></p>
   <p><button type="submit">Start the poll</button></p>
 </form>
 <script>
   var tz = document.getElementById("tzid");
   if (tz && !tz.value) tz.value = Intl.DateTimeFormat().resolvedOptions().timeZone;
-</script>`;
+</script>
+${pickerAssets()}`;
 }
 
 /** Poll form → domain input: shared fields once, a time pair per filled row. */

@@ -39,6 +39,30 @@ jobs:
           files: coverage/lcov.info
           token: ${{ env.CODECOV_TOKEN }}
 
+  browser:
+    # The browser tier (DESIGN §9 rc16): the pages' own scripts in Chromium, JS on and
+    # off, and every driven state compared with its committed reference screenshot.
+    # Runs in the pinned Playwright image — the same one scripts/browser.sh uses —
+    # because references are only comparable when fonts come from the same image.
+    # Keep the digest in step with @playwright/test in package.json.
+    runs-on: ubuntu-latest
+    container:
+      image: mcr.microsoft.com/playwright@sha256:47b510dd9230bf0b9bfc9b20102241e577ea7a99334ab4c3ca19f19770e9b8ea # v1.64.1-noble
+      options: --ipc=host
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - run: npm ci
+      - run: npm run test:browser:run
+        env:
+          HOME: /root
+      # On a visual change: expected / actual / diff images for each failing state.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: failure()
+        with:
+          name: browser-diffs
+          path: tests/browser/test-results/
+          retention-days: 14
+
   gitleaks:
     # Secret scanning in CI from day one (DESIGN.md §18).
     #

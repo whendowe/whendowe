@@ -8,6 +8,7 @@ Read order: `DESIGN.md` before any work; `WORKFLOWS.md` before anything M3+; `BU
 ```
 npm ci                      # setup (devcontainer recommended; Hegel requires Linux/macOS)
 npm run check               # THE GATE: biome + tsc --noEmit + vitest (unit/property/contract) + workers-pool tests
+npm run test:browser        # browser tier (DESIGN §9 rc16): page scripts + reference screenshots, in the pinned image
 npm run soak                # long-budget property/simulation run (nightly; not part of the gate)
 npm run dev:cf              # wrangler dev
 npm run dev:node            # node deployment target locally
@@ -17,6 +18,7 @@ npm run migrate:new <name>  # generate a plain-SQL migration via drizzle-kit
 ## Definition of Done — every change
 
 - `npm run check` is green. The full criteria live in DESIGN §9; the hard constraints in DESIGN §16 are binding.
+- The browser tier is green (CI's `browser` job). A change meant to alter how a page looks updates the reference screenshots with `npm run test:browser:update` in the same PR, so review sees the before and after; never update them to silence an unexplained diff.
 - **Never weaken the verifier to make work pass.** Do not loosen a property test, raise a budget/timeout, add `any`/`as`/`@ts-expect-error`, or edit CI to get green. If a test is genuinely wrong, say so explicitly in the PR and change it in a clearly-labeled commit — those paths are CODEOWNERS-protected and will be human-reviewed.
 - When a `soak` run finds a failure, commit the shrunken counterexample as a pinned regression test in the same PR as the fix.
 

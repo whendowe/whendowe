@@ -1,7 +1,7 @@
 {
   "name": "whendowe",
   "version": "0.0.1",
-  "description": "One canonical event, projected into many calendars — with attribution.",
+  "description": "One canonical event, projected into many calendars \u2014 with attribution.",
   "license": "AGPL-3.0-or-later",
   "private": true,
   "type": "module",
@@ -14,6 +14,9 @@
   },
   "scripts": {
     "check": "biome check . && npm run typecheck && vitest run --coverage --project unit --project property --project contract && vitest run --project workers",
+    "test:browser": "sh scripts/browser.sh",
+    "test:browser:update": "sh scripts/browser.sh --update-snapshots",
+    "test:browser:run": "tsx tests/browser/pages.ts && playwright test -c tests/browser/playwright.config.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p deploy/cloudflare/tsconfig.json && tsc --noEmit -p tests/workers/tsconfig.json",
     "soak": "SOAK=1 vitest run --project property",
     "dev:cf": "wrangler dev -c deploy/cloudflare/wrangler.jsonc",
@@ -37,6 +40,7 @@
     "@cloudflare/vitest-pool-workers": "^0.18.0",
     "@cloudflare/workers-types": "^4.20260702.1",
     "@hegeldev/hegel": "~0.3.1",
+    "@playwright/test": "1.64.1",
     "@types/node": "^22.10.0",
     "@vitest/coverage-v8": "^4.1.10",
     "drizzle-kit": "^0.31.10",

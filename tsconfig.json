@@ -10,6 +10,7 @@
     "tests/conftest.ts",
     "tests/unit/**/*.ts",
     "tests/property/**/*.ts",
-    "tests/contract/**/*.ts"
+    "tests/contract/**/*.ts",
+    "tests/browser/**/*.ts"
   ]
 }

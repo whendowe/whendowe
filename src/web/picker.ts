@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { html } from "./layout.js";
 
-// The date/time picker (DESIGN §10 rc15, owner-reviewed mockup 2026-10-24).
+// The date/time picker (DESIGN §10 rc15, owner-reviewed mockup 2026-10-24), for the
+// event form (one day, or one stretch) and the poll form (several, which may overlap).
 //
 // Progressive enhancement, never a replacement: the server renders the plain fields
 // (all day, starts, ends) and reads only those. With JavaScript, this script hides
@@ -39,6 +40,41 @@ const PICKER_STYLE = html`<style>
   .wd-hint { margin: 0; font-size: .9rem; }
   .wd-tz { margin: 0; font-size: .9rem; opacity: .85; }
   .wd-link { background: none; border: 0; padding: 0; color: inherit; text-decoration: underline; cursor: pointer; }
+  .wd-day { position: relative; padding-bottom: 14px; }
+  .wd-asking { outline: 3px solid light-dark(#17201f, #e6eeec); outline-offset: 2px; }
+  .wd-badge { position: absolute; bottom: 2px; left: 50%; transform: translateX(-50%); font-size: .62rem; font-weight: 700; line-height: 1;
+    padding: 2px 4px; border-radius: 999px; background: light-dark(#17201f, #e6eeec); color: light-dark(#fff, #111716); }
+  .wd-bars { position: absolute; left: 0; right: 0; bottom: 3px; display: grid; gap: 2px; }
+  .wd-bar { height: 4px; }
+  .wd-bar.wd-first { margin-left: 4px; border-radius: 3px 0 0 3px; }
+  .wd-bar.wd-last { margin-right: 4px; border-radius: 0 3px 3px 0; }
+  .wd-bar.wd-first.wd-last { border-radius: 3px; }
+  .wd-o0 { background: light-dark(#0e6b66, #4fc0b6); } .wd-o1 { background: light-dark(#b4511f, #f08a52); }
+  .wd-o2 { background: light-dark(#5b4bb3, #a99bf0); } .wd-o3 { background: light-dark(#8a6a00, #e2c050); }
+  .wd-o4 { background: light-dark(#a3336b, #ef7db4); }
+  .wd-legend { display: inline-grid; place-items: center; width: 1.5rem; height: 1.5rem; border-radius: 6px;
+    font-weight: 700; font-size: .85rem; color: light-dark(#fff, #111716); flex: 0 0 auto; }
+  .wd-kind { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 4px; border-radius: 999px;
+    border: 1px solid light-dark(#c9d1cf, #3a4644); }
+  .wd-kind button { border: 0; border-radius: 999px; padding: .4rem; background: transparent; color: inherit; font: inherit; font-size: .9rem; }
+  .wd-kind button[aria-pressed=true] { background: light-dark(#0e6b66, #4fc0b6); color: light-dark(#fff, #062523); font-weight: 700; }
+  .wd-opts { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+  .wd-opts li { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center; gap: 6px 10px; padding: 8px 10px; border-radius: 8px;
+    border: 1px solid light-dark(#c9d1cf, #3a4644); font-variant-numeric: tabular-nums; }
+  .wd-opts .wd-when { min-width: 0; font-weight: 700; }
+  .wd-opts .wd-times { display: block; font-weight: 400; }
+  .wd-opts li.wd-empty { display: block; }
+  .wd-opts small { display: block; font-weight: 400; font-size: .8rem; opacity: .8; }
+  .wd-opts input[type=time] { padding: .3rem .4rem; font: inherit; font-size: .9rem; }
+  .wd-x { background: none; border: 0; padding: 4px 6px; color: inherit; opacity: .7; font: inherit; font-size: 1.1rem; line-height: 1; }
+  .wd-chooser { display: grid; gap: 8px; padding: 10px 12px; border-radius: 8px; border: 2px solid light-dark(#0e6b66, #4fc0b6);
+    background: light-dark(#d9efec, #173936); }
+  .wd-chooser p { margin: 0; font-weight: 700; }
+  .wd-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .wd-chips button { font: inherit; font-size: .85rem; padding: .3rem .75rem; border-radius: 999px;
+    border: 1px solid light-dark(#c9d1cf, #3a4644); background: light-dark(#fff, #1a2221); color: inherit; }
+  .wd-headrow { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .wd-headrow h3 { margin: 0; font-size: 1rem; }
 </style>`;
 
 const PICKER_SCRIPT = html`<script>
@@ -141,9 +177,60 @@ const PICKER_SCRIPT = html`<script>
     return { main: dayLabel(p.date) + " · " + p.time + "–" + fromMin(endAbs) + ends, sub: lengthLabel(p.length) };
   }
 
+  /**
+   * A poll is { kind, start, length, times: [{ date, own }], days: [{ from, to }] }:
+   * kind "times" offers a start on each day (own = that option's own start, or null
+   * for the shared one), kind "days" offers all-day stretches, which may overlap.
+   * pollRows gives the numbered rows the plain form carries, soonest first.
+   */
+  function pollRows(poll) {
+    if (poll.kind === DAYS) {
+      return sortDays(poll.days).map(function (d) {
+        return { start: d.from + "T00:00", end: d.to + "T00:00" };
+      });
+    }
+    return sortTimes(poll).map(function (t) {
+      var f = toFields({ date: t.date, to: t.date, time: t.own === null ? poll.start : t.own, length: poll.length });
+      return { start: f.start, end: f.end };
+    });
+  }
+  /** The rows the server rendered (after a refused submit, say) back into a poll. */
+  function pollFromRows(allDay, rows) {
+    var filled = rows.filter(function (r) { return DATE.test(r.start || ""); });
+    var poll = { kind: allDay ? DAYS : "times", start: "19:00", length: 180, times: [], days: [] };
+    if (allDay) {
+      filled.forEach(function (r) {
+        var from = r.start.slice(0, 10);
+        var to = DATE.test(r.end || "") && r.end.slice(0, 10) > from ? r.end.slice(0, 10) : from;
+        poll.days.push({ from: from, to: to });
+      });
+      return poll;
+    }
+    var picks = filled.map(function (r) { return fromFields({ allDay: false, start: r.start, end: r.end }, ""); });
+    if (picks.length > 0) { poll.start = picks[0].time; poll.length = picks[0].length; }
+    picks.forEach(function (pk) {
+      poll.times.push({ date: pk.date, own: pk.time === poll.start ? null : pk.time });
+    });
+    return poll;
+  }
+  function sortDays(days) {
+    return days.slice().sort(function (a, b) { return a.from === b.from ? (a.to < b.to ? -1 : 1) : (a.from < b.from ? -1 : 1); });
+  }
+  function sortTimes(poll) {
+    return poll.times.slice().sort(function (a, b) {
+      if (a.date !== b.date) return a.date < b.date ? -1 : 1;
+      return toMin(a.own === null ? poll.start : a.own) - toMin(b.own === null ? poll.start : b.own);
+    });
+  }
+  function nightsLabel(from, to) {
+    var n = daysBetween(from, to) + 1;
+    return n === 1 ? "1 day" : n + " days, " + (n - 1) + (n === 2 ? " night" : " nights");
+  }
+
   globalThis.WhenDoWePicker = {
     monthGrid: monthGrid, isoWeek: isoWeek, toFields: toFields, fromFields: fromFields,
     summary: summary, dayLabel: dayLabel, lengthLabel: lengthLabel,
+    pollRows: pollRows, pollFromRows: pollFromRows,
   };
   if (typeof document === "undefined") return;
 
@@ -310,8 +397,258 @@ const PICKER_SCRIPT = html`<script>
     render();
   }
 
+  /** The poll form: several days on the calendar, each an option to vote on. */
+  function enhancePoll(form) {
+    var plain = form.querySelector("[data-picker-plain]");
+    var allDay = form.querySelector("input[name=allDay]");
+    var max = +(form.getAttribute("data-max") || "10");
+    if (!plain || !allDay) return;
+    var rowInputs = [];
+    for (var r = 0; r < max; r++) {
+      var a = form.querySelector("input[name=start_" + r + "]");
+      var b = form.querySelector("input[name=end_" + r + "]");
+      // The server shows a few rows; the picker may fill up to the poll's maximum.
+      if (!a) { a = el("input"); a.type = "datetime-local"; a.name = "start_" + r; plain.append(a); }
+      if (!b) { b = el("input"); b.type = "datetime-local"; b.name = "end_" + r; plain.append(b); }
+      rowInputs.push({ start: a, end: b });
+    }
+    var poll = pollFromRows(allDay.checked, rowInputs.map(function (x) { return { start: x.start.value, end: x.end.value }; }));
+    var other = { times: poll.times, days: poll.days };
+    var pending = null;
+    var asking = null;
+    var full = false;
+    var first = poll.kind === DAYS ? (sortDays(poll.days)[0] || {}).from : (sortTimes(poll)[0] || {}).date;
+    var view = { year: +(first || localToday()).slice(0, 4), month: +(first || localToday()).slice(5, 7) - 1 };
+
+    var ui = el("div", "wd-picker");
+    var kind = el("div", "wd-kind");
+    var kindTimes = el("button", "", "A time on a day");
+    var kindDays = el("button", "", "A stretch of days");
+    kindTimes.type = kindDays.type = "button";
+    kind.append(kindTimes, kindDays);
+    var cal = calendar(view, paint, pick);
+    var hint = el("p", "wd-hint");
+    var chooser = el("div", "wd-chooser");
+    chooser.setAttribute("role", "group");
+    var chooserText = el("p");
+    var chooserActions = el("div", "wd-chips");
+    chooser.append(chooserText, chooserActions);
+    var row = el("div", "wd-row");
+    var timeLabel = el("label", "wd-field", "Starts");
+    var time = el("input");
+    time.type = "time";
+    time.step = "900";
+    time.value = poll.start;
+    timeLabel.append(time);
+    var lenLabel = el("label", "wd-field", "Length");
+    var len = el("select");
+    var lengths = LENGTHS.slice();
+    if (lengths.indexOf(poll.length) === -1) lengths.push(poll.length);
+    lengths.sort(function (x, y) { return x - y; }).forEach(function (m) { len.append(new Option(lengthLabel(m), String(m))); });
+    len.value = String(poll.length);
+    lenLabel.append(len);
+    row.append(timeLabel, lenLabel);
+    var head = el("div", "wd-headrow");
+    var count = el("h3");
+    var again = el("button", "", "Same again, +1 week");
+    again.type = "button";
+    head.append(count, again);
+    var list = el("ul", "wd-opts");
+    ui.append(kind, cal.node, hint, chooser, row, head, list);
+
+    function options() { return poll.kind === DAYS ? sortDays(poll.days) : sortTimes(poll); }
+    function startOf(t) { return t.own === null ? poll.start : t.own; }
+    function endOf(t) { return fromMin(toMin(startOf(t)) + poll.length); }
+    function canAdd() { full = options().length >= max; return !full; }
+
+    function paint(key, btn) {
+      if (poll.kind === DAYS) {
+        var covering = [];
+        options().forEach(function (d, i) { if (d.from <= key && key <= d.to) covering.push({ d: d, i: i }); });
+        if (covering.length > 0) {
+          var bars = el("span", "wd-bars");
+          covering.forEach(function (c) {
+            var bar = el("span", "wd-bar wd-o" + (c.i % 5) + (key === c.d.from ? " wd-first" : "") + (key === c.d.to ? " wd-last" : ""));
+            bars.append(bar);
+          });
+          btn.append(bars);
+          btn.setAttribute("aria-label", dayLabel(key) + ", in option " + covering.map(function (c) { return letter(c.i); }).join(" and "));
+        }
+        if (pending === key) btn.classList.add("wd-pending");
+        btn.setAttribute("aria-pressed", String(pending === key));
+      } else {
+        var n = poll.times.filter(function (t) { return t.date === key; }).length;
+        if (n > 0) btn.classList.add("wd-on");
+        if (n > 1) btn.append(el("span", "wd-badge", "×" + n));
+        if (asking === key) btn.classList.add("wd-asking");
+        btn.setAttribute("aria-pressed", String(n > 0));
+      }
+    }
+    function letter(i) { return "ABCDEFGHIJ".charAt(i); }
+
+    function pick(key) {
+      if (poll.kind === DAYS) {
+        if (pending === null) { if (canAdd()) pending = key; }
+        else {
+          poll.days.push({ from: pending < key ? pending : key, to: pending < key ? key : pending });
+          pending = null;
+        }
+      } else {
+        var onDay = poll.times.filter(function (t) { return t.date === key; });
+        if (onDay.length === 0) { asking = null; if (canAdd()) poll.times.push({ date: key, own: null }); }
+        else if (onDay.length === 1) { asking = null; poll.times = poll.times.filter(function (t) { return t.date !== key; }); }
+        else asking = asking === key ? null : key;
+      }
+      render();
+    }
+
+    function setKind(k) {
+      if (k === poll.kind) return;
+      other[poll.kind === DAYS ? "days" : "times"] = poll.kind === DAYS ? poll.days : poll.times;
+      poll.kind = k;
+      poll.days = other.days;
+      poll.times = other.times;
+      pending = null;
+      asking = null;
+      render();
+    }
+    kindTimes.addEventListener("click", function () { setKind("times"); });
+    kindDays.addEventListener("click", function () { setKind(DAYS); });
+    time.addEventListener("change", function () { if (time.value) { poll.start = time.value; render(); } });
+    len.addEventListener("change", function () { poll.length = +len.value; render(); });
+    again.addEventListener("click", function () {
+      var opts = options();
+      var last = opts[opts.length - 1];
+      if (!last || !canAdd()) { render(); return; }
+      var moved;
+      if (poll.kind === DAYS) {
+        moved = { from: addDays(last.from, 7), to: addDays(last.to, 7) };
+        poll.days.push(moved);
+        moved = moved.from;
+      } else {
+        moved = addDays(last.date, 7);
+        poll.times.push({ date: moved, own: last.own });
+      }
+      view.year = +moved.slice(0, 4);
+      view.month = +moved.slice(5, 7) - 1;
+      render();
+    });
+
+    function renderChooser() {
+      var onDay = asking === null ? [] : options().filter(function (t) { return t.date === asking; });
+      chooser.hidden = poll.kind === DAYS || onDay.length < 2;
+      if (chooser.hidden) { asking = null; return; }
+      var all = options();
+      chooserText.textContent = dayLabel(asking) + " has " + onDay.length + " times. Which do you want to remove?";
+      chooserActions.textContent = "";
+      function chip(label, fn) {
+        var c = el("button", "", label);
+        c.type = "button";
+        c.addEventListener("click", fn);
+        chooserActions.append(c);
+        return c;
+      }
+      onDay.forEach(function (t) {
+        chip(letter(all.indexOf(t)) + " · " + startOf(t) + "–" + endOf(t), function () {
+          poll.times = poll.times.filter(function (x) { return x !== t; });
+          asking = null;
+          render();
+        });
+      });
+      var day = asking;
+      chip("Remove all", function () { poll.times = poll.times.filter(function (x) { return x.date !== day; }); asking = null; render(); });
+      chip("Keep", function () { asking = null; render(); });
+    }
+
+    function renderList() {
+      var opts = options();
+      count.textContent = opts.length === 1 ? "1 option" : opts.length + " options";
+      again.disabled = opts.length === 0;
+      list.textContent = "";
+      if (opts.length === 0) {
+        list.append(el("li", "wd-empty", poll.kind === DAYS ? "No stretches yet. Tap a first day, then a last day." : "No days picked yet. Tap days on the calendar."));
+        return;
+      }
+      opts.forEach(function (o, i) {
+        var li = el("li");
+        var tag = el("span", "wd-legend wd-o" + (i % 5), letter(i));
+        var when = el("div", "wd-when");
+        li.append(tag, when);
+        if (poll.kind === DAYS) {
+          when.textContent = o.from === o.to ? dayLabel(o.from) : dayLabel(o.from) + " – " + dayLabel(o.to);
+          when.append(el("small", "", nightsLabel(o.from, o.to)));
+        } else {
+          when.textContent = dayLabel(o.date);
+          when.append(el("span", "wd-times", startOf(o) + "–" + endOf(o)));
+          var small = el("small", "", o.own === null ? "Shared time · " : "Own time · ");
+          var more = el("button", "wd-link", "another time this day");
+          more.type = "button";
+          more.addEventListener("click", function () {
+            if (!canAdd()) { render(); return; }
+            var starts = poll.times.filter(function (t) { return t.date === o.date; }).map(function (t) { return toMin(startOf(t)); });
+            var s = Math.max.apply(null, starts) + poll.length;
+            if (s + poll.length > 1440) s = Math.max(0, Math.min.apply(null, starts) - poll.length);
+            poll.times.push({ date: o.date, own: fromMin(s) });
+            render();
+          });
+          small.append(more);
+          when.append(small);
+          var t = el("input");
+          t.type = "time";
+          t.step = "900";
+          t.value = startOf(o);
+          t.setAttribute("aria-label", "Start time of option " + letter(i));
+          t.addEventListener("change", function () {
+            if (!t.value) return;
+            o.own = t.value === poll.start ? null : t.value;
+            render();
+          });
+          li.append(t);
+        }
+        var x = el("button", "wd-x", "×");
+        x.type = "button";
+        x.setAttribute("aria-label", "Remove option " + letter(i));
+        x.addEventListener("click", function () {
+          if (poll.kind === DAYS) poll.days = poll.days.filter(function (d) { return d !== o; });
+          else poll.times = poll.times.filter(function (d) { return d !== o; });
+          render();
+        });
+        li.append(x);
+        list.append(li);
+      });
+    }
+
+    function render() {
+      kindTimes.setAttribute("aria-pressed", String(poll.kind !== DAYS));
+      kindDays.setAttribute("aria-pressed", String(poll.kind === DAYS));
+      row.hidden = poll.kind === DAYS;
+      canAdd();
+      hint.textContent = full
+        ? "That is the most options a poll can offer (" + max + "). Remove one to add another."
+        : poll.kind === DAYS
+          ? (pending ? "Starts " + dayLabel(pending) + ". Now tap the last day of this option." : "Tap the first day of an option, then its last day. Options may overlap.")
+          : "Tap the days that could work. Each gets the shared time; tap a day with several times to choose which to remove.";
+      cal.draw();
+      renderChooser();
+      renderList();
+      // Write back: the plain rows are what the server reads.
+      var rows = pollRows(poll);
+      allDay.checked = poll.kind === DAYS;
+      rowInputs.forEach(function (x, i) {
+        x.start.value = rows[i] ? rows[i].start : "";
+        x.end.value = rows[i] ? rows[i].end : "";
+      });
+    }
+
+    plain.hidden = true;
+    plain.parentNode.insertBefore(ui, plain);
+    render();
+  }
+
   var forms = document.querySelectorAll("form[data-picker=event]");
   for (var i = 0; i < forms.length; i++) enhanceEvent(forms[i]);
+  var polls = document.querySelectorAll("form[data-picker=poll]");
+  for (var j = 0; j < polls.length; j++) enhancePoll(polls[j]);
 })();
 </script>`;
 

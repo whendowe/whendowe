@@ -9,3 +9,6 @@ data/
 .wrangler/
 .dev.vars
 coverage/
+# Browser tier (DESIGN §9): rendered pages and run output; the references are committed.
+tests/browser/.pages/
+tests/browser/test-results/
