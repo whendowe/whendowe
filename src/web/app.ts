@@ -2,7 +2,7 @@
 import { Hono } from "hono";
 import { html } from "./layout.js";
 import { type AuthDeps, registerAuthRoutes, SIGN_IN_PATH } from "./routes/auth.js";
-import { registerEventRoutes, yourEvents } from "./routes/events.js";
+import { EVENTS_PATH, POLLS_PATH, registerEventRoutes, yourEvents } from "./routes/events.js";
 import { GROUPS_PATH, registerGroupRoutes } from "./routes/groups.js";
 import { CONNECT_PATH, type OAuthRouteDeps, registerOAuthRoutes } from "./routes/oauth.js";
 import { registerRespondRoutes } from "./routes/respond.js";
@@ -66,7 +66,8 @@ export function createApp(options: AppOptions = {}): Hono<AppEnv> {
 <p class="muted">Milestone: MVP-1 — People</p>
 ${connect}`
           : html`${await yourEvents(auth.storage, signedIn.personId, auth.now())}
-<p><a href="${GROUPS_PATH}">Your groups</a> <span class="muted">· to plan something with one</span></p>
+<p><a href="${EVENTS_PATH}/new">+ New event</a> · <a href="${POLLS_PATH}/new">+ Find a time (poll)</a></p>
+<p><a href="${GROUPS_PATH}">Your groups</a></p>
 ${connect}`,
       ),
     );

@@ -382,3 +382,34 @@ export async function listParticipantChanges(
     };
   });
 }
+
+/** People named on one new event, at most — the same bound as a day's adds to one. */
+export const MAX_INVITEES = ADDS_PER_EVENT_PER_DAY;
+
+/**
+ * The people for addresses typed into a new event's form, each on its own terms; an
+ * address with no person yet gets one (§2). Call only once the rest of the form is
+ * valid, so a refused form creates no one. Repeats keep their last terms.
+ */
+export async function resolveInvitees(
+  storage: StoragePort,
+  rows: readonly {
+    readonly email: string;
+    readonly editTier: EditTier;
+    readonly visibility: Visibility;
+  }[],
+  options: { readonly now: string },
+): Promise<(GroupDefault & { readonly email: string })[]> {
+  if (rows.length > MAX_INVITEES) throw new Error(`At most ${MAX_INVITEES} people at once.`);
+  const byPerson = new Map<string, GroupDefault & { readonly email: string }>();
+  for (const row of rows) {
+    const person = await findOrCreatePerson(storage, row.email, options);
+    byPerson.set(person.id, {
+      personId: person.id,
+      email: person.email,
+      editTier: row.editTier,
+      visibility: row.visibility,
+    });
+  }
+  return [...byPerson.values()];
+}

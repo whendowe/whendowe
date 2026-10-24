@@ -7,6 +7,7 @@ import { uuidv7 } from "../ids.js";
 import type { GroupMembership } from "../people/group.js";
 import { expandOccurrences, formatRRule, parseRRule } from "../recurrence.js";
 import {
+  type GroupDefault,
   groupDefaults,
   PARTICIPATION_COLUMNS,
   type Participation,
@@ -202,8 +203,27 @@ function logRow(
 }
 
 /**
+ * Who takes part besides the creator: a group's members at their defaults — a COPY,
+ * never a live link — and the people named directly, whose terms win. Once each.
+ */
+async function takingPart(
+  storage: StoragePort,
+  input: {
+    readonly creatorId: string;
+    readonly group: GroupMembership | null;
+    readonly people?: readonly GroupDefault[];
+  },
+): Promise<GroupDefault[]> {
+  const fromGroup = input.group === null ? [] : await groupDefaults(storage, input.group);
+  const byPerson = new Map<string, GroupDefault>();
+  for (const m of [...fromGroup, ...(input.people ?? [])]) byPerson.set(m.personId, m);
+  byPerson.delete(input.creatorId);
+  return [...byPerson.values()];
+}
+
+/**
  * Create an event, optionally for a group. The creator takes part with `edit` +
- * `FULL`; every other group member with their group defaults. One batch: an event
+ * `FULL`; everyone else on the terms takingPart gives them. One batch: an event
  * nobody can see, or one with no history row, must never exist even briefly.
  */
 export async function createEvent(
@@ -217,13 +237,14 @@ export async function createEvent(
     /**
      * Who must agree ("accept") or should acknowledge ("ack") — DESIGN §10 rc13. Anyone
      * asked to agree makes the event a `proposed` one until the last of them accepts.
-     * Ids that aren't fellow group members (or are the creator) are ignored.
+     * Ids that aren't taking part (or are the creator) are ignored.
      */
     readonly requests?: ReadonlyMap<string, "accept" | "ack">;
+    /** People named directly, by email (DESIGN rc15); see createEventWith. */
+    readonly people?: readonly GroupDefault[];
   },
 ): Promise<CanonicalEvent> {
-  const members =
-    input.group === null ? [] : (await groupDefaults(storage, input.group)).map((m) => m.personId);
+  const members = (await takingPart(storage, input)).map((m) => m.personId);
   const requests = new Map(
     [...(input.requests ?? new Map<string, "accept" | "ack">())].filter(
       ([id]) => id !== input.creatorId && members.includes(id),
@@ -251,6 +272,11 @@ export async function createEventWith(
     readonly status: EventStatus;
     readonly responseKind: "none" | "slot_vote";
     readonly requests?: ReadonlyMap<string, "accept" | "ack">;
+    /**
+     * People named directly, at their own tiers (DESIGN rc15). With a group, they join its
+     * members, and where someone is both, the terms named here win.
+     */
+    readonly people?: readonly GroupDefault[];
     readonly now: string;
     readonly newId?: () => string;
   },
@@ -259,10 +285,7 @@ export async function createEventWith(
   const fields = eventFieldsSchema.parse(input.fields);
   const id = (input.newId ?? (() => uuidv7()))();
   const status = input.status;
-  const others =
-    input.group === null
-      ? []
-      : (await groupDefaults(storage, input.group)).filter((m) => m.personId !== input.creatorId);
+  const others = await takingPart(storage, input);
 
   await storage.batch([
     {

@@ -9,6 +9,7 @@ import {
   type EventAccess,
   type EventFieldsInput,
   editEvent,
+  eventFieldsSchema,
   findEventForParticipant,
   type HistoryEntry,
   listEventsFor,
@@ -25,6 +26,7 @@ import {
   listParticipants,
   type ParticipantView,
   removeParticipant,
+  resolveInvitees,
   TAKES_PEOPLE,
 } from "../../events/participation.js";
 import {
@@ -36,6 +38,7 @@ import {
   PollInputError,
   type PollResults,
   pollResults,
+  validateCandidates,
   vote,
 } from "../../events/poll.js";
 import {
@@ -62,7 +65,12 @@ import {
 import { MailCapReachedError } from "../../mail/capped.js";
 import type { MailPort } from "../../mail/port.js";
 import { findGroupForMember, type GroupMembership, listMembers } from "../../people/group.js";
-import { editTierSchema, visibilitySchema } from "../../people/invite.js";
+import {
+  type EditTier,
+  editTierSchema,
+  type Visibility,
+  visibilitySchema,
+} from "../../people/invite.js";
 import { normalizeEmail } from "../../people/person.js";
 import {
   formatRRule,
@@ -99,6 +107,8 @@ export interface EventRouteDeps {
 }
 
 export const BUSY_LABEL = "Busy";
+/** A poll's own path, for one made with people by email alone (DESIGN rc15). */
+export const POLLS_PATH = "/polls";
 
 /** A group page's answer when the active account isn't in the group (§13 rc18). */
 const groupNotVisible = (c: Context<AppEnv>, deps: EventRouteDeps, groupId: string) =>
@@ -437,6 +447,8 @@ function eventForm(
   error: string | null,
   submit: string,
   vis: Vis = "FULL",
+  /** Who it's for: after the what and when, before the button (a new event only). */
+  people: Html | string = "",
 ): Html {
   return html`${error === null ? "" : html`<p class="error">${error}</p>`}
 <form method="post" action="${action}" data-picker="event">
@@ -453,6 +465,7 @@ function eventForm(
   ${zoneOptions()}
   ${repeatInputs(v)}
   ${canSee(vis, "description") ? html`<p><label>Notes <span class="muted">(only people who see full details see these)</span><br /><textarea name="description" rows="4" style="width:100%">${v.description}</textarea></label></p>` : ""}
+  ${people}
   <p><button type="submit">${submit}</button></p>
 </form>
 <script>
@@ -500,6 +513,85 @@ function readRequests(form: Record<string, unknown>): Map<string, Request> {
   }
   return requests;
 }
+
+// --- People named on a new event, by email (DESIGN rc15) -------------------------------
+
+/** Rows on a new event's form: enough for a small group, and the most one form takes. */
+const PEOPLE_ROWS = 20;
+
+interface PersonRow {
+  /** As typed (trimmed), so a refused form shows it back; normalized on use. */
+  readonly email: string;
+  readonly editTier: EditTier;
+  readonly visibility: Visibility;
+  readonly ask: Request | "";
+}
+
+const shownVisibility = visibilitySchema.exclude(["HIDDEN"]);
+
+/** The filled-in rows, and any that aren't an email address. Unknown tiers fall back to the defaults. */
+function readPeople(form: Record<string, unknown>): { rows: PersonRow[]; bad: string[] } {
+  const rows: PersonRow[] = [];
+  const bad: string[] = [];
+  for (let i = 0; i < PEOPLE_ROWS; i++) {
+    const email = str(form, `email_${i}`).trim();
+    if (email === "") continue;
+    try {
+      normalizeEmail(email);
+    } catch {
+      bad.push(email);
+    }
+    const tier = editTierSchema.safeParse(form[`tier_${i}`]);
+    const vis = shownVisibility.safeParse(form[`vis_${i}`]);
+    const ask = form[`ask_${i}`];
+    rows.push({
+      email,
+      editTier: tier.success ? tier.data : "view",
+      visibility: vis.success ? vis.data : "FULL",
+      ask: ask === "accept" || ask === "ack" ? ask : "",
+    });
+  }
+  return { rows, bad };
+}
+
+function badPeople(bad: readonly string[]): string {
+  return `Not an email address: ${bad.join(", ")}`;
+}
+
+/**
+ * Who it's for, by email: each with what they may change, what they see and — on an
+ * event, not a poll — what they're asked. Plain fields, so it works without JavaScript.
+ */
+function peopleFieldset(rows: readonly PersonRow[], asking: boolean, lead: string): Html {
+  const shown = Math.min(PEOPLE_ROWS, Math.max(3, rows.length + 2));
+  const option = (value: string, label: string, chosen: string) =>
+    html`<option value="${value}" ${value === chosen ? html`selected` : ""}>${label}</option>`;
+  return html`<fieldset style="margin-bottom:1em"><legend>People</legend>
+<p class="muted">${lead}</p>
+${Array.from({ length: shown }, (_, i) => {
+  const r = rows[i] ?? { email: "", editTier: "view", visibility: "FULL", ask: "" };
+  return html`<p><input name="email_${i}" type="email" value="${r.email}" placeholder="their email" aria-label="Email ${i + 1}" style="width:100%" />
+  <select name="tier_${i}" aria-label="Can change it (${i + 1})">${option("view", "can't change it", r.editTier)}${option("propose", "can propose changes", r.editTier)}${option("edit", "can edit it", r.editTier)}</select>
+  <select name="vis_${i}" aria-label="Sees (${i + 1})">${option("FULL", "sees everything", r.visibility)}${option("DETAILS", "sees title, time and place", r.visibility)}${option("BUSY", "sees only that the time is taken", r.visibility)}</select>
+  ${asking ? html`<select name="ask_${i}" aria-label="Ask (${i + 1})">${option("", "asked nothing", r.ask)}${REQUESTS.map((q) => option(q, REQUEST_LABEL[q], r.ask))}</select>` : ""}</p>`;
+})}
+</fieldset>`;
+}
+
+/** The rows' people, created if new, and what each was asked. Call once the form is otherwise valid. */
+async function invitees(deps: EventRouteDeps, rows: readonly PersonRow[]) {
+  const people = await resolveInvitees(deps.storage, rows, { now: deps.now() });
+  const asked = new Map<string, Request>();
+  for (const row of rows) {
+    const person = people.find((p) => p.email === normalizeEmail(row.email));
+    if (person !== undefined && row.ask !== "") asked.set(person.personId, row.ask);
+  }
+  return { people, asked };
+}
+
+const LEAD_ALONE = "Who is it for? They can answer from an emailed link, with no account.";
+const leadFor = (m: GroupMembership) =>
+  `Everyone in ${m.group.name} takes part, on their usual terms. Add anyone else here.`;
 
 const EMPTY: FormValues = {
   title: "",
@@ -729,7 +821,13 @@ function readPollForm(form: Record<string, unknown>): PollFormValues {
   return { ...readForm(form), slots };
 }
 
-function pollForm(action: string, csrf: string, v: PollFormValues, error: string | null): Html {
+function pollForm(
+  action: string,
+  csrf: string,
+  v: PollFormValues,
+  error: string | null,
+  people: Html | string = "",
+): Html {
   const shown = Math.max(POLL_ROWS, v.slots.filter((s) => s.start !== "" || s.end !== "").length);
   const slots = Array.from(
     { length: Math.min(shown, MAX_CANDIDATES) },
@@ -755,6 +853,7 @@ function pollForm(action: string, csrf: string, v: PollFormValues, error: string
   )}
   </div>
   <p><label>Notes <span class="muted">(only people who see full details see these)</span><br /><textarea name="description" rows="3" style="width:100%">${v.description}</textarea></label></p>
+  ${people}
   <p><button type="submit">Start the poll</button></p>
 </form>
 <script>
@@ -1006,52 +1105,82 @@ ${await responsesSection(deps, access, csrf)}
 }
 
 export function registerEventRoutes(app: Hono<AppEnv>, deps: EventRouteDeps): void {
+  /** The new-event page, for a group (its members included) or for people by email alone. */
+  const newEventPage = async (
+    c: Context<AppEnv>,
+    csrf: string,
+    meId: string,
+    membership: GroupMembership | null,
+    form: { values: FormValues; rows: readonly PersonRow[]; asks: ReadonlyMap<string, Request> },
+    error: string | null,
+  ) =>
+    page(
+      c,
+      "New event",
+      membership === null
+        ? html`<p><a href="/">← Your events</a></p>
+<h1>New event</h1>
+${eventForm(EVENTS_PATH, csrf, form.values, "", error, "Create event", "FULL", peopleFieldset(form.rows, true, LEAD_ALONE))}`
+        : html`<p><a href="/groups/${membership.group.id}">← ${membership.group.name}</a></p>
+<h1>New event for ${membership.group.name}</h1>
+${eventForm(`/groups/${membership.group.id}/events`, csrf, form.values, "", error, "Create event", "FULL", html`${await requestsFieldset(deps, membership, meId, form.asks)}${peopleFieldset(form.rows, true, leadFor(membership))}`)}`,
+    );
+
+  const createEventFrom = async (c: Context<AppEnv>, groupId: string | null) => {
+    const me = requireSignedIn(c);
+    if (me instanceof Response) return me;
+    const form = await c.req.parseBody();
+    if (!(await verifyFormCsrf(me, form))) return rejectedPage(c, form);
+    const membership =
+      groupId === null ? null : await findGroupForMember(deps.storage, groupId, me.personId);
+    if (groupId !== null && membership === null) return c.html(notFound(c), 404);
+    const values = readForm(form);
+    const asks = readRequests(form);
+    const { rows, bad } = readPeople(form);
+    const again = async (error: string) =>
+      c.html(
+        await newEventPage(c, me.csrfToken, me.personId, membership, { values, rows, asks }, error),
+        400,
+      );
+    if (bad.length > 0) return again(badPeople(bad));
+    try {
+      const fields = toFields(values);
+      // Fully valid BEFORE anyone is created for an address: a refused form creates no one.
+      eventFieldsSchema.parse(fields);
+      const { people, asked } = await invitees(deps, rows);
+      const event = await createEvent(deps.storage, {
+        creatorId: me.personId,
+        group: membership,
+        fields,
+        now: deps.now(),
+        requests: new Map([...asks, ...asked]),
+        people,
+      });
+      return c.redirect(`${EVENTS_PATH}/${event.id}`, 303);
+    } catch (error) {
+      return again(errorMessage(error));
+    }
+  };
+
+  const NOTHING = { values: EMPTY, rows: [], asks: new Map<string, Request>() };
+
+  app.get(`${EVENTS_PATH}/new`, async (c) => {
+    const me = requireSignedIn(c);
+    if (me instanceof Response) return me;
+    return c.html(await newEventPage(c, me.csrfToken, me.personId, null, NOTHING, null));
+  });
+
+  app.post(EVENTS_PATH, (c) => createEventFrom(c, null));
+
   app.get("/groups/:groupId/events/new", async (c) => {
     const me = requireSignedIn(c);
     if (me instanceof Response) return me;
     const membership = await findGroupForMember(deps.storage, c.req.param("groupId"), me.personId);
     if (membership === null) return groupNotVisible(c, deps, c.req.param("groupId"));
-    return c.html(
-      page(
-        c,
-        "New event",
-        html`<p><a href="/groups/${membership.group.id}">← ${membership.group.name}</a></p>
-<h1>New event for ${membership.group.name}</h1>
-${eventForm(`/groups/${membership.group.id}/events`, me.csrfToken, EMPTY, await requestsFieldset(deps, membership, me.personId, new Map()), null, "Create event")}`,
-      ),
-    );
+    return c.html(await newEventPage(c, me.csrfToken, me.personId, membership, NOTHING, null));
   });
 
-  app.post("/groups/:groupId/events", async (c) => {
-    const me = requireSignedIn(c);
-    if (me instanceof Response) return me;
-    const form = await c.req.parseBody();
-    if (!(await verifyFormCsrf(me, form))) return rejectedPage(c, form);
-    const membership = await findGroupForMember(deps.storage, c.req.param("groupId"), me.personId);
-    if (membership === null) return c.html(notFound(c), 404);
-    const values = readForm(form);
-    const requests = readRequests(form);
-    try {
-      const event = await createEvent(deps.storage, {
-        creatorId: me.personId,
-        group: membership,
-        fields: toFields(values),
-        now: deps.now(),
-        requests,
-      });
-      return c.redirect(`${EVENTS_PATH}/${event.id}`, 303);
-    } catch (error) {
-      return c.html(
-        page(
-          c,
-          "New event",
-          html`<h1>New event for ${membership.group.name}</h1>
-${eventForm(`/groups/${membership.group.id}/events`, me.csrfToken, values, await requestsFieldset(deps, membership, me.personId, requests), errorMessage(error), "Create event")}`,
-        ),
-        400,
-      );
-    }
-  });
+  app.post("/groups/:groupId/events", (c) => createEventFrom(c, c.req.param("groupId")));
 
   app.get(`${EVENTS_PATH}/:id`, async (c) => {
     const me = requireSignedIn(c);
@@ -1178,52 +1307,77 @@ ${eventForm(`${EVENTS_PATH}/${access.event.id}`, me.csrfToken, v, html`<input ty
     }
   });
 
-  app.get("/groups/:groupId/polls/new", async (c) => {
-    const me = requireSignedIn(c);
-    if (me instanceof Response) return me;
-    const membership = await findGroupForMember(deps.storage, c.req.param("groupId"), me.personId);
-    if (membership === null) return groupNotVisible(c, deps, c.req.param("groupId"));
-    return c.html(
-      page(
-        c,
-        "Find a time",
-        html`<p><a href="/groups/${membership.group.id}">← ${membership.group.name}</a></p>
+  /** The new-poll page, for a group (its members included) or for people by email alone. */
+  const newPollPage = (
+    c: Context<AppEnv>,
+    csrf: string,
+    membership: GroupMembership | null,
+    values: PollFormValues,
+    rows: readonly PersonRow[],
+    error: string | null,
+  ) =>
+    page(
+      c,
+      "Find a time",
+      membership === null
+        ? html`<p><a href="/">← Your events</a></p>
+<h1>Find a time</h1>
+${pollForm(POLLS_PATH, csrf, values, error, peopleFieldset(rows, false, LEAD_ALONE))}`
+        : html`<p><a href="/groups/${membership.group.id}">← ${membership.group.name}</a></p>
 <h1>Find a time with ${membership.group.name}</h1>
-${pollForm(`/groups/${membership.group.id}/polls`, me.csrfToken, { ...EMPTY, slots: [] }, null)}`,
-      ),
+${pollForm(`/groups/${membership.group.id}/polls`, csrf, values, error, peopleFieldset(rows, false, leadFor(membership)))}`,
     );
-  });
 
-  app.post("/groups/:groupId/polls", async (c) => {
+  const createPollFrom = async (c: Context<AppEnv>, groupId: string | null) => {
     const me = requireSignedIn(c);
     if (me instanceof Response) return me;
     const form = await c.req.parseBody();
     if (!(await verifyFormCsrf(me, form))) return rejectedPage(c, form);
-    const membership = await findGroupForMember(deps.storage, c.req.param("groupId"), me.personId);
-    if (membership === null) return c.html(notFound(c), 404);
+    const membership =
+      groupId === null ? null : await findGroupForMember(deps.storage, groupId, me.personId);
+    if (groupId !== null && membership === null) return c.html(notFound(c), 404);
     const values = readPollForm(form);
+    const { rows, bad } = readPeople(form);
+    const again = (error: string) =>
+      c.html(newPollPage(c, me.csrfToken, membership, values, rows, error), 400);
+    if (bad.length > 0) return again(badPeople(bad));
     try {
       const input = toPollInput(values);
+      validateCandidates(input.fields, input.candidates); // as above: valid before anyone is created
+      const { people } = await invitees(deps, rows);
       const event = await createPoll(deps.storage, {
         creatorId: me.personId,
         group: membership,
         fields: input.fields,
         candidates: input.candidates,
+        people,
         now: deps.now(),
       });
       return c.redirect(`${EVENTS_PATH}/${event.id}`, 303);
     } catch (error) {
-      return c.html(
-        page(
-          c,
-          "Find a time",
-          html`<h1>Find a time with ${membership.group.name}</h1>
-${pollForm(`/groups/${membership.group.id}/polls`, me.csrfToken, values, errorMessage(error))}`,
-        ),
-        400,
-      );
+      return again(errorMessage(error));
     }
+  };
+
+  const NO_POLL: PollFormValues = { ...EMPTY, slots: [] };
+
+  app.get(`${POLLS_PATH}/new`, (c) => {
+    const me = requireSignedIn(c);
+    if (me instanceof Response) return me;
+    return c.html(newPollPage(c, me.csrfToken, null, NO_POLL, [], null));
   });
+
+  app.post(POLLS_PATH, (c) => createPollFrom(c, null));
+
+  app.get("/groups/:groupId/polls/new", async (c) => {
+    const me = requireSignedIn(c);
+    if (me instanceof Response) return me;
+    const membership = await findGroupForMember(deps.storage, c.req.param("groupId"), me.personId);
+    if (membership === null) return groupNotVisible(c, deps, c.req.param("groupId"));
+    return c.html(newPollPage(c, me.csrfToken, membership, NO_POLL, [], null));
+  });
+
+  app.post("/groups/:groupId/polls", (c) => createPollFrom(c, c.req.param("groupId")));
 
   app.post(`${EVENTS_PATH}/:id/votes`, async (c) => {
     const me = requireSignedIn(c);

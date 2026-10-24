@@ -15,6 +15,7 @@ import {
   listParticipantChanges,
   listParticipants,
   removeParticipant,
+  resolveInvitees,
 } from "../../src/events/participation.js";
 import { createPoll, pollResults, vote } from "../../src/events/poll.js";
 import { issueResponseLinks } from "../../src/events/response.js";
@@ -118,6 +119,37 @@ export function runParticipantsContract(makePort: () => Promise<StoragePort>): v
         params: [d.eventId, guest],
       });
       expect(await listEventsFor(port, guest)).toEqual([]);
+    });
+
+    it("a new event names people directly; the creator stays an editor whatever a row says", async () => {
+      const port = await makePort();
+      const mara = await findOrCreatePerson(port, "pp-mara-named@example.org", { now: T0 });
+      const people = await resolveInvitees(
+        port,
+        [
+          { email: "pp-bob-named@example.org", editTier: "edit", visibility: "FULL" },
+          { email: "pp-cat-named@example.org", editTier: "view", visibility: "BUSY" },
+          { email: "pp-cat-named@example.org", editTier: "view", visibility: "DETAILS" },
+          { email: mara.email, editTier: "view", visibility: "BUSY" },
+        ],
+        { now: T0 },
+      );
+      expect(people).toHaveLength(3); // Cat once, on her last terms
+      const event = await createEvent(port, {
+        creatorId: mara.id,
+        group: null,
+        fields: DINNER,
+        now: T0,
+        people,
+      });
+      const terms = (await listParticipants(port, event.id)).map(
+        (p) => `${p.email} ${p.editTier} ${p.visibility}`,
+      );
+      expect(terms.sort()).toEqual([
+        "pp-bob-named@example.org edit FULL",
+        "pp-cat-named@example.org view DETAILS",
+        "pp-mara-named@example.org edit FULL",
+      ]);
     });
 
     it("only the edit tier adds and removes", async () => {

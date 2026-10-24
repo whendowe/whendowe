@@ -11,6 +11,7 @@ import {
   eventFieldsSchema,
   flatten,
 } from "./event.js";
+import type { GroupDefault } from "./participation.js";
 
 // Time polls (MVP-2 slice 2C, WORKFLOWS US-13): "when do we play?". A poll is an
 // event in status `proposed` carrying 2..MAX candidate times; every participant who
@@ -83,6 +84,8 @@ export async function createPoll(
     readonly group: GroupMembership | null;
     readonly fields: Omit<EventFieldsInput, "startLocal" | "endLocal">;
     readonly candidates: readonly CandidateTimeInput[];
+    /** People named directly, at their own tiers (DESIGN rc15). */
+    readonly people?: readonly GroupDefault[];
     readonly now: string;
   },
 ): Promise<CanonicalEvent> {
@@ -94,6 +97,7 @@ export async function createPoll(
     {
       creatorId: input.creatorId,
       group: input.group,
+      ...(input.people === undefined ? {} : { people: input.people }),
       fields: { ...input.fields, startLocal: first.startLocal, endLocal: first.endLocal },
       status: "proposed",
       responseKind: "slot_vote",
