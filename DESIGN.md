@@ -201,6 +201,7 @@ whendowe/
       app.ts                   # Hono app (shared by both deployments)
       escape.ts                # HTML escaping — provider/event text is untrusted input (§13)
       layout.ts                # the shared page shell every route renders into (escapes its inputs)
+      picker.ts                # the date/time picker: a script over the plain form fields (rc15)
       session.ts               # session middleware: cookie -> person on the request context; CSRF check
       routes/                  # OAuth, events UI (HTMX)
         oauth.ts               # POST connect (GET never mutates) + GET callback: state, PKCE, store
@@ -527,6 +528,12 @@ CREATE TABLE event_participant_change (     -- MVP-2 slice 2F
   share with you, not "the group's events".
 - `canonical_event.group_id` stays (no table rebuild, §16) as provenance — "created from this
   group" — and drives no access decision.
+- **Picking a time (owner-reviewed mockup, 2026-10-24).** Both the event form and the poll form
+  pick days on one Monday-first month calendar, always drawn in whole weeks (the neighbouring
+  months' days at the edges, still pickable), then a start time and a length; an all-day stretch
+  is a first and a last tap. A poll's options are all of one kind — times on days, or stretches of
+  days — and may overlap. **Every form works without JavaScript:** the picker is drawn over the
+  plain date fields and writes into them, so the server reads one shape either way.
 - **Mail.** Each added person is one capped send (§13). The participation is written first and is
   the truth; if the send fails — a reached cap, or a pre-Paid instance's recipient allowlist — the
   person adding sees which addresses were not mailed, and can resend from the event page.
