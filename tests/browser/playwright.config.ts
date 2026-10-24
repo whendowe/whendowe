@@ -12,6 +12,8 @@ export default defineConfig({
   outputDir: "./test-results",
   snapshotPathTemplate: "{testDir}/__screenshots__/{projectName}/{arg}{ext}",
   forbidOnly: true,
+  // Merges the picker's coverage from every test and checks it (DESIGN §9 rc17).
+  globalTeardown: "./coverage.ts",
   reporter: [["list"]],
   // Exact: the pinned image renders identically run to run, and the default per-pixel
   // tolerance (0.2) let a changed option colour through unnoticed.

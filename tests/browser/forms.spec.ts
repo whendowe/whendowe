@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import { expect, type Page, test } from "@playwright/test";
+import { expect, type Page, test } from "./fixtures.js";
 
 // The forms' own scripts, in a real browser (DESIGN §9 rc16). Every test drives a page
 // rendered by the app (tests/browser/pages.ts) and asserts the only output the picker

@@ -12,3 +12,5 @@ coverage/
 # Browser tier (DESIGN §9): rendered pages and run output; the references are committed.
 tests/browser/.pages/
 tests/browser/test-results/
+# Hegel keeps the examples it has found between local runs.
+.hegel/

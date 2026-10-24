@@ -20,5 +20,12 @@ else
   exit 1
 fi
 
-exec "$runtime" run --rm --ipc=host "$as_me" -e HOME=/tmp -v "$PWD:/work" -w /work "$IMAGE" \
+# A full run (no arguments) is measured against the picker's coverage thresholds
+# (DESIGN §9 rc17); a filtered or updating run only reports. SOAK raises the state
+# machine's budget, as it does for the property suite.
+gate=0
+[ "$#" -eq 0 ] && gate=1
+
+exec "$runtime" run --rm --ipc=host "$as_me" -e HOME=/tmp -e COVERAGE_THRESHOLDS="$gate" \
+  ${SOAK:+-e SOAK="$SOAK"} -v "$PWD:/work" -w /work "$IMAGE" \
   npm run -s test:browser:run -- "$@"

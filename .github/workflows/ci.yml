@@ -40,8 +40,9 @@ jobs:
           token: ${{ env.CODECOV_TOKEN }}
 
   browser:
-    # The browser tier (DESIGN §9 rc16): the pages' own scripts in Chromium, JS on and
-    # off, and every driven state compared with its committed reference screenshot.
+    # The browser tier (DESIGN §9 rc16–rc17): the pages' own scripts in Chromium, JS on
+    # and off, every driven state compared with its committed reference screenshot, the
+    # poll picker's state machine at gate budget, and the picker's coverage.
     # Runs in the pinned Playwright image — the same one scripts/browser.sh uses —
     # because references are only comparable when fonts come from the same image.
     # Keep the digest in step with @playwright/test in package.json.
@@ -55,6 +56,8 @@ jobs:
       - run: npm run test:browser:run
         env:
           HOME: /root
+          # A full run: the picker's coverage must meet its thresholds (rc17).
+          COVERAGE_THRESHOLDS: "1"
       # On a visual change: expected / actual / diff images for each failing state.
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: failure()
@@ -62,6 +65,14 @@ jobs:
           name: browser-diffs
           path: tests/browser/test-results/
           retention-days: 14
+      # The picker's coverage as lcov, from every run, passing or not.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: browser-coverage
+          path: tests/browser/coverage/
+          retention-days: 14
+          if-no-files-found: ignore
 
   gitleaks:
     # Secret scanning in CI from day one (DESIGN.md §18).
