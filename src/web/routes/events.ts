@@ -11,6 +11,7 @@ import {
   editEvent,
   findEventForParticipant,
   type HistoryEntry,
+  listEventsFor,
   listHistory,
   setCancelled,
   type TransitionResult,
@@ -233,6 +234,48 @@ export function eventSummary(access: EventAccess): Html {
     isPoll(access) && event.status === "proposed" ? "voting on a time" : formatWhen(event);
   const repeats = event.rrule === null ? "" : ` · ↻ ${describeRRule(event.rrule)}`;
   return html`<a href="${EVENTS_PATH}/${event.id}">${title}</a>${statusBadge(access)} <span class="muted">· ${when}${repeats}</span>`;
+}
+
+/**
+ * Whether an event is over: its end, in its own zone, has passed. A series never is. An
+ * all-day event has no zone (a floating date), so it is over once its last day has
+ * ended everywhere — the last zone on Earth, UTC−12.
+ */
+function isPast(event: CanonicalEvent, now: string): boolean {
+  if (event.rrule !== null) return false;
+  const end = Temporal.PlainDateTime.from(event.endLocal).toZonedDateTime(
+    event.tzid ?? "Etc/GMT+12",
+  );
+  return Temporal.Instant.compare(end.toInstant(), Temporal.Instant.from(now)) <= 0;
+}
+
+/**
+ * Home for a signed-in person: Your events (DESIGN rc15). Open polls first — they need
+ * an answer — then what's coming up, soonest first, then the past, folded away. Every
+ * line at the viewer's own tier (eventSummary → canSee).
+ */
+export async function yourEvents(
+  storage: StoragePort,
+  personId: string,
+  now: string,
+): Promise<Html> {
+  const all = await listEventsFor(storage, personId);
+  const voting = all.filter((a) => isPoll(a) && a.event.status === "proposed");
+  const rest = all.filter((a) => !voting.includes(a));
+  const upcoming = rest.filter((a) => !isPast(a.event, now));
+  const past = rest.filter((a) => isPast(a.event, now)).reverse();
+  const list = (items: readonly EventAccess[]) =>
+    html`<ul>${items.map((a) => html`<li>${eventSummary(a)}</li>`)}</ul>`;
+  return html`<h1>Your events</h1>
+${voting.length === 0 ? "" : html`<h2>Finding a time</h2>${list(voting)}`}
+${
+  upcoming.length === 0
+    ? voting.length === 0
+      ? html`<p class="muted">Nothing planned yet. Events you create, or are added to, show up here.</p>`
+      : ""
+    : html`<h2>Coming up</h2>${list(upcoming)}`
+}
+${past.length === 0 ? "" : html`<details><summary>Past (${past.length})</summary>${list(past)}</details>`}`;
 }
 
 interface FormValues {
@@ -938,7 +981,7 @@ async function eventPage(
   return page(
     c,
     see("title") ? event.title : BUSY_LABEL,
-    html`<p>${event.groupId === null ? html`<a href="/groups">← Your groups</a>` : html`<a href="/groups/${event.groupId}">← Back to the group</a>`}</p>
+    html`<p>${event.groupId === null ? html`<a href="/">← Your events</a>` : html`<a href="/groups/${event.groupId}">← Back to the group</a>`}</p>
 <h1>${see("title") ? event.title : BUSY_LABEL}${statusBadge(access)}</h1>
 ${notice === null ? "" : html`<p class="error">${notice}</p>`}
 ${poll === null ? html`<p>${formatWhen(event)}</p>` : pollSection(access, poll, csrf, see("participants"))}

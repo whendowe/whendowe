@@ -361,6 +361,26 @@ export async function listGroupEvents(
   return rows.map((row) => ({ event: toEvent(row), participation: toParticipation(row) }));
 }
 
+/**
+ * Every event this person takes part in, at any visibility but HIDDEN, soonest first —
+ * "Your events" (DESIGN rc15). The event is the primary object: this does not go
+ * through groups, so an event someone was added to directly is here too. Each comes
+ * WITH the person's participation, to render at their own tier.
+ */
+export async function listEventsFor(
+  storage: StoragePort,
+  personId: string,
+): Promise<EventAccess[]> {
+  const rows = await storage.query({
+    sql: `SELECT ${EVENT_COLUMNS}, ${PARTICIPATION_COLUMNS}
+          FROM canonical_event e JOIN event_participation ep ON ep.canonical_event_id = e.id
+          WHERE ep.person_id = ? AND ep.visibility <> 'HIDDEN' AND ${PARTY_RULE}
+          ORDER BY e.start_local, e.id`,
+    params: [personId],
+  });
+  return rows.map((row) => ({ event: toEvent(row), participation: toParticipation(row) }));
+}
+
 /** Fields whose change alters someone's plans (DESIGN §10 rc13): not title, not notes. */
 const MATERIAL_FIELDS: ReadonlySet<string> = new Set([
   "rrule",

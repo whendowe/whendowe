@@ -2,7 +2,7 @@
 import { Hono } from "hono";
 import { html } from "./layout.js";
 import { type AuthDeps, registerAuthRoutes, SIGN_IN_PATH } from "./routes/auth.js";
-import { registerEventRoutes } from "./routes/events.js";
+import { registerEventRoutes, yourEvents } from "./routes/events.js";
 import { GROUPS_PATH, registerGroupRoutes } from "./routes/groups.js";
 import { CONNECT_PATH, type OAuthRouteDeps, registerOAuthRoutes } from "./routes/oauth.js";
 import { registerRespondRoutes } from "./routes/respond.js";
@@ -33,7 +33,7 @@ export function createApp(options: AppOptions = {}): Hono<AppEnv> {
     app.use(sessionMiddleware(auth));
   }
 
-  app.get("/", (c) => {
+  app.get("/", async (c) => {
     const signedIn = c.get("signedIn");
     // Who is signed in, and the menu, are in every page's header (layout.ts, rc18).
     const account =
@@ -58,12 +58,15 @@ export function createApp(options: AppOptions = {}): Hono<AppEnv> {
     return c.html(
       page(
         c,
-        "Home",
-        html`${account}
+        signedIn === null ? "Home" : "Your events",
+        signedIn === null || auth === undefined
+          ? html`${account}
 <h1>WhenDoWe</h1>
 <p>One canonical event, projected into many calendars — with attribution.</p>
 <p class="muted">Milestone: MVP-1 — People</p>
-${signedIn === null ? "" : html`<p><a href="${GROUPS_PATH}">Your groups</a></p>`}
+${connect}`
+          : html`${await yourEvents(auth.storage, signedIn.personId, auth.now())}
+<p><a href="${GROUPS_PATH}">Your groups</a> <span class="muted">· to plan something with one</span></p>
 ${connect}`,
       ),
     );

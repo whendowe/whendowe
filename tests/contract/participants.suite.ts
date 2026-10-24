@@ -6,6 +6,7 @@ import {
   type EventAccess,
   type EventFieldsInput,
   findEventForParticipant,
+  listEventsFor,
   listHistory,
 } from "../../src/events/event.js";
 import {
@@ -105,6 +106,18 @@ export function runParticipantsContract(makePort: () => Promise<StoragePort>): v
       // Not a revision: the event's own history and revision are untouched.
       expect(mine.event.revision).toBe(1);
       expect(await listHistory(port, mine)).toHaveLength(1);
+    });
+
+    it("an added person's events include it, through no group; never at HIDDEN", async () => {
+      const port = await makePort();
+      const d = await dinner(port, "mine");
+      const guest = await added(port, d.eventId, d.mara, "pp-guest-mine@example.org");
+      expect((await listEventsFor(port, guest)).map((a) => a.event.id)).toEqual([d.eventId]);
+      await port.query({
+        sql: "UPDATE event_participation SET visibility = 'HIDDEN' WHERE canonical_event_id = ? AND person_id = ?",
+        params: [d.eventId, guest],
+      });
+      expect(await listEventsFor(port, guest)).toEqual([]);
     });
 
     it("only the edit tier adds and removes", async () => {
