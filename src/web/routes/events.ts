@@ -58,6 +58,7 @@ import {
   upcomingOccurrences,
 } from "../../recurrence.js";
 import { type Html, html, renderPage } from "../layout.js";
+import { pickerAssets } from "../picker.js";
 import { type AppEnv, requireSignedIn, verifyFormCsrf } from "../session.js";
 import { sendResponseLink } from "./respond.js";
 
@@ -366,14 +367,16 @@ function eventForm(
   vis: Vis = "FULL",
 ): Html {
   return html`${error === null ? "" : html`<p class="error">${error}</p>`}
-<form method="post" action="${action}">
+<form method="post" action="${action}" data-picker="event">
   <input type="hidden" name="csrf" value="${csrf}" />
   ${extra}
   ${canSee(vis, "title") ? html`<p><label>Title<br /><input name="title" required maxlength="200" value="${v.title}" style="width:100%" /></label></p>` : ""}
   ${canSee(vis, "location") ? html`<p><label>Where<br /><input name="location" maxlength="500" value="${v.location}" style="width:100%" /></label></p>` : ""}
+  <div data-picker-plain>
   <p><label><input type="checkbox" name="allDay" ${v.allDay ? html`checked` : ""} /> All day</label></p>
   <p><label>Starts<br /><input type="datetime-local" name="start" required value="${v.start}" /></label></p>
   <p><label>Ends <span class="muted">(for all-day events: the last day)</span><br /><input type="datetime-local" name="end" required value="${v.end}" /></label></p>
+  </div>
   <p><label>Time zone<br /><input id="tzid" name="tzid" list="zones" value="${v.tzid}" placeholder="Europe/Prague" /></label></p>
   ${zoneOptions()}
   ${repeatInputs(v)}
@@ -384,7 +387,8 @@ function eventForm(
   // Progressive enhancement only: suggest the browser's own zone for a new event.
   var tz = document.getElementById("tzid");
   if (tz && !tz.value) tz.value = Intl.DateTimeFormat().resolvedOptions().timeZone;
-</script>`;
+</script>
+${pickerAssets()}`;
 }
 
 type Request = "accept" | "ack";
