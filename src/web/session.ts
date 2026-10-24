@@ -11,7 +11,14 @@ import {
   verifyCsrf,
 } from "../people/session.js";
 import { csrfTokenFor } from "../people/tokens.js";
-import { type Html, html, renderPage, type Viewer } from "./layout.js";
+import {
+  ADD_ACCOUNT_PATH,
+  type Html,
+  html,
+  renderPage,
+  switchForm,
+  type Viewer,
+} from "./layout.js";
 
 // Session middleware: the cookie → this browser's signed-in accounts, on every
 // request (§13 rc18). The first is the active one, the person every route acts as.
@@ -160,6 +167,49 @@ export async function rejectedPage(c: Context<AppEnv>, form: Record<string, unkn
 <p>Switch back from the menu above to try again as ${renderedFor.email}.</p>`
       : html`<h1>Request rejected</h1><p>Please try again.</p>`;
   return c.html(page(c, "Request rejected", body), 403);
+}
+
+/**
+ * The answer when the active account may not see an event, poll or group page (§13
+ * rc18). If another account on this browser can, say so and offer the switch; otherwise
+ * the ordinary not-found, naming the account in use. 404 either way, and the same page
+ * whether or not the thing exists: only accounts whose sessions this browser already
+ * holds are asked, so it tells no one anything they couldn't see by switching.
+ */
+export async function notVisible(
+  c: Context<AppEnv>,
+  visibleTo: (personId: string) => Promise<boolean>,
+): Promise<Response> {
+  const viewer = viewerOf(c);
+  if (viewer === null) return c.html(page(c, "Not found", html`<h1>Not found</h1>`), 404);
+  for (const other of c.get("accounts").slice(1)) {
+    if (await visibleTo(other.personId)) {
+      return c.html(
+        page(
+          c,
+          "Another of your accounts",
+          html`<h1>This is visible to ${other.email}, also signed in here</h1>
+<p>You're viewing as <strong>${viewer.email}</strong>, who can't see it.</p>
+${switchForm(viewer, other)}`,
+        ),
+        404,
+      );
+    }
+  }
+  return c.html(
+    page(
+      c,
+      "Not found",
+      html`<h1>Not found</h1>
+<p>You're signed in as <strong>${viewer.email}</strong>.${
+        viewer.canAddAccount
+          ? html` If this was shared with another of your addresses, <a href="${ADD_ACCOUNT_PATH}">add another account</a>.`
+          : ""
+      }</p>
+<p><a href="/groups">Your groups</a></p>`,
+    ),
+    404,
+  );
 }
 
 /** The header's view of this browser's accounts; null when none is signed in. */

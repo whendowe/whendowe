@@ -59,7 +59,14 @@ import {
 } from "../../recurrence.js";
 import { type Html, html } from "../layout.js";
 import { pickerAssets } from "../picker.js";
-import { type AppEnv, page, rejectedPage, requireSignedIn, verifyFormCsrf } from "../session.js";
+import {
+  type AppEnv,
+  notVisible,
+  page,
+  rejectedPage,
+  requireSignedIn,
+  verifyFormCsrf,
+} from "../session.js";
 import { sendResponseLink } from "./respond.js";
 
 // Event pages (MVP-2 slice 2B). Every read goes through findEventForParticipant (no
@@ -79,6 +86,20 @@ export interface EventRouteDeps {
 }
 
 export const BUSY_LABEL = "Busy";
+
+/** A group page's answer when the active account isn't in the group (§13 rc18). */
+const groupNotVisible = (c: Context<AppEnv>, deps: EventRouteDeps, groupId: string) =>
+  notVisible(
+    c,
+    async (personId) => (await findGroupForMember(deps.storage, groupId, personId)) !== null,
+  );
+
+/** An event or poll page's answer when the active account may not see it (§13 rc18). */
+const eventNotVisible = (c: Context<AppEnv>, deps: EventRouteDeps, eventId: string) =>
+  notVisible(c, async (personId) => {
+    const access = await findEventForParticipant(deps.storage, eventId, personId);
+    return access !== null && access.participation.visibility !== "HIDDEN";
+  });
 
 function notFound(c: Context<AppEnv>): string {
   return page(c, "Not found", html`<h1>Not found</h1><p><a href="/groups">Your groups</a></p>`);
@@ -872,7 +893,7 @@ export function registerEventRoutes(app: Hono<AppEnv>, deps: EventRouteDeps): vo
     const me = requireSignedIn(c);
     if (me instanceof Response) return me;
     const membership = await findGroupForMember(deps.storage, c.req.param("groupId"), me.personId);
-    if (membership === null) return c.html(notFound(c), 404);
+    if (membership === null) return groupNotVisible(c, deps, c.req.param("groupId"));
     return c.html(
       page(
         c,
@@ -921,7 +942,7 @@ ${eventForm(`/groups/${membership.group.id}/events`, me.csrfToken, values, await
     const access = await findEventForParticipant(deps.storage, c.req.param("id"), me.personId);
     // HIDDEN means "no projection at all" (WORKFLOWS §3): indistinguishable from absent.
     if (access === null || access.participation.visibility === "HIDDEN")
-      return c.html(notFound(c), 404);
+      return eventNotVisible(c, deps, c.req.param("id"));
     return c.html(await eventPage(c, deps, access, me.csrfToken));
   });
 
@@ -930,7 +951,7 @@ ${eventForm(`/groups/${membership.group.id}/events`, me.csrfToken, values, await
     if (me instanceof Response) return me;
     const access = await findEventForParticipant(deps.storage, c.req.param("id"), me.personId);
     if (access === null || access.participation.visibility === "HIDDEN")
-      return c.html(notFound(c), 404);
+      return eventNotVisible(c, deps, c.req.param("id"));
     const proposing = access.participation.editTier === "propose";
     if (access.participation.editTier === "view")
       return c.html(page(c, "Not allowed", html`<h1>You can't edit this event</h1>`), 403);
@@ -1044,7 +1065,7 @@ ${eventForm(`${EVENTS_PATH}/${access.event.id}`, me.csrfToken, v, html`<input ty
     const me = requireSignedIn(c);
     if (me instanceof Response) return me;
     const membership = await findGroupForMember(deps.storage, c.req.param("groupId"), me.personId);
-    if (membership === null) return c.html(notFound(c), 404);
+    if (membership === null) return groupNotVisible(c, deps, c.req.param("groupId"));
     return c.html(
       page(
         c,

@@ -61,6 +61,15 @@ export const SIGN_OUT_PATH = "/auth/sign-out";
 export const SIGN_OUT_ALL_PATH = "/auth/sign-out-all";
 export const ADD_ACCOUNT_PATH = "/auth/sign-in";
 
+/** A one-button form that makes another account on this browser active, then comes back here. */
+export function switchForm(v: Viewer, to: { sessionId: string; email: string }): Html {
+  return html`<form method="post" action="${SWITCH_PATH}"><input type="hidden" name="csrf" value="${v.csrfToken}" />
+        <input type="hidden" name="session" value="${to.sessionId}" />
+        <input type="hidden" name="back" value="${v.here}" />
+        <button type="submit">Switch to <strong>${to.email}</strong></button>
+      </form>`;
+}
+
 /**
  * Every signed-in page names the account in use, with a menu to switch, add one, or
  * sign out. Plain HTML: <details> opens it and each action is a POST form, so it works
@@ -73,13 +82,7 @@ function accountHeader(v: Viewer): Html {
   <details class="wd-who">
     <summary><span class="muted">Signed in as</span> <strong>${v.email}</strong></summary>
     <div class="wd-menu">
-      ${v.others.map(
-        (o) => html`<form method="post" action="${SWITCH_PATH}">${csrf}
-        <input type="hidden" name="session" value="${o.sessionId}" />
-        <input type="hidden" name="back" value="${v.here}" />
-        <button type="submit">Switch to <strong>${o.email}</strong></button>
-      </form>`,
-      )}
+      ${v.others.map((o) => switchForm(v, o))}
       ${
         v.canAddAccount
           ? html`<a href="${ADD_ACCOUNT_PATH}">Add another account</a>`

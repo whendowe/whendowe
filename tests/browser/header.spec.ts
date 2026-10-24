@@ -59,3 +59,15 @@ test.describe("without JavaScript", () => {
     await expect(menu.locator('form[method="post"]')).toHaveCount(4);
   });
 });
+
+test("a page another account here can see offers the switch", async ({ page }) => {
+  await open(page, "visible-elsewhere");
+  await expect(page.locator(".wd-who summary")).toContainText("lea@example.org");
+  await expect(page.getByRole("heading", { level: 1 })).toHaveText(
+    "This is visible to dm@example.org, also signed in here",
+  );
+  const main = page.locator("body > :not(header)");
+  await expect(main.getByRole("button", { name: "Switch to dm@example.org" })).toBeVisible();
+  await page.mouse.move(0, 0);
+  await expect(page).toHaveScreenshot("visible-elsewhere.png", await top(page));
+});

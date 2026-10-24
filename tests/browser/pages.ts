@@ -4,7 +4,7 @@ import { createClient } from "@libsql/client";
 import { sqliteStoragePort } from "../../src/db/sqlite.js";
 import type { MailMessage } from "../../src/mail/port.js";
 import { createApp } from "../../src/web/app.js";
-import { CONFIRM_PATH, SIGN_IN_PATH } from "../../src/web/routes/auth.js";
+import { CONFIRM_PATH, SIGN_IN_PATH, SWITCH_PATH } from "../../src/web/routes/auth.js";
 import { GROUPS_PATH } from "../../src/web/routes/groups.js";
 import { loadMigrationSql } from "../conftest.js";
 
@@ -93,4 +93,21 @@ for (const [name, path] of Object.entries(pages)) {
   if (res.status !== 200) throw new Error(`${path} answered ${res.status}`);
   writeFileSync(new URL(`${name}.html`, OUT), await res.text());
 }
-console.log(`rendered ${Object.keys(pages).length} pages`);
+
+// Lea is signed in here but not in the group; switched to her, the DM's event offers
+// the switch back (DESIGN §13 rc18). A 404, as the page is not hers to see.
+const leaSession = must(
+  /name="session" value="([^"]+)" \/>\s*<input type="hidden" name="back"[^>]*>\s*<button type="submit">Switch to <strong>lea@/.exec(
+    home,
+  )?.[1],
+  "Lea's session",
+);
+const switched = await app.request(
+  SWITCH_PATH,
+  post({ csrf, session: leaSession, back: "/" }, cookie),
+);
+const asLea = must(switched.headers.get("set-cookie")?.split(";")[0], "Lea's cookie");
+const elsewhere = await app.request(event, { headers: { cookie: asLea } });
+if (elsewhere.status !== 404) throw new Error(`${event} as Lea answered ${elsewhere.status}`);
+writeFileSync(new URL("visible-elsewhere.html", OUT), await elsewhere.text());
+console.log(`rendered ${Object.keys(pages).length + 1} pages`);

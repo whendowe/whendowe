@@ -23,6 +23,7 @@ import { normalizeEmail } from "../../people/person.js";
 import { html } from "../layout.js";
 import {
   type AppEnv,
+  notVisible,
   page,
   rejectedPage,
   requireSignedIn,
@@ -166,7 +167,13 @@ ${createForm(me.csrfToken, "", null)}`,
     const me = requireSignedIn(c);
     if (me instanceof Response) return me;
     const membership = await findGroupForMember(deps.storage, c.req.param("id"), me.personId);
-    if (membership === null) return c.html(notFound(c), 404);
+    if (membership === null) {
+      const id = c.req.param("id");
+      return notVisible(
+        c,
+        async (personId) => (await findGroupForMember(deps.storage, id, personId)) !== null,
+      );
+    }
     const members = await listMembers(deps.storage, membership);
     // Each event rendered at THIS viewer's visibility tier (eventSummary → canSee).
     const events = await listGroupEvents(deps.storage, membership, me.personId);
