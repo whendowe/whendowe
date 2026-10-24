@@ -1,6 +1,6 @@
 # WhenDoWe — Design & Agent Bootstrap Brief
 
-> **Status:** v1.0-rc16 (rc15 + §9: a browser test tier — Playwright drives the pages' own scripts in Chromium, at phone width and with JavaScript off, and compares each page against committed reference screenshots so a PR shows its visual diff; its own command and CI job, and part of the Definition of Done) (v1.0-rc15: rc14 + §10: events are center-stage and groups are an address book — an event names its people directly, people can be added to and removed from an existing event, joining a group never adds you to its earlier events, and home is "your events"; owner decision after the first staging use) (v1.0-rc14: rc13 + §18: the Worker bundle is a published artifact of its own — an OCI artifact on ghcr carrying the bundled script, the migrations it expects and the wrangler template, pinned by digest, so the deployments repo never needs product source; and a pre-Workers-Paid instance mode in §13/§18 — mail only to verified destination addresses via Email Routing on the `notify.` subdomain, enforced by the binding's recipient allowlist) (v1.0-rc13: rc12 + MVP-2 slice 2E planned in §10: response requests — accept/acknowledge states, lifecycle as built, material change = time/date/location; link actions name the phase; `event_change_proposal` for the propose tier with §8 `proposal.ts`; whole-series RRULE; history attribution shown to every tier by owner decision) (v1.0-rc12: rc11 + §10: responses — votes, attendance, feedback — are attributed rows of their own, not change_log rows, because change_log's revision key serialises edits; `event_feedback` and `response_token` sketched; §13 token links as built: re-answerable vote/attend links, 14-day expiry, rotate-on-resend by replacement, no session) (v1.0-rc11: rc10 + MVP-2 layout in §8 — `src/events/`, `routes/events.ts`, `routes/respond.ts`; the event lifecycle as a single status column in §10; and §16's one recorded exception: migration 0005 rebuilds `canonical_event`, allowed only because nothing has ever been deployed) (v1.0-rc10: rc9 + §8 entries for `src/web/layout.ts` and `src/web/session.ts`, recorded before MVP-1 slice C) (v1.0-rc9: rc8 + mail provider decided: Cloudflare Email Service, sending from `notify.whendowe.org`, behind an app-enforced hard cap — §8 entries for `src/mail/cloudflare.ts` and `src/mail/capped.ts`) (v1.0-rc8: rc7 + §8 layout for MVP-1, recorded before the code: `src/people/`, `src/ids.ts`, `src/mail/console.ts`, `src/web/routes/{auth,groups}.ts`) (v1.0-rc7: rc6 + roadmap re-sequenced people-first after an owner review: Ring 0 widened from "the household" to small groups of people who know each other; two-way Google sync is MVP scope; edit tier split from visibility tier; WORKFLOWS §9 deltas folded in — multi-person, account-less responses; §17 single-vs-multi resolved; provider-neutrality made a hard constraint) (v1.0-rc6: rc5 + M1 as-built corrections to §8: `src/crypto/` and `src/oauth/` were introduced during M1 but never documented; `src/web/routes/` contents named; `src/web/escape.ts`; `src/providers/google-event.ts`; `src/recurrence.ts` — undocumented since the M1 recurrence spike; and a `scripts/` directory. Plus §13: the deployments repo is *credential*-human-only — the boundary is credential access, not repo write access, so instance config may be agent-authored and owner-merged) (rc4 + M0 as-built corrections: change_log id in SQLite dialect, fake provider filename, publish-not-deploy workflow comment, Hegel FFI mechanism) (rc3 + security hardening: token-link semantics, ICS/HTML injection, OAuth state/PKCE, supply-chain cooldown & ignore-scripts, agent privilege model, backup-tail deletion promise) (v0.9 + artifact-store port seam for feeds/pages; v0.7 + scheduling economics: cron fan-out vs DO alarms; v0.6 + platform pivot: TypeScript intersection contract — one codebase targeting Cloudflare Workers/D1/Durable Objects free tier *and* Node/Docker self-host; SQLite dialect; Hegel-based verification; earlier history in companions/git). **Name:** WhenDoWe — repo `github.com/whendowe/whendowe`, domain `whendowe.org` (Cloudflare-registered), package name `whendowe`.
+> **Status:** v1.0-rc17 (rc16 + §9: property tests for the UI — Hegel properties over the picker's shipped logic, including that whatever it writes the server's own parser accepts unchanged, and a Hegel state machine that drives the real picker in Chromium against a model; the pages' scripts are covered by coverage, measured in Node and in the browser, with ratchet-only thresholds; and CODEOWNERS widened to the browser tier and the coverage thresholds, which now help define green) (v1.0-rc16: rc15 + §9: a browser test tier — Playwright drives the pages' own scripts in Chromium, at phone width and with JavaScript off, and compares each page against committed reference screenshots so a PR shows its visual diff; its own command and CI job, and part of the Definition of Done) (v1.0-rc15: rc14 + §10: events are center-stage and groups are an address book — an event names its people directly, people can be added to and removed from an existing event, joining a group never adds you to its earlier events, and home is "your events"; owner decision after the first staging use) (v1.0-rc14: rc13 + §18: the Worker bundle is a published artifact of its own — an OCI artifact on ghcr carrying the bundled script, the migrations it expects and the wrangler template, pinned by digest, so the deployments repo never needs product source; and a pre-Workers-Paid instance mode in §13/§18 — mail only to verified destination addresses via Email Routing on the `notify.` subdomain, enforced by the binding's recipient allowlist) (v1.0-rc13: rc12 + MVP-2 slice 2E planned in §10: response requests — accept/acknowledge states, lifecycle as built, material change = time/date/location; link actions name the phase; `event_change_proposal` for the propose tier with §8 `proposal.ts`; whole-series RRULE; history attribution shown to every tier by owner decision) (v1.0-rc12: rc11 + §10: responses — votes, attendance, feedback — are attributed rows of their own, not change_log rows, because change_log's revision key serialises edits; `event_feedback` and `response_token` sketched; §13 token links as built: re-answerable vote/attend links, 14-day expiry, rotate-on-resend by replacement, no session) (v1.0-rc11: rc10 + MVP-2 layout in §8 — `src/events/`, `routes/events.ts`, `routes/respond.ts`; the event lifecycle as a single status column in §10; and §16's one recorded exception: migration 0005 rebuilds `canonical_event`, allowed only because nothing has ever been deployed) (v1.0-rc10: rc9 + §8 entries for `src/web/layout.ts` and `src/web/session.ts`, recorded before MVP-1 slice C) (v1.0-rc9: rc8 + mail provider decided: Cloudflare Email Service, sending from `notify.whendowe.org`, behind an app-enforced hard cap — §8 entries for `src/mail/cloudflare.ts` and `src/mail/capped.ts`) (v1.0-rc8: rc7 + §8 layout for MVP-1, recorded before the code: `src/people/`, `src/ids.ts`, `src/mail/console.ts`, `src/web/routes/{auth,groups}.ts`) (v1.0-rc7: rc6 + roadmap re-sequenced people-first after an owner review: Ring 0 widened from "the household" to small groups of people who know each other; two-way Google sync is MVP scope; edit tier split from visibility tier; WORKFLOWS §9 deltas folded in — multi-person, account-less responses; §17 single-vs-multi resolved; provider-neutrality made a hard constraint) (v1.0-rc6: rc5 + M1 as-built corrections to §8: `src/crypto/` and `src/oauth/` were introduced during M1 but never documented; `src/web/routes/` contents named; `src/web/escape.ts`; `src/providers/google-event.ts`; `src/recurrence.ts` — undocumented since the M1 recurrence spike; and a `scripts/` directory. Plus §13: the deployments repo is *credential*-human-only — the boundary is credential access, not repo write access, so instance config may be agent-authored and owner-merged) (rc4 + M0 as-built corrections: change_log id in SQLite dialect, fake provider filename, publish-not-deploy workflow comment, Hegel FFI mechanism) (rc3 + security hardening: token-link semantics, ICS/HTML injection, OAuth state/PKCE, supply-chain cooldown & ignore-scripts, agent privilege model, backup-tail deletion promise) (v0.9 + artifact-store port seam for feeds/pages; v0.7 + scheduling economics: cron fan-out vs DO alarms; v0.6 + platform pivot: TypeScript intersection contract — one codebase targeting Cloudflare Workers/D1/Durable Objects free tier *and* Node/Docker self-host; SQLite dialect; Hegel-based verification; earlier history in companions/git). **Name:** WhenDoWe — repo `github.com/whendowe/whendowe`, domain `whendowe.org` (Cloudflare-registered), package name `whendowe`.
 > **Audience:** the coding agent bootstrapping this repo, and future human contributors.
 
 ---
@@ -133,7 +133,7 @@ whendowe/
   README.md
   AGENTS.md                    # canonical agent operating manual (short; binding)
   CLAUDE.md                    # one-line import of AGENTS.md (no duplicated rules)
-  CODEOWNERS                   # owner review required: tests/property/**, .github/**, migrations/**, *.md design docs, AGENTS.md
+  CODEOWNERS                   # owner review required: tests/property/**, tests/browser/**, coverage thresholds, .github/**, migrations/**, *.md design docs, AGENTS.md
   .github/workflows/
     ci.yml                     # npm run check (both-driver contract matrix)
     deploy.yml                 # PUBLISHES artifacts (§18): ghcr image + Worker bundle on main; release on tag v*.
@@ -230,7 +230,8 @@ whendowe/
     property/                  # Hegel: invariants + simulation state machine (plain vitest)
     contract/                  # storage-port contract suite — MUST pass on BOTH drivers
     workers/                   # vitest-pool-workers: adapter tests in workerd
-    browser/                   # Playwright: page scripts in Chromium, JS on/off, reference screenshots (§9)
+    browser/                   # Playwright: page scripts in Chromium, JS on/off, reference screenshots,
+                               #   the picker state machine, and script coverage (§9 rc16–rc17)
     conftest.ts
 ```
 
@@ -273,6 +274,62 @@ picker), so a second command covers it — `npm run test:browser`:
 - **Where it runs:** its own CI job in the official Playwright image, pinned by digest to the
   same version as the `@playwright/test` dev dependency. It is not inside `npm run check`, which
   must stay runnable wherever Node runs; the browsers are a separate runtime of several hundred MB.
+
+**UI properties and script coverage (rc17).** The picker is the most complex code a person
+touches directly, and example tests cover only the cases someone thought of. Its logic ships
+as a script inside the page (rc15), so it gets the same property treatment as the core, in two
+layers:
+
+- **Its pure logic, under Hegel in `tests/property/`.** These run the script exactly as it
+  ships, extracted from the rendered assets, and need no browser. Targets:
+  - *Calendar shape:* for any month from 1900 to 2200, the grid is whole Monday-to-Sunday weeks,
+    consecutive, holding exactly that month's days; week numbers equal an independent ISO-8601
+    reference.
+  - *Pick round-trip:* any pick → plain fields → the same pick. The end is always the start
+    plus the length in wall-clock minutes, and the summary names an end day exactly when the
+    end falls on a later date.
+  - *Poll round-trip:* any set of options → numbered rows → the same options. Rows are sorted,
+    distinct, and at most the server's limit.
+  - *Client–server agreement:* whatever the picker writes, **the server's own form parser**
+    accepts, and reads as the same event or the same candidates. This is the property that
+    stops the two halves drifting apart. The script, being unconstrained, would otherwise be
+    free to produce what the server refuses: an identical candidate twice, an end before its
+    start, an eleventh option.
+- **The real page, as a Hegel state machine in the browser tier.** This is the §9 draw-loop shape,
+  in Chromium. One property draws a sequence of user actions and applies each to the page
+  through Playwright *and* to a small model of what the form should hold. The actions are: tap a
+  day, switch the poll kind, add a time to a day, remove a time through the chooser, "Same
+  again, +1 week", change the start or the length, and move between months. After every step:
+  - the plain fields equal the model's rows;
+  - the rows are sorted, distinct and within the limit;
+  - every ×N badge and option letter agrees with the model;
+  - the page has raised no script error.
+
+  Shrinking yields the shortest sequence of taps that fails, which is pinned as a plain
+  Playwright test. The browser tier's runner is Node, so Hegel runs there as it does under
+  vitest. If its native core cannot run in the pinned image, the state machine uses fast-check
+  (the §6 fallback) and says so where it is defined. Gate and soak apply as they do above. The
+  gate budget is small (tens of sequences of tens of steps), so the browser job stays in
+  minutes. `npm run soak` gains a browser run with the same machine at a large budget.
+
+**Coverage of the pages' scripts.** The core's coverage (vitest, v8, thresholds in its config)
+could not see the picker: its script is a string, so v8 attributed none of it to
+`src/web/picker.ts`. It is measured from both sides:
+
+- **In Node,** the unit and property tests run the script under its real file name with a line
+  offset, so its coverage lands on `picker.ts` lines and counts toward the existing thresholds.
+- **In the browser,** Chromium's JavaScript coverage records which ranges of each page script ran.
+  The script is a literal with no interpolation (rc15's no-backslash, no-backtick, no-dollar-brace
+  rule, already tested), so its offsets map one-to-one onto `picker.ts` with a fixed offset. The
+  tier writes an lcov report and a text summary for that file and fails when it falls below its
+  thresholds.
+- **Ratchet-only, as everywhere:** each threshold starts at the first measured value, and is raised
+  as tests land, never lowered. Both lcov reports are uploaded as CI artifacts.
+
+**What defines green is protected.** The browser tier's tests, reference screenshots and
+configuration (`tests/browser/**`) and the coverage thresholds (`vitest.config.ts`) join
+CODEOWNERS. A weakened state machine, a silenced screenshot or a lowered threshold would turn
+the gate green as surely as a loosened `tests/property/` test.
 
 **Definition of Done for every change:** `npm run check` is green, and so is the browser tier
 in CI. No merge with type errors, lint errors, or failing tests. No `any`, no `@ts-expect-error`/`as`-cast without an inline justification.
@@ -851,7 +908,7 @@ After the MVP, per-instance overrides are "start accepting rows into `event_over
 
 Privilege separation inside the product repo remains: branch protection (no direct pushes to `main`, owner included) and **CODEOWNERS** on the verifier surface. Issues + Actions in the product repo orchestrate *development*; the deployments repo orchestrates *operation*.
 
-**Protect the verifier, delegate the doer.** Agents may merge anything on green CI *except* changes to the things that define "green": `tests/property/**`, `.github/workflows/**`, `migrations/**`, `AGENTS.md`, and the design docs require owner review (CODEOWNERS). This is the load-bearing human-in-the-loop control for agent-driven development: the failure mode is not bad code (the gate catches it) but a weakened gate.
+**Protect the verifier, delegate the doer.** Agents may merge anything on green CI *except* changes to the things that define "green": `tests/property/**`, `tests/browser/**` (rc17), the coverage thresholds in `vitest.config.ts`, `.github/workflows/**`, `migrations/**`, `AGENTS.md`, and the design docs require owner review (CODEOWNERS). This is the load-bearing human-in-the-loop control for agent-driven development: the failure mode is not bad code (the gate catches it) but a weakened gate.
 
 **Pipeline (git is the only deploy path):**
 - Product repo: PR → `npm run check` (CI matrix, both storage drivers) → merge to `main` → **publish** build artifacts. Tag `v*` → release artifacts. No deploy step exists here.

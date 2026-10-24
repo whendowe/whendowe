@@ -1,6 +1,8 @@
 # Protect the verifier, delegate the doer (DESIGN.md §18).
 # Changes to these paths require the owner's review; everything else merges on green CI.
 /tests/property/    @AdamSaleh
+/tests/browser/     @AdamSaleh
+/vitest.config.ts   @AdamSaleh
 /.github/           @AdamSaleh
 /migrations/        @AdamSaleh
 /AGENTS.md          @AdamSaleh
