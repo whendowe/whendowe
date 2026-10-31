@@ -5,6 +5,7 @@ import {
   GOOGLE_AUTHORIZE_ENDPOINT,
   GOOGLE_CALENDAR_SCOPES,
 } from "../../src/oauth/authorize.js";
+import { GOOGLE_SIGN_IN_SCOPES } from "../../src/oauth/identity.js";
 import {
   assertValidVerifier,
   createCodeVerifier,
@@ -165,4 +166,24 @@ it("rejects an empty scope list", () => {
       scopes: [],
     }),
   ).toThrow(/at least one scope/);
+});
+
+// --- sign in with Google (§13 rc20) ---
+
+it("asks sign-in for openid email only, with the account chooser and no offline access", () => {
+  const params = new URL(
+    buildAuthorizeUrl({
+      clientId: "cid",
+      redirectUri: REDIRECT_URI,
+      state: "s",
+      codeChallenge: "c",
+      scopes: GOOGLE_SIGN_IN_SCOPES,
+      offline: false,
+    }),
+  ).searchParams;
+  expect(params.get("scope")).toBe("openid email");
+  expect(params.get("prompt")).toBe("select_account");
+  // No refresh token is wanted, so none is asked for.
+  expect(params.get("access_type")).toBeNull();
+  expect(params.get("code_challenge_method")).toBe("S256");
 });

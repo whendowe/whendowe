@@ -22,6 +22,12 @@ export interface AuthorizeRequest {
   readonly scopes?: readonly string[];
   /** Optional: pre-fills the account chooser. Not a security control. */
   readonly loginHint?: string;
+  /**
+   * False for sign-in (§13 rc20): no refresh token is wanted, so neither
+   * `access_type=offline` nor forced consent; the account chooser instead, so someone
+   * with several Google accounts picks one. Defaults to true, the calendar connect.
+   */
+  readonly offline?: boolean;
 }
 
 function requireNonEmpty(value: string, field: string): string {
@@ -47,6 +53,8 @@ function requireNonEmpty(value: string, field: string): string {
  * Since §12 makes `status='auth_error'` → reconnect a first-class flow, re-consent
  * has to actually re-issue the refresh token. The cost is that returning users see
  * the consent screen every time, which is the right trade for a sync that works.
+ *
+ * Both apply to the calendar connect only; sign-in passes `offline: false`.
  */
 export function buildAuthorizeUrl(request: AuthorizeRequest): string {
   const scopes = request.scopes ?? GOOGLE_CALENDAR_SCOPES;
@@ -63,8 +71,12 @@ export function buildAuthorizeUrl(request: AuthorizeRequest): string {
   params.set("state", requireNonEmpty(request.state, "state"));
   params.set("code_challenge", requireNonEmpty(request.codeChallenge, "codeChallenge"));
   params.set("code_challenge_method", "S256");
-  params.set("access_type", "offline");
-  params.set("prompt", "consent");
+  if (request.offline === false) {
+    params.set("prompt", "select_account");
+  } else {
+    params.set("access_type", "offline");
+    params.set("prompt", "consent");
+  }
   if (request.loginHint !== undefined) {
     params.set("login_hint", request.loginHint);
   }

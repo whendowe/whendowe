@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { mkdirSync, writeFileSync } from "node:fs";
 import { createClient } from "@libsql/client";
+import { createTokenCipher } from "../../src/crypto/tokens.js";
 import { sqliteStoragePort } from "../../src/db/sqlite.js";
 import type { MailMessage } from "../../src/mail/port.js";
 import { createApp } from "../../src/web/app.js";
@@ -255,4 +256,28 @@ const asLea = must(switched.headers.get("set-cookie")?.split(";")[0], "Lea's coo
 const elsewhere = await app.request(event, { headers: { cookie: asLea } });
 if (elsewhere.status !== 404) throw new Error(`${event} as Lea answered ${elsewhere.status}`);
 writeFileSync(new URL("visible-elsewhere.html", OUT), await elsewhere.text());
-console.log(`rendered ${Object.keys(pages).length + 1} pages`);
+
+// Signed out, on an instance with Google credentials: the sign-in page offers Google
+// beside the email link (DESIGN §13 rc20). Placeholder credentials; nothing is called.
+const withGoogle = createApp({
+  auth: {
+    storage: sqliteStoragePort(client),
+    mail: { send: () => Promise.resolve() },
+    publicBaseUrl: "https://whendowe.example",
+    secureCookies: false,
+    now: () => NOW,
+  },
+  oauth: {
+    storage: sqliteStoragePort(client),
+    cipher: await createTokenCipher([{ id: 1, material: `${"A".repeat(43)}=` }], 1),
+    clientId: "example-client-id",
+    clientSecret: "example-client-secret",
+    redirectUri: "https://whendowe.example/oauth/google/callback",
+    now: () => NOW,
+    secureCookies: false,
+  },
+});
+const signInPage = await withGoogle.request(SIGN_IN_PATH);
+if (signInPage.status !== 200) throw new Error(`sign-in answered ${signInPage.status}`);
+writeFileSync(new URL("sign-in.html", OUT), await signInPage.text());
+console.log(`rendered ${Object.keys(pages).length + 2} pages`);

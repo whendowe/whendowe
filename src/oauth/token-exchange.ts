@@ -2,7 +2,8 @@
 import { z } from "zod";
 import { defaultFetch, type FetchLike, formEncode, requestJson } from "./http.js";
 
-// Authorization-code → tokens (DESIGN.md §12). Plain REST, no SDK.
+// Authorization code → tokens (DESIGN.md §12) for the calendar connect, or → an ID
+// token for sign-in (§13 rc20). Plain REST, no SDK.
 
 export const GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
 
@@ -18,6 +19,12 @@ const tokenResponseSchema = z.object({
   token_type: z.string().min(1),
   /** Space-delimited. Google may return fewer scopes than were requested. */
   scope: z.string().optional(),
+});
+
+// Sign-in asks for no offline access, so there is no refresh token to require; the
+// ID token is the whole point, and the access token is never used.
+const idTokenResponseSchema = z.object({
+  id_token: z.string().min(1),
 });
 
 export interface GoogleTokens {
@@ -49,13 +56,17 @@ function expiryFrom(nowIso: string, expiresInSeconds: number): string {
 }
 
 /**
- * Redeem an authorization code.
+ * POST a code to the token endpoint.
  *
  * Everything secret travels in the POST body, never the query string — §13
  * forbids logging URL query strings precisely because they leak into access logs,
  * and the body keeps the code and client secret out of them by construction.
  */
-export async function exchangeAuthorizationCode(request: ExchangeRequest): Promise<GoogleTokens> {
+function redeem<T>(
+  request: Omit<ExchangeRequest, "now">,
+  schema: z.ZodType<T>,
+  what: string,
+): Promise<T> {
   const body = formEncode({
     code: request.code,
     client_id: request.clientId,
@@ -65,7 +76,7 @@ export async function exchangeAuthorizationCode(request: ExchangeRequest): Promi
     code_verifier: request.codeVerifier,
   });
 
-  const response = await requestJson(
+  return requestJson(
     request.fetchImpl ?? defaultFetch,
     GOOGLE_TOKEN_ENDPOINT,
     {
@@ -73,9 +84,14 @@ export async function exchangeAuthorizationCode(request: ExchangeRequest): Promi
       headers: { "content-type": "application/x-www-form-urlencoded" },
       body,
     },
-    tokenResponseSchema,
-    "token exchange",
+    schema,
+    what,
   );
+}
+
+/** Redeem a calendar-connect authorization code. */
+export async function exchangeAuthorizationCode(request: ExchangeRequest): Promise<GoogleTokens> {
+  const response = await redeem(request, tokenResponseSchema, "token exchange");
 
   if (response.token_type.toLowerCase() !== "bearer") {
     // We go on to send `Authorization: Bearer <token>`; anything else would be a
@@ -89,4 +105,13 @@ export async function exchangeAuthorizationCode(request: ExchangeRequest): Promi
     expiresAt: expiryFrom(request.now, response.expires_in),
     scopes: response.scope === undefined ? [] : response.scope.split(" ").filter((s) => s !== ""),
   };
+}
+
+/**
+ * Redeem a sign-in authorization code for its ID token. Read it with
+ * readGoogleIdToken (identity.ts), which may trust it unsigned only because it came
+ * from here.
+ */
+export async function exchangeForIdToken(request: Omit<ExchangeRequest, "now">): Promise<string> {
+  return (await redeem(request, idTokenResponseSchema, "sign-in token exchange")).id_token;
 }

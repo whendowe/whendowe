@@ -31,3 +31,9 @@ export function base64ToBytes(value: string): Uint8Array {
 export function bytesToBase64Url(bytes: Uint8Array): string {
   return bytesToBase64(bytes).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
 }
+
+/** The inverse of bytesToBase64Url; padding is optional, as in a JWT. Throws on garbage. */
+export function base64UrlToBytes(value: string): Uint8Array {
+  const standard = value.replaceAll("-", "+").replaceAll("_", "/");
+  return base64ToBytes(standard + "=".repeat((4 - (standard.length % 4)) % 4));
+}

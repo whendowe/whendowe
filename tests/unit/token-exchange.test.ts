@@ -3,6 +3,7 @@ import { expect, it } from "vitest";
 import type { FetchLike, HttpRequestInit } from "../../src/oauth/http.js";
 import {
   exchangeAuthorizationCode,
+  exchangeForIdToken,
   GOOGLE_TOKEN_ENDPOINT,
 } from "../../src/oauth/token-exchange.js";
 
@@ -210,4 +211,39 @@ it("rejects an invalid injected clock", async () => {
       fetchImpl: impl,
     }),
   ).rejects.toThrow(/invalid `now`/);
+});
+
+// --- sign-in (§13 rc20) ---
+
+function exchangeForSignIn(fetchImpl: FetchLike) {
+  return exchangeForIdToken({
+    code: CODE,
+    codeVerifier: VERIFIER,
+    clientId: "cid.apps.googleusercontent.com",
+    clientSecret: CLIENT_SECRET,
+    redirectUri: "http://localhost:8080/oauth/google/callback",
+    fetchImpl,
+  });
+}
+
+it("redeems a sign-in code for its ID token, with no refresh token needed", async () => {
+  const { impl, calls } = fakeFetch(
+    200,
+    JSON.stringify({
+      access_token: "ya29.a",
+      id_token: "h.p.s",
+      expires_in: 3599,
+      token_type: "Bearer",
+    }),
+  );
+  expect(await exchangeForSignIn(impl)).toBe("h.p.s");
+  const sent = new URLSearchParams(calls[0]?.init.body ?? "");
+  expect(sent.get("code_verifier")).toBe(VERIFIER);
+  expect(sent.get("grant_type")).toBe("authorization_code");
+  expect(calls[0]?.url).toBe(GOOGLE_TOKEN_ENDPOINT);
+});
+
+it("refuses a sign-in response with no ID token", async () => {
+  const { impl } = fakeFetch(200, JSON.stringify({ access_token: "ya29.a", token_type: "Bearer" }));
+  await expect(exchangeForSignIn(impl)).rejects.toThrow();
 });

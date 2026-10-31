@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { createClient } from "@libsql/client";
 import { expect, it } from "vitest";
-import { base64ToBytes, bytesToBase64 } from "../../src/crypto/base64.js";
+import { base64ToBytes, bytesToBase64, bytesToBase64Url } from "../../src/crypto/base64.js";
 import { createTokenCipher, type TokenCipher } from "../../src/crypto/tokens.js";
 import { sqliteStoragePort } from "../../src/db/sqlite.js";
 import { UUIDV7_PATTERN } from "../../src/ids.js";
@@ -12,7 +12,7 @@ import type { FetchLike } from "../../src/oauth/http.js";
 import { GOOGLE_PRIMARY_CALENDAR_URL } from "../../src/oauth/primary-calendar.js";
 import { GOOGLE_TOKEN_ENDPOINT } from "../../src/oauth/token-exchange.js";
 import { createApp } from "../../src/web/app.js";
-import { CONFIRM_PATH, SIGN_IN_PATH } from "../../src/web/routes/auth.js";
+import { CONFIRM_PATH, GOOGLE_SIGN_IN_PATH, SIGN_IN_PATH } from "../../src/web/routes/auth.js";
 import { CALLBACK_PATH, CONNECT_PATH } from "../../src/web/routes/oauth.js";
 import { loadMigrationSql } from "../conftest.js";
 
@@ -113,12 +113,17 @@ function form(fields: Record<string, string>, cookie?: string): RequestInit {
   };
 }
 
-async function signIn(h: Pick<Harness, "app" | "sent">, email: string): Promise<Session> {
+/** Sign in by magic link; with `alongside`, in a browser that holds that cookie already. */
+async function signIn(
+  h: Pick<Harness, "app" | "sent">,
+  email: string,
+  alongside?: string,
+): Promise<Session> {
   await h.app.request(SIGN_IN_PATH, form({ email }));
   const t =
     new URL(/https?:\/\/\S+/.exec(h.sent.at(-1)?.text ?? "")?.[0] ?? "").searchParams.get("t") ??
     "";
-  const res = await h.app.request(CONFIRM_PATH, form({ t }));
+  const res = await h.app.request(CONFIRM_PATH, form({ t }, alongside));
   const cookie = (res.headers.get("set-cookie") ?? "").split(";")[0] ?? "";
   const home = await (await h.app.request("/", { headers: { cookie } })).text();
   return { cookie, csrf: /name="csrf" value="([^"]+)"/.exec(home)?.[1] ?? "" };
@@ -499,4 +504,208 @@ it("escapes a calendar summary containing markup", async () => {
   expect(html).not.toContain("<img src=x");
   expect(html).toContain("&lt;img");
   expect(html).not.toContain('onerror="alert(1)"');
+});
+
+// --- sign in with Google (§13 rc20) -------------------------------------------------
+
+const CLIENT_ID = "cid.apps.googleusercontent.com";
+const encode = (value: unknown) =>
+  bytesToBase64Url(new TextEncoder().encode(JSON.stringify(value)));
+
+/** An ID token as Google's token endpoint returns it, for the harness's client and clock. */
+function idTokenFor(email: string, claims: Record<string, unknown> = {}): string {
+  return [
+    encode({ alg: "RS256", kid: "k" }),
+    encode({
+      iss: "https://accounts.google.com",
+      aud: CLIENT_ID,
+      sub: "1234567890",
+      exp: Date.parse(NOW) / 1000 + 3600,
+      email,
+      email_verified: true,
+      ...claims,
+    }),
+    "signature",
+  ].join(".");
+}
+
+function signInFake(idToken: string): FetchLike {
+  return googleFake({
+    tokenBody: JSON.stringify({
+      access_token: ACCESS_TOKEN,
+      id_token: idToken,
+      expires_in: 3599,
+      token_type: "Bearer",
+      scope: "openid https://www.googleapis.com/auth/userinfo.email",
+    }),
+  });
+}
+
+/** Press "Sign in with Google", signed out unless a cookie is given. */
+async function startSignIn(h: Harness, cookie?: string) {
+  const res = await h.app.request(GOOGLE_SIGN_IN_PATH, form({}, cookie));
+  expect(res.status).toBe(303);
+  const flowCookie = (res.headers.get("set-cookie") ?? "").split(";")[0] ?? "";
+  const location = new URL(res.headers.get("location") ?? "");
+  return { cookie: flowCookie, state: location.searchParams.get("state") ?? "", location };
+}
+
+/** The session cookie a response installs, if any (the flow cookie is cleared beside it). */
+function sessionCookie(res: Response): string | null {
+  const set = res.headers.getSetCookie().find((c) => !c.startsWith(`${FLOW_COOKIE_NAME}=`));
+  return set === undefined ? null : (set.split(";")[0] ?? null);
+}
+
+async function people(h: Harness): Promise<string[]> {
+  const rows = await h.storage.query({
+    sql: "SELECT email FROM person ORDER BY email",
+    params: [],
+  });
+  return rows.map((r) => String(r.email));
+}
+
+async function finishSignIn(h: Harness, as: Session | null = null) {
+  const { cookie, state } = await startSignIn(h, as?.cookie);
+  return callback(h, `code=c&state=${encodeURIComponent(state)}`, cookie, as);
+}
+
+it("offers Google on the sign-in page only where Google is configured", async () => {
+  const h = await harness();
+  const page = await (await h.app.request(SIGN_IN_PATH)).text();
+  expect(page).toContain(`action="${GOOGLE_SIGN_IN_PATH}"`);
+  expect(page).toContain("Sign in with Google");
+  const noGoogle = createApp({
+    auth: {
+      storage: h.storage,
+      mail: { send: () => Promise.resolve() },
+      publicBaseUrl: "http://localhost:8080",
+      secureCookies: false,
+      now: () => new Date().toISOString(),
+    },
+  });
+  expect(await (await noGoogle.request(SIGN_IN_PATH)).text()).not.toContain(GOOGLE_SIGN_IN_PATH);
+  expect((await noGoogle.request(GOOGLE_SIGN_IN_PATH, form({}))).status).toBe(404);
+});
+
+it("asks Google for openid email only, signed out, and seals a sign-in flow", async () => {
+  const h = await harness();
+  const { cookie, location } = await startSignIn(h);
+  expect(`${location.origin}${location.pathname}`).toBe(GOOGLE_AUTHORIZE_ENDPOINT);
+  expect(location.searchParams.get("scope")).toBe("openid email");
+  expect(location.searchParams.get("prompt")).toBe("select_account");
+  expect(location.searchParams.get("access_type")).toBeNull();
+  // The same callback as the calendar: one redirect URI on the OAuth client.
+  expect(location.searchParams.get("redirect_uri")).toBe(REDIRECT_URI);
+  expect(cookie).toContain(FLOW_COOKIE_NAME);
+  expect((await h.app.request(GOOGLE_SIGN_IN_PATH)).status).toBe(404); // GET never mutates
+});
+
+it("lands on the person a magic link to the same address gives, and stores nothing of Google's", async () => {
+  // The harness owner signed in by link as owner@example.org: a Workspace account.
+  const h = await harness(signInFake(idTokenFor("Owner@Example.org", { hd: "example.org" })));
+  const res = await finishSignIn(h);
+  expect(res.status).toBe(303);
+  expect(res.headers.get("location")).toBe("/");
+  const cookie = sessionCookie(res);
+  expect(cookie).not.toBeNull();
+  const home = await (await h.app.request("/", { headers: { cookie: cookie ?? "" } })).text();
+  expect(home).toContain(OWNER_EMAIL);
+  expect(await people(h)).toEqual([OWNER_EMAIL]);
+  expect(await connections(h)).toHaveLength(0);
+  expect(res.headers.getSetCookie().some((c) => c.startsWith(`${FLOW_COOKIE_NAME}=;`))).toBe(true);
+});
+
+it("signs a new Gmail address up, and while signed in adds it as another account", async () => {
+  const h = await harness(signInFake(idTokenFor("ann@gmail.com")));
+  const res = await finishSignIn(h, h.session);
+  expect(res.status).toBe(303);
+  expect(await people(h)).toEqual(["ann@gmail.com", OWNER_EMAIL]);
+  const home = await (
+    await h.app.request("/", { headers: { cookie: sessionCookie(res) ?? "" } })
+  ).text();
+  // Ann is active; the owner is still on this browser, one switch away.
+  expect(home).toContain("ann@gmail.com");
+  expect(home).toContain(OWNER_EMAIL);
+});
+
+it("offers the email link for an address Google doesn't host, and signs no one in", async () => {
+  const h = await harness(signInFake(idTokenFor("ann@old-job.example")));
+  const res = await finishSignIn(h);
+  expect(res.status).toBe(400);
+  const text = await res.text();
+  expect(text).toContain(`action="${SIGN_IN_PATH}"`);
+  expect(text).toContain('name="email" value="ann@old-job.example"');
+  expect(sessionCookie(res)).toBeNull();
+  expect(await people(h)).toEqual([OWNER_EMAIL]);
+});
+
+it("refuses an unverified address, and a token for another client", async () => {
+  for (const [token, status] of [
+    [idTokenFor("ann@gmail.com", { email_verified: false }), 400],
+    [idTokenFor("ann@gmail.com", { aud: "another-client" }), 502],
+  ] as const) {
+    const h = await harness(signInFake(token));
+    const res = await finishSignIn(h);
+    expect(res.status).toBe(status);
+    expect(sessionCookie(res)).toBeNull();
+    expect(await people(h)).toEqual([OWNER_EMAIL]);
+  }
+});
+
+it("refuses a state that doesn't match (login CSRF), signing no one in", async () => {
+  const h = await harness(signInFake(idTokenFor("attacker@gmail.com")));
+  const { cookie } = await startSignIn(h);
+  const res = await callback(h, "code=attacker-code&state=wrong", cookie, null);
+  expect(res.status).toBe(400);
+  expect(sessionCookie(res)).toBeNull();
+  expect(await people(h)).toEqual([OWNER_EMAIL]);
+});
+
+it("a sign-in flow never connects a calendar, and a connect flow never signs anyone in", async () => {
+  // Google's answer carries everything either flow could want.
+  const h = await harness(
+    googleFake({
+      tokenBody: JSON.stringify({
+        access_token: ACCESS_TOKEN,
+        refresh_token: REFRESH_TOKEN,
+        id_token: idTokenFor("ann@gmail.com"),
+        expires_in: 3599,
+        token_type: "Bearer",
+      }),
+    }),
+  );
+  await finishSignIn(h, h.session);
+  expect(await connections(h)).toHaveLength(0);
+
+  const connect = await startFlow(h);
+  const res = await callback(
+    h,
+    `code=c&state=${encodeURIComponent(connect.state)}`,
+    connect.cookie,
+    null,
+  );
+  expect(res.status).toBe(403);
+  expect(sessionCookie(res)).toBeNull();
+});
+
+it("a cancelled sign-in says why Google may refuse, and points to the email link", async () => {
+  const h = await harness();
+  const { cookie } = await startSignIn(h);
+  const res = await callback(h, "error=access_denied", cookie, null);
+  expect(res.status).toBe(400);
+  const text = await res.text();
+  expect(text).toContain("access_denied");
+  expect(text).toContain("testers");
+  expect(text).toContain(`href="${SIGN_IN_PATH}"`);
+});
+
+it("refuses a fifth account before anyone is created", async () => {
+  const h = await harness(signInFake(idTokenFor("fifth@gmail.com")));
+  let browser = h.session;
+  for (const email of ["b@example.org", "c@example.org", "d@example.org"]) {
+    browser = await signIn(h, email, browser.cookie);
+  }
+  const res = await finishSignIn(h, browser);
+  expect(res.status).toBe(409);
+  expect(await people(h)).not.toContain("fifth@gmail.com");
 });

@@ -22,6 +22,10 @@ import { assertValidVerifier } from "./pkce.js";
 //
 // The cookie is also the attacker-influenced input on the callback path, so the
 // decrypted payload is validated with zod before anything trusts a field of it.
+//
+// It names the flow's PURPOSE (§13 rc20): calendar connect and Google sign-in share
+// one callback, and the sealed purpose is what tells them apart. It can't be changed
+// without the key, so neither flow's callback can be replayed as the other's.
 
 export const FLOW_COOKIE_NAME = "wdw_oauth_flow";
 
@@ -34,14 +38,23 @@ const COOKIE_PATH = "/oauth";
 /** Tolerance for a client whose clock runs slightly ahead of the server's. */
 const CLOCK_SKEW_TOLERANCE_SECONDS = 60;
 
-const flowPayloadSchema = z.object({
+const flowFields = {
   state: z.string().min(1),
   verifier: z.string().min(1),
-  /** The signed-in person who started the flow; the callback requires the same one. */
-  personId: z.string().min(1),
   /** Seconds since the epoch, for a server-side expiry check. */
   issuedAt: z.number().int().nonnegative(),
-});
+};
+
+const flowPayloadSchema = z.discriminatedUnion("purpose", [
+  z.object({
+    ...flowFields,
+    purpose: z.literal("connect"),
+    /** The signed-in person who started the flow; the callback requires the same one. */
+    personId: z.string().min(1),
+  }),
+  // Nobody need be signed in to start: the person is whoever Google says, at the end.
+  z.object({ ...flowFields, purpose: z.literal("sign-in") }),
+]);
 
 export type OAuthFlow = z.infer<typeof flowPayloadSchema>;
 

@@ -28,8 +28,11 @@ async function cipher(): Promise<TokenCipher> {
   return createTokenCipher([KEY_1], 1);
 }
 
-function flow(overrides: Partial<OAuthFlow> = {}): OAuthFlow {
+type ConnectFlow = Extract<OAuthFlow, { purpose: "connect" }>;
+
+function flow(overrides: Partial<ConnectFlow> = {}): ConnectFlow {
   return {
+    purpose: "connect",
     state: createState(),
     verifier: createCodeVerifier(),
     personId: "person-1",
@@ -114,10 +117,35 @@ it("rejects a payload whose verifier violates RFC 7636", async () => {
   const c = await cipher();
   const sealed = encodeURIComponent(
     await c.encrypt(
-      JSON.stringify({ state: "s", verifier: "too-short", personId: "p", issuedAt: ISSUED_AT }),
+      JSON.stringify({
+        purpose: "connect",
+        state: "s",
+        verifier: "too-short",
+        personId: "p",
+        issuedAt: ISSUED_AT,
+      }),
     ),
   );
   await expect(unsealFlow(c, sealed, ISSUED_AT)).rejects.toThrow(/43–128 characters/);
+});
+
+// --- purpose (§13 rc20): one callback, two flows ---
+
+it("round-trips a sign-in flow, which names no person", async () => {
+  const c = await cipher();
+  const { personId: _, ...rest } = flow();
+  const original: OAuthFlow = { ...rest, purpose: "sign-in" };
+  expect(await unsealFlow(c, await sealFlow(c, original), ISSUED_AT)).toEqual(original);
+});
+
+it("rejects a connect flow without its person, and a flow with no purpose", async () => {
+  const c = await cipher();
+  const { personId: _, ...noPerson } = flow();
+  const { purpose: __, ...noPurpose } = flow();
+  for (const payload of [noPerson, noPurpose, { ...noPurpose, purpose: "something-else" }]) {
+    const sealed = encodeURIComponent(await c.encrypt(JSON.stringify(payload)));
+    await expect(unsealFlow(c, sealed, ISSUED_AT)).rejects.toThrow();
+  }
 });
 
 // --- expiry ---

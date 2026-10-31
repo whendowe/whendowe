@@ -34,6 +34,9 @@ import {
 //   POST /auth/sign-out-all  sign out of every account on this browser
 //   POST /auth/switch        make another of this browser's accounts active
 //
+// "Sign in with Google" (DESIGN §13 rc20) starts and ends in routes/oauth.ts, and ends
+// exactly where confirming a link does: the same person, added the same way.
+//
 // A browser holds up to four accounts (DESIGN §13 rc18). Signing in while signed in
 // adds one; switching only reorders the cookie and writes nothing to storage. The
 // three POSTs above are CSRF-checked against the active account.
@@ -52,6 +55,8 @@ import {
 
 export const SIGN_IN_PATH = "/auth/sign-in";
 export const CONFIRM_PATH = "/auth/confirm";
+/** Sign in with Google (§13 rc20); the flow itself lives with the OAuth routes. */
+export const GOOGLE_SIGN_IN_PATH = "/oauth/google/sign-in";
 export { SIGN_OUT_ALL_PATH, SIGN_OUT_PATH, SWITCH_PATH };
 
 export interface AuthDeps {
@@ -73,8 +78,18 @@ function sensitive(c: Context): void {
   c.header("Cache-Control", "no-store");
 }
 
+export interface SignInOptions {
+  /** Offer "Sign in with Google": the instance has Google credentials. */
+  readonly google: boolean;
+}
+
 /** The form; signed in, it adds another account rather than replacing this one. */
-function signInForm(email: string, error: string | null, signedInAs: string | null) {
+function signInForm(
+  email: string,
+  error: string | null,
+  signedInAs: string | null,
+  options: SignInOptions,
+) {
   return html`${
     signedInAs === null
       ? html`<h1>Sign in</h1>
@@ -87,10 +102,19 @@ ${error === null ? "" : html`<p class="error">${error}</p>`}
   <label for="email">Email address</label>
   <input id="email" name="email" type="email" autocomplete="email" required value="${email}" />
   <p><button type="submit">Email me a sign-in link</button></p>
-</form>`;
+</form>
+${
+  options.google
+    ? html`<p class="muted">or</p>
+<form method="post" action="${GOOGLE_SIGN_IN_PATH}">
+  <p><button type="submit">Sign in with Google</button></p>
+</form>`
+    : ""
+}`;
 }
 
-function full(c: Context<AppEnv>) {
+/** A browser already holds four accounts (§13 rc18); shared with Google sign-in. */
+export function tooManyAccounts(c: Context<AppEnv>) {
   return c.html(
     page(
       c,
@@ -112,10 +136,16 @@ function expiredPage(c: Context<AppEnv>) {
   );
 }
 
-export function registerAuthRoutes(app: Hono<AppEnv>, deps: AuthDeps): void {
+export function registerAuthRoutes(
+  app: Hono<AppEnv>,
+  deps: AuthDeps,
+  options: SignInOptions = { google: false },
+): void {
   app.get(SIGN_IN_PATH, (c) => {
-    if (!roomFor(c, null)) return full(c);
-    return c.html(page(c, "Sign in", signInForm("", null, c.get("signedIn")?.email ?? null)));
+    if (!roomFor(c, null)) return tooManyAccounts(c);
+    return c.html(
+      page(c, "Sign in", signInForm("", null, c.get("signedIn")?.email ?? null, options)),
+    );
   });
 
   app.post(SIGN_IN_PATH, async (c) => {
@@ -134,6 +164,7 @@ export function registerAuthRoutes(app: Hono<AppEnv>, deps: AuthDeps): void {
             raw.slice(0, 200),
             "That doesn't look like an email address.",
             c.get("signedIn")?.email ?? null,
+            options,
           ),
         ),
         400,
@@ -232,13 +263,13 @@ export function registerAuthRoutes(app: Hono<AppEnv>, deps: AuthDeps): void {
     const peeked = token.success ? await peekLoginToken(deps.storage, token.data, { now }) : null;
     if (peeked !== null) {
       const known = await findPersonByEmail(deps.storage, peeked);
-      if (!roomFor(c, known?.id ?? null)) return full(c);
+      if (!roomFor(c, known?.id ?? null)) return tooManyAccounts(c);
     }
     const email = token.success ? await consumeLoginToken(deps.storage, token.data, { now }) : null;
     if (email === null) return c.html(expiredPage(c), 400);
 
     const person = await findOrCreatePerson(deps.storage, email, { now });
-    if (!(await signInAs(c, deps, person.id))) return full(c);
+    if (!(await signInAs(c, deps, person.id))) return tooManyAccounts(c);
     return c.redirect("/", 303);
   });
 

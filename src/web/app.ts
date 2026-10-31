@@ -78,13 +78,13 @@ ${connect}`,
   app.get("/healthz", (c) => c.json({ ok: true }));
 
   if (auth !== undefined) {
-    registerAuthRoutes(app, auth);
+    registerAuthRoutes(app, auth, { google: oauth !== undefined });
     registerGroupRoutes(app, auth);
     registerEventRoutes(app, auth);
     registerPlanRoutes(app, auth);
     registerRespondRoutes(app, auth);
   }
-  if (oauth !== undefined) registerOAuthRoutes(app, oauth);
+  if (oauth !== undefined) registerOAuthRoutes(app, oauth, auth);
 
   return app;
 }
