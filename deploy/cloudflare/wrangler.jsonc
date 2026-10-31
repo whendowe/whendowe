@@ -43,6 +43,10 @@
     "crons": ["* * * * *"]
   },
   "observability": {
-    "enabled": true
+    "enabled": true,
+    // DESIGN §13 rc21: invocation logs record each request's URL — sign-in and answer
+    // links carry their token in it — and client metadata. The app's own structured
+    // lines never do, so those are all that is kept.
+    "logs": { "invocation_logs": false }
   }
 }

@@ -24,6 +24,16 @@ import type { MailMessage, MailPort } from "./port.js";
 export interface MailCap {
   readonly daily: number;
   readonly monthly: number;
+  /**
+   * Of the daily cap, how many may be anonymous (sign-in links). Defaults to a
+   * quarter of it: the other three quarters are always left for mail a signed-in
+   * person caused (DESIGN §13 rc21).
+   */
+  readonly anonymousDaily?: number;
+}
+
+export function anonymousDailyOf(cap: MailCap): number {
+  return cap.anonymousDaily ?? Math.floor(cap.daily / 4);
 }
 
 /** Thrown when either cap is reached; the message is refused, never queued. */
@@ -40,21 +50,39 @@ export interface CappedMailOptions {
   readonly now: () => string;
 }
 
-/** Reserve one send slot; true when reserved, false when a cap is reached. */
+/**
+ * Reserve one send slot; true when reserved, false when a cap is reached. An
+ * anonymous send must also fit the day's anonymous share, in the same statement.
+ */
 export async function reserveMailSlot(
   storage: StoragePort,
   cap: MailCap,
   nowIso: string,
+  anonymous = false,
 ): Promise<boolean> {
   const day = nowIso.slice(0, 10);
   const month = nowIso.slice(0, 7);
+  const flag = anonymous ? 1 : 0;
   const rows = await storage.query({
-    sql: `INSERT INTO mail_send (day, month, created_at)
-          SELECT ?, ?, ?
+    sql: `INSERT INTO mail_send (day, month, created_at, anonymous)
+          SELECT ?, ?, ?, ?
           WHERE (SELECT count(*) FROM mail_send WHERE day = ?) < ?
             AND (SELECT count(*) FROM mail_send WHERE month = ?) < ?
+            AND (? = 0 OR (SELECT count(*) FROM mail_send WHERE day = ? AND anonymous = 1) < ?)
           RETURNING id`,
-    params: [day, month, nowIso, day, cap.daily, month, cap.monthly],
+    params: [
+      day,
+      month,
+      nowIso,
+      flag,
+      day,
+      cap.daily,
+      month,
+      cap.monthly,
+      flag,
+      day,
+      anonymousDailyOf(cap),
+    ],
   });
   return rows.length > 0;
 }
@@ -73,7 +101,7 @@ export function cappedMailPort(
   }
   return {
     async send(message: MailMessage): Promise<void> {
-      if (!(await reserveMailSlot(storage, cap, options.now()))) {
+      if (!(await reserveMailSlot(storage, cap, options.now(), message.anonymous === true))) {
         throw new MailCapReachedError(cap);
       }
       await inner.send(message);

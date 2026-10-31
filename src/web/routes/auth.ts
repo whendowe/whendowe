@@ -192,6 +192,8 @@ export function registerAuthRoutes(
       await deps.mail.send({
         to: email,
         subject: "Your WhenDoWe sign-in link",
+        // Anyone can ask for one, signed in or not: it draws on the anonymous share.
+        anonymous: true,
         text: [
           "Sign in to WhenDoWe:",
           "",

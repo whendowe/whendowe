@@ -8,6 +8,11 @@ export interface MailMessage {
   readonly subject: string;
   readonly text: string;
   readonly html?: string;
+  /**
+   * Caused by someone with no session: a sign-in link. Counted against the cap's
+   * anonymous share as well as the whole (DESIGN §13 rc21).
+   */
+  readonly anonymous?: boolean;
 }
 
 export interface MailPort {

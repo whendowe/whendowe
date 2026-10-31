@@ -78,7 +78,7 @@ import {
   type RRuleSubset,
   upcomingOccurrences,
 } from "../../recurrence.js";
-import { type Html, html } from "../layout.js";
+import { type Html, html, ZONE_GUESS } from "../layout.js";
 import { pickerAssets } from "../picker.js";
 import {
   type AppEnv,
@@ -468,11 +468,7 @@ function eventForm(
   ${people}
   <p><button type="submit">${submit}</button></p>
 </form>
-<script>
-  // Progressive enhancement only: suggest the browser's own zone for a new event.
-  var tz = document.getElementById("tzid");
-  if (tz && !tz.value) tz.value = Intl.DateTimeFormat().resolvedOptions().timeZone;
-</script>
+${ZONE_GUESS}
 ${pickerAssets()}`;
 }
 
@@ -856,10 +852,7 @@ function pollForm(
   ${people}
   <p><button type="submit">Start the poll</button></p>
 </form>
-<script>
-  var tz = document.getElementById("tzid");
-  if (tz && !tz.value) tz.value = Intl.DateTimeFormat().resolvedOptions().timeZone;
-</script>
+${ZONE_GUESS}
 ${pickerAssets()}`;
 }
 

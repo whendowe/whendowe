@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+import { META_CONTENT_SECURITY_POLICY } from "./csp.js";
 import { escapeHtml } from "./escape.js";
 
 // The page shell, and a template tag that makes escaping the DEFAULT (§13).
@@ -99,12 +100,22 @@ function accountHeader(v: Viewer): Html {
 </header>`;
 }
 
+/**
+ * Progressive enhancement only: suggest the browser's own zone for a new event, poll or
+ * thread. One fixed script, so the CSP allows it by hash (csp.ts).
+ */
+export const ZONE_GUESS = html`<script>
+  var tz = document.getElementById("tzid");
+  if (tz && !tz.value) tz.value = Intl.DateTimeFormat().resolvedOptions().timeZone;
+</script>`;
+
 export function renderPage(title: string, body: Html, viewer: Viewer | null): string {
   return html`<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta http-equiv="Content-Security-Policy" content="${META_CONTENT_SECURITY_POLICY}" />
 <title>${title} · WhenDoWe</title>
 <style>
   :root { color-scheme: light dark; }

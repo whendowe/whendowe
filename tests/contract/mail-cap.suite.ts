@@ -41,6 +41,26 @@ export function runMailCapContract(makePort: () => Promise<StoragePort>): void {
       ).toBe(false);
     });
 
+    it("anonymous sends stop at their share, leaving the rest for everyone else", async () => {
+      // rc21: a script asking for sign-in links can't spend the whole day.
+      const port = await makePort();
+      const cap = { daily: 4, monthly: 100, anonymousDaily: 1 };
+      const at = "2101-06-10T12:00:00.000Z";
+      expect(await reserveMailSlot(port, cap, at, true)).toBe(true);
+      expect(await reserveMailSlot(port, cap, at, true)).toBe(false);
+      expect(await reserveMailSlot(port, cap, at)).toBe(true);
+      expect(await reserveMailSlot(port, cap, at)).toBe(true);
+      expect(await reserveMailSlot(port, cap, at)).toBe(true);
+      expect(await reserveMailSlot(port, cap, at)).toBe(false);
+      // The default share is a quarter of the day.
+      const quarter = { daily: 8, monthly: 100 };
+      const day = "2101-06-11T12:00:00.000Z";
+      const anon = await Promise.all(
+        Array.from({ length: 5 }, () => reserveMailSlot(port, quarter, day, true)),
+      );
+      expect(anon.filter(Boolean)).toHaveLength(2);
+    });
+
     it("concurrent reservations never exceed the cap", async () => {
       // 20 simultaneous attempts against a cap of 5: exactly 5 may win. With a
       // count-then-insert design every one of them could see room and send. This

@@ -1,0 +1,1 @@
+ALTER TABLE `mail_send` ADD `anonymous` integer DEFAULT 0 NOT NULL;

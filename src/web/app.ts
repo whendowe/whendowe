@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { Hono } from "hono";
+import { securityHeaders } from "./csp.js";
 import { html } from "./layout.js";
 import { type AuthDeps, registerAuthRoutes, SIGN_IN_PATH } from "./routes/auth.js";
 import { EVENTS_PATH, POLLS_PATH, registerEventRoutes, yourEvents } from "./routes/events.js";
@@ -23,6 +24,8 @@ export interface AppOptions {
 export function createApp(options: AppOptions = {}): Hono<AppEnv> {
   const app = new Hono<AppEnv>();
   const { auth, oauth } = options;
+  // First, so every response — errors and redirects included — carries them (§13 rc21).
+  app.use(securityHeaders());
 
   if (auth === undefined) {
     app.use(async (c, next) => {

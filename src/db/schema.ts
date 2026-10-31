@@ -219,6 +219,10 @@ export const mailSend = sqliteTable(
     day: text("day").notNull(), // YYYY-MM-DD, UTC
     month: text("month").notNull(), // YYYY-MM, UTC
     createdAt: text("created_at").notNull(),
+    // rc21: 1 for mail that nobody signed in caused — a sign-in link. Those draw on a
+    // smaller share of the daily cap of their own (DESIGN §13), so a script asking for
+    // links to many addresses can't stop invites and answer links for the day.
+    anonymous: integer("anonymous").notNull().default(0),
   },
   (t) => [index("mail_send_day_idx").on(t.day), index("mail_send_month_idx").on(t.month)],
 );

@@ -57,7 +57,7 @@ import {
   whenText,
   whoText,
 } from "../../plans/weeks.js";
-import { type Html, html } from "../layout.js";
+import { type Html, html, ZONE_GUESS } from "../layout.js";
 import { PLAN_STYLE, planAssets } from "../plan-editor.js";
 import {
   type AppEnv,
@@ -860,10 +860,7 @@ ${
 </fieldset>
 <div class="row"><button class="primary" type="submit">Start</button><a class="btn" href="${PLANS_PATH}">Cancel</a></div>
 </form>
-<script>
-  var tz = document.getElementById("tzid");
-  if (tz && !tz.value) tz.value = Intl.DateTimeFormat().resolvedOptions().timeZone;
-</script></div>`;
+${ZONE_GUESS}</div>`;
 }
 
 /** Home's plans section: the threads you plan in, the ones waiting for you first. */
