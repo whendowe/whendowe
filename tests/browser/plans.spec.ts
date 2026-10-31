@@ -138,7 +138,13 @@ test.describe("the week-row editor", () => {
     await expect(cell(page, "2026-11-15")).toHaveClass(/grab/);
     await expect(page.locator(".rib.sel .grip.e")).toHaveClass(/on/);
     await expect(page.locator("[data-hint]")).toContainText("Picked up its last day");
+    // The held end pulses; reduced motion stops it (by the page's own CSS), and the tapped
+    // day's focus and the pointer leave, so the image never depends on timing.
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await page.evaluate("document.activeElement && document.activeElement.blur()");
+    await page.mouse.move(0, 0);
     await expect(page).toHaveScreenshot("plan-draft-held.png");
+    await page.emulateMedia({ reducedMotion: "no-preference" });
     await cell(page, "2026-11-15").click(); // put back
     await expect(page.locator(".dh.grab")).toHaveCount(0);
     expect(await sent(page)).toEqual([]);
