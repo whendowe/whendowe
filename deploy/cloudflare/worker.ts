@@ -8,6 +8,8 @@ import { cloudflareBindingMailPort, type EmailBindingLike } from "../../src/mail
 import { consoleMailPort } from "../../src/mail/console.js";
 import { disabledMailPort, type MailPort } from "../../src/mail/port.js";
 import { eraseDue, type RevokeCalendars } from "../../src/privacy/erasure.js";
+import { retentionPass } from "../../src/privacy/purge.js";
+import { isRetentionMinute } from "../../src/privacy/retention.js";
 import { calendarRevoker, createApp } from "../../src/web/app.js";
 import { buildOAuthDeps } from "../../src/web/routes/oauth-deps.js";
 import type { AppEnv } from "../../src/web/session.js";
@@ -122,12 +124,18 @@ export default {
     return app.fetch(request, env, ctx);
   },
 
-  async scheduled(_controller: ScheduledController, env: Env, _ctx: ExecutionContext) {
-    // The purge pass (§10 rc21/rc22): accounts whose 7 days are over. Bounded per run;
-    // with nothing due, one read and no writes (§16).
+  async scheduled(controller: ScheduledController, env: Env, _ctx: ExecutionContext) {
+    // The purge pass (§10 rc21/rc22): accounts whose 7 days are over, each minute, and
+    // retention once an hour. Bounded per run; with nothing due, reads only (§16).
     const { storage, revokeCalendars } = await getBuilt(env);
-    const erased = await eraseDue(storage, { now: now(), revokeCalendars });
+    const at = new Date(controller.scheduledTime).toISOString();
+    const erased = await eraseDue(storage, { now: at, revokeCalendars });
     if (erased > 0) console.log(JSON.stringify({ reason: "accounts_erased", count: erased }));
+    if (isRetentionMinute(at)) {
+      const r = await retentionPass(storage, at);
+      if (r.events + r.plans + r.sweeps > 0)
+        console.log(JSON.stringify({ reason: "retention_purged", ...r }));
+    }
     // M2: fan out to one ConnectionDO per active calendar_connection (§11).
     // Cron is the only scheduler of regular ticks — never per-tick DO alarms (§16).
   },

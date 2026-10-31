@@ -9,6 +9,8 @@ import { cloudflareRestMailPort } from "../../src/mail/cloudflare.js";
 import { consoleMailPort } from "../../src/mail/console.js";
 import { disabledMailPort, type MailPort } from "../../src/mail/port.js";
 import { eraseDue } from "../../src/privacy/erasure.js";
+import { retentionPass } from "../../src/privacy/purge.js";
+import { isRetentionMinute } from "../../src/privacy/retention.js";
 import { calendarRevoker, createApp } from "../../src/web/app.js";
 import type { OAuthRouteDeps } from "../../src/web/routes/oauth.js";
 import { buildOAuthDeps } from "../../src/web/routes/oauth-deps.js";
@@ -72,14 +74,20 @@ const app = createApp({
   oauth,
 });
 
-// The purge pass (§10 rc21/rc22), each minute like the Worker's cron. Ticks never
+// The purge pass (§10 rc21/rc22), each minute like the Worker's cron; retention hourly. Ticks never
 // overlap: the next is scheduled when this one is done.
 const PASS_INTERVAL_MS = 60_000;
 const revokeCalendars = calendarRevoker(oauth);
 async function purgePass(): Promise<void> {
   try {
-    const erased = await eraseDue(storage, { now: now(), revokeCalendars });
+    const at = now();
+    const erased = await eraseDue(storage, { now: at, revokeCalendars });
     if (erased > 0) console.log(JSON.stringify({ reason: "accounts_erased", count: erased }));
+    if (isRetentionMinute(at)) {
+      const r = await retentionPass(storage, at);
+      if (r.events + r.plans + r.sweeps > 0)
+        console.log(JSON.stringify({ reason: "retention_purged", ...r }));
+    }
   } catch (error) {
     console.error(JSON.stringify({ reason: "purge_pass_failed", error: String(error) }));
   }

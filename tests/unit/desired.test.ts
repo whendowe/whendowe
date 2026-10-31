@@ -25,6 +25,7 @@ function event(overrides: Partial<CanonicalEventRow> = {}): CanonicalEventRow {
     groupId: null,
     createdAt: NOW,
     updatedAt: NOW,
+    retainDays: 365,
     ...overrides,
   };
 }

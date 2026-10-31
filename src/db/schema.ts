@@ -74,6 +74,8 @@ export const canonicalEvent = sqliteTable(
     groupId: text("group_id").references(() => personGroup.id, { onDelete: "set null" }),
     createdAt: text("created_at").notNull(),
     updatedAt: text("updated_at").notNull(),
+    // rc21: purged this many days after it is past (§10 *Retention*); copied from its group.
+    retainDays: integer("retain_days").notNull().default(365),
   },
   (t) => [
     index("canonical_event_group_idx").on(t.groupId),
@@ -242,6 +244,8 @@ export const personGroup = sqliteTable("person_group", {
     .notNull()
     .references(() => person.id),
   createdAt: text("created_at").notNull(),
+  // rc21: how long its events are kept once past (§10 *Retention*); events copy it.
+  retainDays: integer("retain_days").notNull().default(365),
 });
 
 export const groupMember = sqliteTable(

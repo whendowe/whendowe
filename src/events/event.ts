@@ -310,8 +310,10 @@ export async function createEventWith(
     {
       sql: `INSERT INTO canonical_event
               (id, revision, origin, owner_id, group_id, title, description, location, all_day,
-               start_local, end_local, tzid, rrule, status, created_at, updated_at)
-            VALUES (?, 1, 'user_edit', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+               start_local, end_local, tzid, rrule, status, created_at, updated_at, retain_days)
+            VALUES (?, 1, 'user_edit', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    -- Kept as long as its group keeps events (§10 rc21 *Retention*).
+                    coalesce((SELECT retain_days FROM person_group WHERE id = ?), 365))`,
       params: [
         id,
         input.creatorId,
@@ -327,6 +329,7 @@ export async function createEventWith(
         status,
         input.now,
         input.now,
+        input.group?.group.id ?? null,
       ],
     },
     {
