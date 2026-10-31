@@ -1,6 +1,6 @@
 # WhenDoWe — User Workflows & Stories
 
-> **Status:** v0.8 (US-19–US-20 and a US-12 amendment: handles instead of addresses, leaving and deleting, an account that goes leaves "a former member" behind; owner decisions 2026-10-31, folded into DESIGN rc21 §10 *Privacy basics*) (v0.7: §3 *Plan* and US-16–US-18: several events proposed, compared and accepted as one; owner decisions from the plans prototype, 2026-10-25…30; folded into DESIGN rc19 §10 *Plans*) (v0.6: renamed to WhenDoWe) (v0.5 + delta 10 aligned to the DESIGN §6 intersection contract: HTTPS mail port, no SMTP). Companion to `DESIGN.md`.
+> **Status:** v0.9 (US-20: deleting an account waits 7 days, with an email to keep it or delete it at once; DESIGN rc22) (v0.8: US-19–US-20 and a US-12 amendment: handles instead of addresses, leaving and deleting, an account that goes leaves "a former member" behind; owner decisions 2026-10-31, folded into DESIGN rc21 §10 *Privacy basics*) (v0.7: §3 *Plan* and US-16–US-18: several events proposed, compared and accepted as one; owner decisions from the plans prototype, 2026-10-25…30; folded into DESIGN rc19 §10 *Plans*) (v0.6: renamed to WhenDoWe) (v0.5 + delta 10 aligned to the DESIGN §6 intersection contract: HTTPS mail port, no SMTP). Companion to `DESIGN.md`.
 > **Audience:** the owner (product decisions) and the coding agent (what M3+ must actually do for people).
 > **Relationship to DESIGN.md:** DESIGN.md defines the sync core (canonical truth, projections, reconcile). This document defines *who* uses it, *what they're trying to do*, and which design seams each story lands on. §9 lists the schema/scope deltas these stories imply, to be folded back into DESIGN.md once accepted.
 
@@ -168,9 +168,9 @@ Lena joins the swing scene's practice group from her personal address and the ro
 **Maps to:** DESIGN rc21 §10 *Privacy basics*. Phase: rc21 R1.
 
 ### US-20 — Leaving without a trace (rc21)
-Tom stops going to the rope jams. He leaves the group, and his RSVPs and notes there go with him. A year later the old jams themselves are gone: the group keeps 12 months. Then he deletes his account. He is signed out everywhere, his address is no longer anywhere in WhenDoWe, and in the history of the events he helped plan he is now "a former member" — not the same former member in each one. A month later, not even the backup holds him.
+Tom stops going to the rope jams. He leaves the group, and his RSVPs and notes there go with him. A year later the old jams themselves are gone: the group keeps 12 months. Then he deletes his account. He is signed out everywhere, and an email tells him it goes in 7 days, with a link to keep it or to delete it now; he clicks *delete it now*. His address is no longer anywhere in WhenDoWe, and in the history of the events he helped plan he is now "a former member" — not the same former member in each one. A month later, not even the backup holds him.
 Separately, Ana was added by email to a picnic by someone she doesn't know. The email tells her who added her and why she got it; one link stops all further mail to her address and deletes it.
-**Done when:** leave, delete an event (cancel first if it's upcoming), garbage collection of events nobody can edit, account deletion with per-event tombstones, export, retention and the opt-out link each have a test that checks nothing of the person is left in storage; a restore re-applies the erasure ledger.
+**Done when:** leave, delete an event (cancel first if it's upcoming), garbage collection of events nobody can edit, account deletion with per-event tombstones (after 7 days, or at once from the emailed link; kept if he asks), export, retention and the opt-out link each have a test that checks nothing of the person is left in storage; a restore re-applies the erasure ledger.
 **Maps to:** DESIGN rc21 §10 *Privacy basics*, §13. Phase: rc21 R2–R5.
 
 ### US-12 — Someone leaves
