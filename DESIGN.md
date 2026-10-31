@@ -1,6 +1,6 @@
 # WhenDoWe — Design & Agent Bootstrap Brief
 
-> **Status:** v1.0-rc18 (rc17 + §13: several accounts signed in on one browser — the session cookie carries up to four sessions, every page's header names the account in use, and switching is one POST that writes nothing to storage; accounts are never linked on the server; a form from a stale tab can't act as the wrong account; a page another signed-in account can see offers the switch, without revealing anything to an account set that can't; owner decision after staging testing with three addresses, whendowe#54) (v1.0-rc17: rc16 + §9: property tests for the UI — Hegel properties over the picker's shipped logic, including that whatever it writes the server's own parser accepts unchanged, and a Hegel state machine that drives the real picker in Chromium against a model; the pages' scripts get coverage measured in the browser tier, mapped back to `picker.ts`, with ratchet-only thresholds; and CODEOWNERS widened to the browser tier and the coverage thresholds, which now help define green) (v1.0-rc16: rc15 + §9: a browser test tier — Playwright drives the pages' own scripts in Chromium, at phone width and with JavaScript off, and compares each page against committed reference screenshots so a PR shows its visual diff; its own command and CI job, and part of the Definition of Done) (v1.0-rc15: rc14 + §10: events are center-stage and groups are an address book — an event names its people directly, people can be added to and removed from an existing event, joining a group never adds you to its earlier events, and home is "your events"; owner decision after the first staging use) (v1.0-rc14: rc13 + §18: the Worker bundle is a published artifact of its own — an OCI artifact on ghcr carrying the bundled script, the migrations it expects and the wrangler template, pinned by digest, so the deployments repo never needs product source; and a pre-Workers-Paid instance mode in §13/§18 — mail only to verified destination addresses via Email Routing on the `notify.` subdomain, enforced by the binding's recipient allowlist) (v1.0-rc13: rc12 + MVP-2 slice 2E planned in §10: response requests — accept/acknowledge states, lifecycle as built, material change = time/date/location; link actions name the phase; `event_change_proposal` for the propose tier with §8 `proposal.ts`; whole-series RRULE; history attribution shown to every tier by owner decision) (v1.0-rc12: rc11 + §10: responses — votes, attendance, feedback — are attributed rows of their own, not change_log rows, because change_log's revision key serialises edits; `event_feedback` and `response_token` sketched; §13 token links as built: re-answerable vote/attend links, 14-day expiry, rotate-on-resend by replacement, no session) (v1.0-rc11: rc10 + MVP-2 layout in §8 — `src/events/`, `routes/events.ts`, `routes/respond.ts`; the event lifecycle as a single status column in §10; and §16's one recorded exception: migration 0005 rebuilds `canonical_event`, allowed only because nothing has ever been deployed) (v1.0-rc10: rc9 + §8 entries for `src/web/layout.ts` and `src/web/session.ts`, recorded before MVP-1 slice C) (v1.0-rc9: rc8 + mail provider decided: Cloudflare Email Service, sending from `notify.whendowe.org`, behind an app-enforced hard cap — §8 entries for `src/mail/cloudflare.ts` and `src/mail/capped.ts`) (v1.0-rc8: rc7 + §8 layout for MVP-1, recorded before the code: `src/people/`, `src/ids.ts`, `src/mail/console.ts`, `src/web/routes/{auth,groups}.ts`) (v1.0-rc7: rc6 + roadmap re-sequenced people-first after an owner review: Ring 0 widened from "the household" to small groups of people who know each other; two-way Google sync is MVP scope; edit tier split from visibility tier; WORKFLOWS §9 deltas folded in — multi-person, account-less responses; §17 single-vs-multi resolved; provider-neutrality made a hard constraint) (v1.0-rc6: rc5 + M1 as-built corrections to §8: `src/crypto/` and `src/oauth/` were introduced during M1 but never documented; `src/web/routes/` contents named; `src/web/escape.ts`; `src/providers/google-event.ts`; `src/recurrence.ts` — undocumented since the M1 recurrence spike; and a `scripts/` directory. Plus §13: the deployments repo is *credential*-human-only — the boundary is credential access, not repo write access, so instance config may be agent-authored and owner-merged) (rc4 + M0 as-built corrections: change_log id in SQLite dialect, fake provider filename, publish-not-deploy workflow comment, Hegel FFI mechanism) (rc3 + security hardening: token-link semantics, ICS/HTML injection, OAuth state/PKCE, supply-chain cooldown & ignore-scripts, agent privilege model, backup-tail deletion promise) (v0.9 + artifact-store port seam for feeds/pages; v0.7 + scheduling economics: cron fan-out vs DO alarms; v0.6 + platform pivot: TypeScript intersection contract — one codebase targeting Cloudflare Workers/D1/Durable Objects free tier *and* Node/Docker self-host; SQLite dialect; Hegel-based verification; earlier history in companions/git). **Name:** WhenDoWe — repo `github.com/whendowe/whendowe`, domain `whendowe.org` (Cloudflare-registered), package name `whendowe`.
+> **Status:** v1.0-rc19 (rc18 + §10 *Plans*: several events proposed, compared and accepted as one, before MVP-3 — threads with members and an organizer; plan states draft / on the table / accepted / replaced / withdrawn; answering a plan with a plan, compared by event identity (`sid`); `who` an event is for; two people decide by consensus, more by the organizer after voting; accepting replaces the alternatives and writes the plan's events as ordinary scheduled events; the week-row view with events as per-week pieces; and polls as one-event plans as the direction; owner decisions from the plans prototype, 2026-10-24…30) (v1.0-rc18: rc17 + §13: several accounts signed in on one browser — the session cookie carries up to four sessions, every page's header names the account in use, and switching is one POST that writes nothing to storage; accounts are never linked on the server; a form from a stale tab can't act as the wrong account; a page another signed-in account can see offers the switch, without revealing anything to an account set that can't; owner decision after staging testing with three addresses, whendowe#54) (v1.0-rc17: rc16 + §9: property tests for the UI — Hegel properties over the picker's shipped logic, including that whatever it writes the server's own parser accepts unchanged, and a Hegel state machine that drives the real picker in Chromium against a model; the pages' scripts get coverage measured in the browser tier, mapped back to `picker.ts`, with ratchet-only thresholds; and CODEOWNERS widened to the browser tier and the coverage thresholds, which now help define green) (v1.0-rc16: rc15 + §9: a browser test tier — Playwright drives the pages' own scripts in Chromium, at phone width and with JavaScript off, and compares each page against committed reference screenshots so a PR shows its visual diff; its own command and CI job, and part of the Definition of Done) (v1.0-rc15: rc14 + §10: events are center-stage and groups are an address book — an event names its people directly, people can be added to and removed from an existing event, joining a group never adds you to its earlier events, and home is "your events"; owner decision after the first staging use) (v1.0-rc14: rc13 + §18: the Worker bundle is a published artifact of its own — an OCI artifact on ghcr carrying the bundled script, the migrations it expects and the wrangler template, pinned by digest, so the deployments repo never needs product source; and a pre-Workers-Paid instance mode in §13/§18 — mail only to verified destination addresses via Email Routing on the `notify.` subdomain, enforced by the binding's recipient allowlist) (v1.0-rc13: rc12 + MVP-2 slice 2E planned in §10: response requests — accept/acknowledge states, lifecycle as built, material change = time/date/location; link actions name the phase; `event_change_proposal` for the propose tier with §8 `proposal.ts`; whole-series RRULE; history attribution shown to every tier by owner decision) (v1.0-rc12: rc11 + §10: responses — votes, attendance, feedback — are attributed rows of their own, not change_log rows, because change_log's revision key serialises edits; `event_feedback` and `response_token` sketched; §13 token links as built: re-answerable vote/attend links, 14-day expiry, rotate-on-resend by replacement, no session) (v1.0-rc11: rc10 + MVP-2 layout in §8 — `src/events/`, `routes/events.ts`, `routes/respond.ts`; the event lifecycle as a single status column in §10; and §16's one recorded exception: migration 0005 rebuilds `canonical_event`, allowed only because nothing has ever been deployed) (v1.0-rc10: rc9 + §8 entries for `src/web/layout.ts` and `src/web/session.ts`, recorded before MVP-1 slice C) (v1.0-rc9: rc8 + mail provider decided: Cloudflare Email Service, sending from `notify.whendowe.org`, behind an app-enforced hard cap — §8 entries for `src/mail/cloudflare.ts` and `src/mail/capped.ts`) (v1.0-rc8: rc7 + §8 layout for MVP-1, recorded before the code: `src/people/`, `src/ids.ts`, `src/mail/console.ts`, `src/web/routes/{auth,groups}.ts`) (v1.0-rc7: rc6 + roadmap re-sequenced people-first after an owner review: Ring 0 widened from "the household" to small groups of people who know each other; two-way Google sync is MVP scope; edit tier split from visibility tier; WORKFLOWS §9 deltas folded in — multi-person, account-less responses; §17 single-vs-multi resolved; provider-neutrality made a hard constraint) (v1.0-rc6: rc5 + M1 as-built corrections to §8: `src/crypto/` and `src/oauth/` were introduced during M1 but never documented; `src/web/routes/` contents named; `src/web/escape.ts`; `src/providers/google-event.ts`; `src/recurrence.ts` — undocumented since the M1 recurrence spike; and a `scripts/` directory. Plus §13: the deployments repo is *credential*-human-only — the boundary is credential access, not repo write access, so instance config may be agent-authored and owner-merged) (rc4 + M0 as-built corrections: change_log id in SQLite dialect, fake provider filename, publish-not-deploy workflow comment, Hegel FFI mechanism) (rc3 + security hardening: token-link semantics, ICS/HTML injection, OAuth state/PKCE, supply-chain cooldown & ignore-scripts, agent privilege model, backup-tail deletion promise) (v0.9 + artifact-store port seam for feeds/pages; v0.7 + scheduling economics: cron fan-out vs DO alarms; v0.6 + platform pivot: TypeScript intersection contract — one codebase targeting Cloudflare Workers/D1/Durable Objects free tier *and* Node/Docker self-host; SQLite dialect; Hegel-based verification; earlier history in companions/git). **Name:** WhenDoWe — repo `github.com/whendowe/whendowe`, domain `whendowe.org` (Cloudflare-registered), package name `whendowe`.
 > **Audience:** the coding agent bootstrapping this repo, and future human contributors.
 
 ---
@@ -178,6 +178,12 @@ whendowe/
       poll.ts                  # candidate times + votes (yes / if-need-be / no) + confirm (WORKFLOWS US-13)
       proposal.ts              # propose tier: a pending change an editor accepts or rejects (MVP-2, rc13)
       response.ts              # accept / acknowledge / attendance / feedback, incl. account-less token links
+    plans/                     # Plans (§10 rc19): several events proposed and accepted as one
+      thread.ts                # threads and their members; the access gate (findThreadForMember)
+      plan.ts                  # drafts, sending, votes, deciding, accept (writes canonical events), withdraw
+      diff.ts                  # pure: match plan events by sid -> same / changed / only in one
+      weeks.ts                 # pure view-model: week rows, events as per-week pieces, folding, colours
+      note.ts                  # notes on days: attributed, public or private (P5)
     oauth/
       pkce.ts                  # RFC 7636 verifier/challenge (S256 only) + state nonce (§13)
       authorize.ts             # Google authorization request URL (§12)
@@ -203,6 +209,7 @@ whendowe/
       escape.ts                # HTML escaping — provider/event text is untrusted input (§13)
       layout.ts                # the shared page shell every route renders into (escapes its inputs)
       picker.ts                # the date/time picker: a script over the plain form fields (rc15)
+      plan-editor.ts           # the week-row editor: tap to pick up / put down, drag; writes the plain fields (rc19)
       session.ts               # session middleware: cookie -> this browser's accounts, the active one on the request context; CSRF check (rc18)
       routes/                  # OAuth, events UI (HTMX)
         oauth.ts               # POST connect (GET never mutates) + GET callback: state, PKCE, store
@@ -211,6 +218,7 @@ whendowe/
         groups.ts              # create group, invite, accept invite
         events.ts              # your events (home); create/view/edit; the people on an event; polls; history
         respond.ts             # token-link responses: vote / attend / acknowledge with no account (MVP-2)
+        plans.ts               # threads, plans, drafts and their editor forms (rc19)
     changelog.ts               # append + diff
     mail/
       port.ts                  # HTTPS mail port (invites, token links — MVP-1)
@@ -698,6 +706,186 @@ tier (§9 visibility integrity).
 
 The two tier columns are deliberately independent: a D&D player is `view` + `FULL` (sees everything, cannot reschedule); a grandparent is `view` + `BUSY`; a co-parent is `propose` or `edit` + `FULL`. Every tier, including `view`, can acknowledge, state attendance and leave feedback — "decided by the organizer" never means "participants have no voice".
 
+### Plans (rc19 — before MVP-3)
+
+Owner direction, 2026-10-24…30, worked out in a clickable prototype over twelve rounds of
+use on a phone (WORKFLOWS §3 *Plan*, US-16–US-18). People rarely agree one event at a time:
+co-parents agree the next two months of weeks, a game table agrees a rhythm until Christmas,
+a family agrees how the holidays go. Today that happens in a messaging app by retyping dates.
+A **plan** is several events proposed as one; people answer a plan with a plan of their own,
+compare the two at a glance, vote, and accept one **as a whole**.
+
+**Where plans live.** People plan *in* a **thread** with a name ("Kiddo's weeks"), its
+members, and one time zone for every timed event in it. A thread is like an event in rc15: it
+names its people directly (by email, or copied from a group's members), and joining a group
+adds nobody to a thread. Every member sees every plan put on the table and the thread's
+history; a **draft** is seen only by its author. The thread's creator is its **organizer**.
+
+**Plan states** (the words are the UI's, owner-approved 2026-10-30):
+
+| status | meaning | UI |
+|---|---|---|
+| `draft` | being drawn; at most one per author per thread | "Your draft · not sent" |
+| `on_table` | sent; members vote on it | "on the table" |
+| `accepted` | settled as a whole; its events are scheduled | "accepted" |
+| `replaced` | an alternative to it was accepted | "replaced" — "Replaced by “X”, which settled the same time." |
+| `withdrawn` | its author took it back | "withdrawn" |
+
+**Answering, and what a plan is compared with.** "Suggest changes…" (on your own plan:
+"Change it…") copies a plan on the table into your draft; sending it puts a new plan on the
+table that **answers** the first (`answers_id`; default name "Mara's changes to A"). A plan
+is always compared with the plan it answers, and a draft with the plan it was copied from —
+the flow picks the comparison, so nobody has to. "Plan the rest…" starts a draft from a
+*replaced* plan with only the events that don't overlap what is now agreed ("the rest of A").
+Nobody edits anyone else's plan, ever.
+
+**Events keep their identity across copies.** Each plan event carries a `sid`: copied events
+keep it, new ones get a fresh one. The diff between two plans matches events **by `sid`
+only** — never by title or time (§3.4, applied to plans) — and sorts each into *same*,
+*changed* (time, title and/or who: "moved Sat 26 → Sun 27", "renamed", "now for Mara (was
+Adam)"), *only in the base* ("left out") or *only in this one* ("new"). Events identical to
+agreed ones are left out of the base, so a plan the rest of whose time is settled shows only
+what is still open. The diff is a pure function in `src/plans/diff.ts`, property-tested
+(§9): it partitions both sides, a plan diffed with itself is all *same*, and swapping sides
+swaps *only in the base* with *only in this one*.
+
+**Who an event is for.** Each plan event has `who`: a set of the thread's members, empty for
+everyone (choosing every member is stored as empty). It is part of the plan — copied,
+diffed and accepted like time and title. Colour follows the person when an event is for
+exactly one, and otherwise the title, the same colour in every plan of the thread.
+
+**Deciding** (owner decision, 2026-10-25):
+- **Two members: consensus.** A plan is accepted the moment both have said yes. Sending a
+  plan records its author's yes.
+- **More than two: the organizer decides, after voting.** Members vote yes / if need be /
+  no on each plan on the table; the organizer sees the tally and accepts one, after a
+  confirmation that names it. The organizer may accept before every vote is in; the
+  confirmation says who hasn't voted.
+- Voting is guarded by the status in the same statement, as for polls (§10 rc12): a vote
+  racing an accept lands before it or not at all.
+
+**Accepting replaces its alternatives.** The plans that are alternatives to the accepted one
+— the other plans on the table **in the same question** (a question is the chain of plans
+that answer each other: `question_id` is the root's id) **or whose time overlaps it** (first
+start to last end) — become `replaced`, in the same batch. Plans for other weeks stay on the
+table. The overlap half is the prototype's rule; the question half is what lets one-event
+plans for different days be alternatives (polls, below).
+
+**An accepted plan's events become ordinary events.** Accepting writes each plan event as a
+`scheduled` canonical event (`origin = 'user_edit'`, the thread's organizer as owner, one
+change_log row each), for every member at `FULL`: `edit` for whoever may decide (both in a
+pair, the organizer in a group), `view` for everyone else. They are on everyone's Your
+events at once, and in feeds and calendars when MVP-3/4 land: what is agreed is what is in
+calendars, and **undecided time is shown as nothing** (owner decision) — plans on the table
+never project anywhere. `plan_event.canonical_event_id` records the link; the thread draws
+"what is agreed" from those canonical events, so a later edit or cancellation on the event
+page is what the thread shows. Agreed time is settled: no plan can change it ("Suggest
+changes…" exists only on plans on the table); changing an agreed event is an ordinary event
+edit. One batch, guarded by a per-accept `decision_id`: the plan's status flip, its
+alternatives' replacement, the events, their participation and their history land together
+or not at all, and a second accept racing the first writes nothing.
+
+**Drafts are scratch.** A draft's rows are written as the author draws (no JavaScript
+needed: each change is a POST), and "Discard" deletes them. That hard delete is allowed
+because a draft was never shown to anyone and nothing refers to it; a sent plan is never
+deleted. "Keep only these days" / "Drop these days" clip whole-day stretches to a range of
+days and keep or drop timed events by their day.
+
+```sql
+CREATE TABLE plan_thread (                 -- Plans P1. What people are planning: "Kiddo's weeks"
+    id           text PRIMARY KEY,         -- UUIDv7
+    name         text NOT NULL,
+    organizer_id text NOT NULL REFERENCES person(id),
+    tzid         text NOT NULL,            -- the zone of every timed event in the thread
+    created_at   text NOT NULL
+);
+CREATE TABLE plan_thread_member (
+    thread_id  text NOT NULL REFERENCES plan_thread(id),
+    person_id  text NOT NULL REFERENCES person(id),
+    created_at text NOT NULL,
+    PRIMARY KEY (thread_id, person_id)
+);
+CREATE TABLE plan (
+    id          text PRIMARY KEY,          -- UUIDv7
+    thread_id   text NOT NULL REFERENCES plan_thread(id),
+    author_id   text NOT NULL REFERENCES person(id),
+    name        text NOT NULL,             -- blank at send = "Mara's changes to A" / "Plan B"
+    message     text,
+    answers_id  text REFERENCES plan(id),  -- the plan it answers: what it is compared with
+    rest_of     integer NOT NULL DEFAULT 0,-- 1 = "the rest of" a replaced plan (Plan the rest…)
+    question_id text NOT NULL,             -- root of the answers chain; its own id if it answers none
+    status      text NOT NULL,             -- draft | on_table | accepted | replaced | withdrawn (CHECK)
+    replaced_by text REFERENCES plan(id),
+    decided_by  text REFERENCES person(id),-- the organizer who accepted it; NULL for consensus
+    decision_id text,                      -- per-accept nonce guarding the accept batch
+    sent_at     text,
+    decided_at  text,                      -- accepted, replaced or withdrawn at
+    created_at  text NOT NULL,
+    updated_at  text NOT NULL
+);
+CREATE UNIQUE INDEX plan_one_draft ON plan (thread_id, author_id) WHERE status = 'draft';
+CREATE TABLE plan_event (
+    plan_id            text NOT NULL REFERENCES plan(id) ON DELETE CASCADE,  -- cascade: drafts only
+    sid                text NOT NULL,      -- identity across copies (UUIDv7 when first drawn)
+    title              text NOT NULL,
+    all_day            integer NOT NULL,   -- §10 wall clock; end EXCLUSIVE when all day
+    start_local        text NOT NULL,
+    end_local          text NOT NULL,      -- timed events use the thread's tzid
+    who                text NOT NULL DEFAULT '[]',  -- JSON member ids, sorted; [] = everyone
+    canonical_event_id text REFERENCES canonical_event(id),  -- set when the plan is accepted
+    PRIMARY KEY (plan_id, sid)
+);
+CREATE TABLE plan_vote (                   -- attributed rows, as slot_response (rc12)
+    plan_id      text NOT NULL REFERENCES plan(id),
+    person_id    text NOT NULL REFERENCES person(id),
+    answer       text NOT NULL,            -- yes | ifneedbe | no (CHECK)
+    responded_at text NOT NULL,
+    PRIMARY KEY (plan_id, person_id)
+);
+CREATE TABLE plan_note (                   -- Plans P5. Notes need no agreement, only attribution
+    id         text PRIMARY KEY,           -- UUIDv7
+    thread_id  text NOT NULL REFERENCES plan_thread(id),
+    author_id  text NOT NULL REFERENCES person(id),
+    first_day  text NOT NULL,              -- inclusive dates: a note is "on" days, not at times
+    last_day   text NOT NULL,
+    body       text NOT NULL,              -- escaped on render like every event field
+    private    integer NOT NULL DEFAULT 0, -- 1 = only its author sees it
+    created_at text NOT NULL
+);
+```
+The thread's history ("Adam put “Rest of November” on the table", "Both said yes to …",
+"… was replaced") is derived from these rows' `sent_at` / `decided_at` / `replaced_by`
+columns; it needs no log table of its own.
+
+**The view: weeks, not months** (owner: "weeks matter, months don't"). A plan is drawn as a
+vertical list of **week rows**, Monday first, each event a labelled ribbon in its colour; the
+agreed weeks are muted and folded; each week says what changed in it ("N changes ▾") and the
+plan's header counts them all. Only one plan is drawn at a time — comparison is the written
+list of changes plus "See A" to show the answered plan in place, never two layers blended
+(Gleicher 2011; L'Yi, Jo & Seo 2020). The view-model draws **an event as one span cut into
+per-week pieces** (first/last flags per piece): nothing about an event stops at a week
+boundary, and while one is being edited, its weeks and the week either side never fold.
+- **Editing a stretch** works three ways, all writing the same plain form fields (rc15
+  rule: every form works without JavaScript): the event's own form (dates, times, who);
+  with the script, **tap an end to pick it up, tap it again to put it back, tap any day in
+  any week to put it down there** (ends that cross swap), which works wherever dragging
+  doesn't; and **dragging** an end's grip or the whole ribbon, by the finger's movement.
+  Anything hit-tested is positioned from the model's days, never from a ribbon's box.
+- **A plan with one event** is drawn as a card with its time and "Suggest another time",
+  not as week rows — the light case of the same model.
+- No plan view ever draws undecided time into the agreed calendar.
+
+**Polls are one-event plans (direction, not yet built).** A poll's candidates are one-event
+plans on the table together in one question, under the same votes and the same deciding
+rule; confirming a candidate is accepting its plan, which replaces the rest. Until that
+slice, polls stay as built (§10 rc12) — it re-expresses existing polls as plans through an
+additive migration first, so nothing running breaks (§16 expand/contract).
+
+**Not in this first cut, deliberately:** voting on a plan without an account (members sign in
+by magic link; the token-link rule returns with polls-as-plans — WORKFLOWS §10); mail when a
+plan is put on the table (the page offers a short message to paste instead); adding or
+removing members after a thread starts; repeat patterns as a way to draw a plan.
+
 ---
 
 ## 11. Core reconcile loop
@@ -879,6 +1067,7 @@ The new milestones are labelled **MVP-1…MVP-5**, deliberately *not* reusing M2
 
 - **MVP-1 — People.** `person`, magic-link login, sessions + CSRF, groups, email invites; the mail port with a console adapter for development and an HTTPS provider for real use. Email deliverability (SPF/DKIM/DMARC, `whendowe/deployments`) is a *blocker* here, not polish. One person per verified email address — a later "Sign in with Google" with the same address must land on the same person. Closes the M1a gap where the connect route has no authenticated owner. *Accept: a D&D group exists (US-14).*
 - **MVP-2 — Events & responses.** Create/edit events (single + whole-series), per-person edit and visibility tiers, the proposal lifecycle, accept / acknowledge / slot vote / attendance / feedback by token link, the change log visible in the UI. *Accept: "when do we play?" is answered without anyone installing anything.* Slices: 2A domain · 2B event pages · 2C polls · 2D account-less responses · 2E-1 agreement & acknowledgment requests, cancel/restore · 2E-2 change proposals (propose tier) · 2E-3 recurring series · 2F events center-stage, groups as an address book (rc15).
+- **Plans (rc19) — before MVP-3** (owner direction, 2026-10-24: ICS and unlisted views wait). Several events proposed, compared and accepted as one (§10 *Plans*, WORKFLOWS US-16–US-18). Slices: P1 schema and domain (threads, plans, `sid`, `who`, the diff, votes, deciding, accept) · P2 thread and plan pages (week rows, the change list, vote, accept, withdraw) · P3 drafts (Suggest changes…, Plan the rest…, the event forms, keep/drop days, send) · P4 the week-row editor script (tap to pick up and put down, drag) · P5 notes · P6 polls as one-event plans (additive migration first). *Accept: Adam and Mara agree two months of weeks on their phones without retyping a date.*
 - **MVP-3 — Feeds & sharing.** Read-only ICS feed per person and per group (the §5 artifact-store seam's first driver; Google polls subscribed feeds slowly — hours — which is stated to users, not hidden); unlisted and invite-only views; `project()` tiers enforced in every output (§9 visibility integrity becomes load-bearing). *Accept: a player subscribes from an iPhone.*
 - **MVP-4 — Google one-way.** "Sign in with Google" (basic profile scopes only — must not consume the sensitive-scope user cap, §12), calendar connection as a *separate*, opt-in grant, token refresh, the reconcile loop and PUSH (§11). *Accept: the owner's household lives on it.*
 - **MVP-5 — Google two-way.** PULL classification, echo detection, tier-gated inbound edits (§11), inbound deletes as unsubscribe, conflict policy, 410 full resync with the reverse diff. *Accept: a member moves an event in Google and the group follows or receives a proposal (US-15).*

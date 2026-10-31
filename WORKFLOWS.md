@@ -1,6 +1,6 @@
 # WhenDoWe — User Workflows & Stories
 
-> **Status:** v0.6 (renamed to WhenDoWe) (v0.5 + delta 10 aligned to the DESIGN §6 intersection contract: HTTPS mail port, no SMTP). Companion to `DESIGN.md`.
+> **Status:** v0.7 (§3 *Plan* and US-16–US-18: several events proposed, compared and accepted as one; owner decisions from the plans prototype, 2026-10-25…30; folded into DESIGN rc19 §10 *Plans*) (v0.6: renamed to WhenDoWe) (v0.5 + delta 10 aligned to the DESIGN §6 intersection contract: HTTPS mail port, no SMTP). Companion to `DESIGN.md`.
 > **Audience:** the owner (product decisions) and the coding agent (what M3+ must actually do for people).
 > **Relationship to DESIGN.md:** DESIGN.md defines the sync core (canonical truth, projections, reconcile). This document defines *who* uses it, *what they're trying to do*, and which design seams each story lands on. §9 lists the schema/scope deltas these stories imply, to be folded back into DESIGN.md once accepted.
 
@@ -70,6 +70,7 @@ No MVP code may *target* Ring 1–2; no MVP shape may *preclude* them. (Naming: 
   - **slot vote** — the proposal carries *multiple candidate times*; each responder answers per slot (`yes | if-need-be | no`); confirming one slot schedules it (US-13).
   - **none** — pure information.
   All three are the same shape — actor + answer + timestamp, appended to the change log — which is why acknowledgments, consent, and Doodle-style polls share one mechanism, one UI list, and one attribution trail.
+- **Plan (rc19)** — several events proposed **as one**: "the weeks until Christmas", "four sessions to take us to the holidays", "how Christmas goes". People put plans *on the table*, vote on them (yes / if need be / no), and answer a plan with one of their own ("Suggest changes…") instead of editing someone else's. A plan is accepted **as a whole** — never event by event; whoever dislikes part of it suggests changes. Two people decide by consensus (it is accepted when both say yes); in a larger group the organizer decides, after the votes are in. Accepting a plan replaces the plans that were alternatives to it, and its events become ordinary scheduled events for everyone planning. Each event in a plan can say **who it is for** (one person, several, or everyone). Undecided time is shown as nothing at all: a calendar holds what is agreed, never what is merely on the table. A poll is the smallest case: several one-event plans on the table at once (DESIGN rc19).
 - **Event lifecycle** — `draft → proposed → scheduled → cancelled` (extends DESIGN.md's `active|cancelled`). Crucially, the lifecycle lives **entirely in canonical + the desired-state policy**: a `proposed` event projects only to the proposer and the approver (as tentative); acceptance flips it to `scheduled`, and reconcile fans it out. The sync machinery doesn't know proposals exist.
 
 ---
@@ -146,6 +147,21 @@ Three people move the same event in their own Google calendars. Petra has `edit`
 **Done when:** each tier's outcome holds; no revert is silent; every inbound change is in the change log; a delete never touches anyone else's copy.
 **Maps to:** DESIGN §11 tier-gated inbound edits, §10 deletion model. Phase: MVP-5.
 
+### US-16 — Weeks with the kid, two months ahead (rc19)
+Adam and Mara share Kiddo week about. Today they agree the next couple of months in a messaging app, by retyping dates. Adam puts **"Rest of November"** on the table: five whole-week stretches, each *for* one of them, plus "Scout trip: Adam on standby with the car" over a weekend that is Mara's. Mara opens the link, sees the weeks as rows with each parent in their own colour, swaps the last two weeks by dragging an end across the week boundary (or by tapping an end, then the day it should go to), and sends **her changes to Adam's plan**. Adam sees exactly what she changed — "With Adam moved 23 Nov → 30 Nov", "now for Mara (was Adam)" — not two calendars to compare by eye. He says yes; with two people, both yeses accept it. The weeks are now agreed and appear on both their event lists; his original plan is marked *replaced*.
+**Done when:** the plan is accepted only when both said yes; each change is listed against the plan it answers; a stretch can be edited across a week boundary on a phone, with and without dragging; the accepted events exist once each, for both; the replaced plan stays readable.
+**Maps to:** DESIGN rc19 §10 *Plans* (plan, plan_event `sid` + `who`, plan_vote, the consensus rule, accept-materialises). Phase: Plans P1–P4.
+
+### US-17 — The game table picks a rhythm (rc19)
+Ann runs a table of five. She proposes "Every other Thursday" (four sessions to Christmas). Bob answers with "Saturday afternoons" (three longer sessions); Cat answers Ann's plan with the 19th moved a week. Everyone votes on each plan they can see. Ann, the organizer, sees the tally per plan and **accepts** Cat's; Bob's and her own original are replaced, because they answered the same question. Bob's replaced plan still has a **"Plan the rest…"** for any part of it that the accepted one doesn't cover.
+**Done when:** only the organizer can accept in a group larger than two, and she sees every vote first; accepting one replaces its alternatives in one step; nobody else's plan is edited by anyone but its author.
+**Maps to:** DESIGN rc19 §10 *Plans* (organizer rule, question = the plans that answer each other, replacement). Phase: Plans P1–P3.
+
+### US-18 — Christmas, and who goes sledging (rc19)
+Jana plans the family Christmas for four households: the cottage stretch, Christmas Eve dinner, and "Sledging, if there's snow" *for* Petr and Tom. Lena answers: Christmas Eve in town, the cottage after, and sledging moves to Sunday — **for Lena and Tom**. The change list says "Sledging moved Sat 26 → Sun 27, now for Lena, Tom (was Petr, Tom)". Who an event is for is part of the plan: changing it is a change like any other.
+**Done when:** `who` survives copying, is diffed like time and title, and colours follow a person when an event is for one person; an event for nobody in particular is for everyone.
+**Maps to:** DESIGN rc19 §10 *Plans* (`who`). Phase: Plans P1–P2.
+
 ### US-12 — Someone leaves
 Worst case: David and Petra separate. David removes Petra's person from all his events (bulk action). Her mirrors are deleted from *her* calendar via normal reconcile; canonical history — including changes she made — is preserved with attribution (it's an append-only log; her past actions happened). Symmetric case: Petra disconnects her own account → connection `disconnected`, mirrors deleted, person record remains for history.
 **Done when:** no-cascade property holds (her removal deletes only her projections); change_log untouched; re-adding her later recreates mirrors (new provider ids, fine).
@@ -221,3 +237,6 @@ Messaging/chat between parents; expense splitting; legal custody documentation; 
 - Grace period length for cancelled events (per-household setting vs constant — start with a constant).
 - Material-change definition for re-acknowledgment: time/date/location only, or also title? (**Default, DESIGN rc13:** time/date/location only — a renamed event changes nobody's plans, so it shouldn't nag.)
 - Should `BUSY` placeholder labels be per-event or per-relationship? (Start per-relationship.)
+- *(rc19, plans)* Should a plan put on the table mail the people planning, or is the copy-to-paste message enough while the owner's real channel is a messaging app? (Start: no mail; after sending, the page offers a short message with the link to paste.)
+- *(rc19, plans)* Repeat patterns ("week about until June") as a way to *write* a plan — a generator of ordinary plan events, not a series. (Start: none; weeks are drawn by hand or copied from the plan answered.)
+- *(rc19, plans)* Voting on a plan without an account (token links, as for polls). (Start: sign in by magic link; the account-less rule is met again when polls become one-event plans.)
