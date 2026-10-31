@@ -19,6 +19,8 @@ export interface Account {
   readonly sessionId: string;
   readonly personId: string;
   readonly email: string;
+  /** When this account will be deleted, if its deletion was asked for (§10 rc22). */
+  readonly deletesAt: string | null;
 }
 
 /**

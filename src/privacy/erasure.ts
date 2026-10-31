@@ -3,6 +3,7 @@ import { z } from "zod";
 import type { SqlStatement, StoragePort } from "../db/port.js";
 import { transitionStatements } from "../events/event.js";
 import { uuidv7 } from "../ids.js";
+import { hashToken, issueToken } from "../people/tokens.js";
 import { collect, reapplyLedger } from "./purge.js";
 
 // Deleting an account (DESIGN §10 rc21 *Privacy basics*, GDPR Art. 17).
@@ -353,4 +354,158 @@ export async function reapplyErasures(storage: StoragePort, now: string): Promis
   );
   for (const p of people) await eraseAccount(storage, p, { now });
   return people.length + (await reapplyLedger(storage, now));
+}
+
+// --- The 7-day wait (DESIGN §10 rc22) -------------------------------------------------
+// Confirming signs the account out everywhere and starts the wait; the emailed link
+// keeps the account or deletes it at once; the cron's purge pass deletes it on the day.
+// Nothing anyone else sees changes in between. The account_deletion row goes with the
+// person, so the link stops working once the account is gone.
+
+export const DELETION_WAIT_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** Accounts erased per purge pass: an erasure is many batches, and the cron runs each minute. */
+export const ERASURES_PER_PASS = 1;
+
+/** Revoke these grants at the provider, before their tokens are deleted (app.ts builds it). */
+export type RevokeCalendars = (connections: readonly ConnectionToRevoke[]) => Promise<void>;
+
+/**
+ * Ask for the account to be deleted: one batch that records it and signs the person out
+ * of every session, the asking one included — so a stolen session can't stay to watch,
+ * or cancel. Asking again (after signing in during the wait) keeps the original day and
+ * replaces the link. Returns the link's token, to email, and the day.
+ */
+export async function requestDeletion(
+  storage: StoragePort,
+  personId: string,
+  now: string,
+): Promise<{ readonly token: string; readonly eraseAfter: string }> {
+  const { token, hash } = await issueToken();
+  const eraseAfter = new Date(new Date(now).getTime() + DELETION_WAIT_MS).toISOString();
+  await storage.batch([
+    {
+      sql: `INSERT INTO account_deletion (person_id, requested_at, erase_after, token_hash)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT (person_id) DO UPDATE SET token_hash = excluded.token_hash`,
+      params: [personId, now, eraseAfter, hash],
+    },
+    {
+      sql: "UPDATE session SET revoked_at = ? WHERE person_id = ? AND revoked_at IS NULL",
+      params: [now, personId],
+    },
+  ]);
+  const day = await pendingDeletion(storage, personId);
+  if (day === null) throw new Error("the deletion request did not record");
+  return { token, eraseAfter: day };
+}
+
+const dueSchema = z.object({ erase_after: z.string() });
+
+/** When this person's account will be deleted, or null if it won't. */
+export async function pendingDeletion(
+  storage: StoragePort,
+  personId: string,
+): Promise<string | null> {
+  const rows = await storage.query({
+    sql: "SELECT erase_after FROM account_deletion WHERE person_id = ?",
+    params: [personId],
+  });
+  return rows[0] === undefined ? null : dueSchema.parse(rows[0]).erase_after;
+}
+
+const linkSchema = z.object({ person_id: z.string(), email: z.string(), erase_after: z.string() });
+
+/** Whose deletion an emailed link is for, WITHOUT acting on it (the GET page). */
+export async function peekDeletion(
+  storage: StoragePort,
+  token: string,
+): Promise<{
+  readonly personId: string;
+  readonly email: string;
+  readonly eraseAfter: string;
+} | null> {
+  const rows = await storage.query({
+    sql: `SELECT d.person_id, p.email, d.erase_after
+          FROM account_deletion d JOIN person p ON p.id = d.person_id WHERE d.token_hash = ?`,
+    params: [await hashToken(token)],
+  });
+  if (rows[0] === undefined) return null;
+  const r = linkSchema.parse(rows[0]);
+  return { personId: r.person_id, email: r.email, eraseAfter: r.erase_after };
+}
+
+/** Keep the account, from the emailed link. False if the link no longer works. */
+export async function keepAccount(storage: StoragePort, token: string): Promise<boolean> {
+  const rows = await storage.query({
+    sql: "DELETE FROM account_deletion WHERE token_hash = ? RETURNING person_id",
+    params: [await hashToken(token)],
+  });
+  return rows.length > 0;
+}
+
+/** Keep the account, signed in during the wait. */
+export async function keepOwnAccount(storage: StoragePort, personId: string): Promise<void> {
+  await storage.batch([
+    { sql: "DELETE FROM account_deletion WHERE person_id = ?", params: [personId] },
+  ]);
+}
+
+/**
+ * Revoke the person's grants, then erase them; nothing if they're already gone (a link
+ * clicked twice, or a pass that overlapped one).
+ */
+async function eraseWithGrants(
+  storage: StoragePort,
+  personId: string,
+  input: { readonly now: string; readonly revokeCalendars?: RevokeCalendars },
+): Promise<boolean> {
+  const exists = await storage.query({
+    sql: "SELECT 1 FROM person WHERE id = ?",
+    params: [personId],
+  });
+  if (exists.length === 0) return false;
+  if (input.revokeCalendars !== undefined)
+    await input.revokeCalendars(await connectionsOf(storage, personId));
+  await eraseAccount(storage, personId, { now: input.now });
+  return true;
+}
+
+/**
+ * Delete now, from the emailed link. The request is made due first, so if the erasure
+ * stops part-way the next purge pass finishes it. False if the link no longer works.
+ */
+export async function deleteNow(
+  storage: StoragePort,
+  token: string,
+  input: { readonly now: string; readonly revokeCalendars?: RevokeCalendars },
+): Promise<boolean> {
+  const rows = await storage.query({
+    sql: "UPDATE account_deletion SET erase_after = ? WHERE token_hash = ? RETURNING person_id",
+    params: [input.now, await hashToken(token)],
+  });
+  const personId = rows[0] === undefined ? null : z.string().parse(rows[0].person_id);
+  if (personId === null) return false;
+  await eraseWithGrants(storage, personId, input);
+  return true;
+}
+
+/**
+ * The purge pass's first job: erase the accounts whose wait is over, a bounded number
+ * per run. With none due it is one read and writes nothing (§16).
+ */
+export async function eraseDue(
+  storage: StoragePort,
+  input: { readonly now: string; readonly revokeCalendars?: RevokeCalendars },
+): Promise<number> {
+  const due = await storage.query({
+    sql: `SELECT person_id FROM account_deletion WHERE erase_after <= ?
+          ORDER BY erase_after LIMIT ?`,
+    params: [input.now, ERASURES_PER_PASS],
+  });
+  let erased = 0;
+  for (const r of due) {
+    if (await eraseWithGrants(storage, z.string().parse(r.person_id), input)) erased += 1;
+  }
+  return erased;
 }

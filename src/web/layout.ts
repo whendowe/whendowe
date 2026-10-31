@@ -54,6 +54,8 @@ export interface Viewer {
   readonly canAddAccount: boolean;
   /** This page's path, so a switch comes back to it. */
   readonly here: string;
+  /** When the active account will be deleted, if its deletion was asked for (§10 rc22). */
+  readonly deletesAt: string | null;
 }
 
 // Paths the header posts to (src/web/routes/auth.ts registers them).
@@ -62,6 +64,21 @@ export const SIGN_OUT_PATH = "/auth/sign-out";
 export const SIGN_OUT_ALL_PATH = "/auth/sign-out-all";
 export const ADD_ACCOUNT_PATH = "/auth/sign-in";
 export const ACCOUNT_PATH = "/account";
+export const KEEP_ACCOUNT_PATH = "/account/keep";
+
+/** The day an account goes, as pages and mail say it: "2101-11-08 10:00 UTC". */
+export function deletionDay(iso: string): string {
+  return `${iso.slice(0, 10)} ${iso.slice(11, 16)} UTC`;
+}
+
+/** "Your account will be deleted on …", with a button to keep it (§10 rc22). */
+export function deletionNotice(v: Pick<Viewer, "csrfToken">, deletesAt: string): Html {
+  return html`<form class="wd-deleting error" method="post" action="${KEEP_ACCOUNT_PATH}">
+  <input type="hidden" name="csrf" value="${v.csrfToken}" />
+  <strong>This account will be deleted on ${deletionDay(deletesAt)}.</strong>
+  <button type="submit">Keep my account</button>
+</form>`;
+}
 
 /** A one-button form that makes another account on this browser active, then comes back here. */
 export function switchForm(v: Viewer, to: { sessionId: string; email: string }): Html {
@@ -179,10 +196,12 @@ export function renderPage(title: string, body: Html, viewer: Viewer | null): st
   .wd-menu button { width: 100%; text-align: left; overflow-wrap: anywhere; }
   .wd-menu a { padding: .5rem 1rem; }
   .wd-menu p { margin: .25rem .5rem; font-size: .9rem; }
+  .wd-deleting { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin: 0 0 24px; }
 </style>
 </head>
 <body>
 ${viewer === null ? "" : accountHeader(viewer)}
+${viewer === null || viewer.deletesAt === null ? "" : deletionNotice(viewer, viewer.deletesAt)}
 ${body}
 </body>
 </html>`.value;

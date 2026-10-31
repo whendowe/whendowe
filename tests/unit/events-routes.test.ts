@@ -1350,7 +1350,7 @@ it("leaving and deleting: a page that says what will happen, then a POST that do
   );
 });
 
-it("your data: a download of your own, and deleting your account behind a typed address (§10 rc21)", async () => {
+it("your data: a download of your own, and deleting your account behind a typed address (§10 rc21/rc22)", async () => {
   const h = await harness();
   const { mara, group, david } = await household(h);
   const event = await createVia(h, mara, group);
@@ -1379,16 +1379,101 @@ it("your data: a download of your own, and deleting your account behind a typed 
   expect(forged.status).toBe(403);
   expect((await get(h, event, david)).status).toBe(200);
 
-  const done = await h.app.request(
+  const asked = await h.app.request(
     "/account/delete",
     post({ csrf: david.csrf, confirm: "David@Example.org" }, david.cookie),
   );
+  expect(asked.status).toBe(200);
+  // It waits 7 days (§10 rc22)…
+  const day =
+    /will be deleted on (\d{4}-\d{2}-\d{2} \d{2}:\d{2}) UTC/.exec(await asked.text())?.[1] ?? "";
+  expect(Date.parse(`${day.replace(" ", "T")}Z`) - Date.now()).toBeGreaterThan(
+    6.9 * 24 * 3600 * 1000,
+  );
+  // …he's signed out everywhere at once: this cookie signs nobody in…
+  expect((await get(h, event, david)).status).toBe(303);
+  // …and nothing changed for anyone else.
+  expect(await text(h, event, mara)).toContain("NOTE-42");
+
+  // The email names the day and carries one link. Opening it acts on nothing.
+  const mail = h.sent.at(-1);
+  expect(mail?.to).toBe("david@example.org");
+  expect(mail?.subject).toContain(`${day} UTC`);
+  const link = new URL(
+    /https:\/\/whendowe\.example\/account\/deletion\?t=\S+/.exec(mail?.text ?? "")?.[0] ??
+      "http://x/",
+  );
+  const t = link.searchParams.get("t") ?? "";
+  const opened = await h.app.request(`${link.pathname}${link.search}`);
+  expect(opened.headers.get("referrer-policy")).toBe("no-referrer");
+  expect(await opened.text()).toContain("Keep my account");
+  expect(await text(h, event, mara)).toContain("NOTE-42");
+
+  // "Delete it now": gone, and the link is spent.
+  const done = await h.app.request("/account/deletion", post({ t, do: "now" }));
   expect(done.status).toBe(200);
   expect(await done.text()).toContain("Your account is deleted");
-  // His session is gone: this cookie signs nobody in.
-  expect((await get(h, event, david)).status).toBe(303);
+  expect((await h.app.request("/account/deletion", post({ t, do: "keep" }))).status).toBe(400);
   // His note went with him; nothing in the history needed a stand-in for him here.
   const after = await text(h, event, mara);
   expect(after).not.toContain("david");
   expect(after).not.toContain("NOTE-42");
+});
+
+it("the 7-day wait can be undone: from the emailed link, or signed in again (§10 rc22)", async () => {
+  const h = await harness();
+  const { mara, group, david } = await household(h);
+  const event = await createVia(h, mara, group);
+  const ask = (who: Who) =>
+    h.app.request(
+      "/account/delete",
+      post({ csrf: who.csrf, confirm: "david@example.org" }, who.cookie),
+    );
+  const linkIn = () =>
+    new URL(
+      /https?:\/\/\S+\/account\/deletion\?t=\S+/.exec(h.sent.at(-1)?.text ?? "")?.[0] ??
+        "http://x/",
+    ).searchParams.get("t") ?? "";
+
+  expect((await ask(david)).status).toBe(200);
+  const kept = await h.app.request("/account/deletion", post({ t: linkIn(), do: "keep" }));
+  expect(await kept.text()).toContain("Your account is kept");
+
+  // Signed in again: the same account, its events intact, and no banner.
+  const back = await signIn(h, "david@example.org");
+  expect(await text(h, event, back)).not.toContain("will be deleted");
+  expect((await get(h, event, back)).status).toBe(200);
+
+  // Asked again, then signed in during the wait: every page says when, with a keep button.
+  // Signing in alone doesn't cancel it.
+  expect((await ask(back)).status).toBe(200);
+  const during = await signIn(h, "david@example.org");
+  const home = await text(h, "/", during);
+  expect(home).toMatch(/This account will be deleted on \d{4}-\d{2}-\d{2}/);
+  expect(await text(h, "/account/delete", during)).toContain("Your account is being deleted");
+  const keep = await h.app.request("/account/keep", post({ csrf: during.csrf }, during.cookie));
+  expect(keep.status).toBe(303);
+  expect(await text(h, "/", during)).not.toContain("will be deleted");
+  // A forged keep does nothing (CSRF), and a made-up link works for nobody.
+  expect((await h.app.request("/account/keep", post({ csrf: "nope" }, during.cookie))).status).toBe(
+    403,
+  );
+  expect((await get(h, "/account/deletion?t=made-up")).status).toBe(400);
+});
+
+it("if the email can't go, the deletion still stands and the page says so (§10 rc22)", async () => {
+  const h = await harness();
+  const { david } = await household(h);
+  h.mailFailure.error = new MailCapReachedError({ daily: 1, monthly: 1 });
+  const asked = await h.app.request(
+    "/account/delete",
+    post({ csrf: david.csrf, confirm: "david@example.org" }, david.cookie),
+  );
+  h.mailFailure.error = null;
+  expect(asked.status).toBe(200);
+  const page = await asked.text();
+  expect(page).toContain("will be deleted on");
+  expect(page).toContain("We couldn't email you just now");
+  const during = await signIn(h, "david@example.org");
+  expect(await text(h, "/", during)).toContain("This account will be deleted on");
 });

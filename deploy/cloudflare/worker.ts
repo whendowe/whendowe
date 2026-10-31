@@ -7,7 +7,8 @@ import { cappedMailPort } from "../../src/mail/capped.js";
 import { cloudflareBindingMailPort, type EmailBindingLike } from "../../src/mail/cloudflare.js";
 import { consoleMailPort } from "../../src/mail/console.js";
 import { disabledMailPort, type MailPort } from "../../src/mail/port.js";
-import { createApp } from "../../src/web/app.js";
+import { eraseDue, type RevokeCalendars } from "../../src/privacy/erasure.js";
+import { calendarRevoker, createApp } from "../../src/web/app.js";
 import { buildOAuthDeps } from "../../src/web/routes/oauth-deps.js";
 import type { AppEnv } from "../../src/web/session.js";
 
@@ -42,7 +43,12 @@ export interface Env {
 // repeat. The fields are copied out of Env explicitly rather than passing Env to
 // loadConfig() — Env holds bindings as well as strings, and AGENTS.md forbids the
 // cast that would paper over that.
-let cachedApp: Promise<Hono<AppEnv>> | undefined;
+interface Built {
+  readonly app: Hono<AppEnv>;
+  readonly storage: StoragePort;
+  readonly revokeCalendars: RevokeCalendars | undefined;
+}
+let cached: Promise<Built> | undefined;
 
 const now = () => new Date().toISOString();
 
@@ -73,7 +79,7 @@ function buildMail(c: Config, env: Env, s: StoragePort): MailPort {
   });
 }
 
-async function buildApp(env: Env): Promise<Hono<AppEnv>> {
+async function build(env: Env): Promise<Built> {
   const config = loadConfig({
     GOOGLE_CLIENT_ID: env.GOOGLE_CLIENT_ID,
     GOOGLE_CLIENT_SECRET: env.GOOGLE_CLIENT_SECRET,
@@ -88,8 +94,11 @@ async function buildApp(env: Env): Promise<Hono<AppEnv>> {
     MAIL_MONTHLY_CAP: env.MAIL_MONTHLY_CAP,
   });
   const storage = d1StoragePort(env.DB);
+  const oauth = anyGoogleOAuthConfigured(config)
+    ? await buildOAuthDeps(config, storage)
+    : undefined;
 
-  return createApp({
+  const app = createApp({
     auth: {
       storage,
       mail: buildMail(config, env, storage),
@@ -97,24 +106,29 @@ async function buildApp(env: Env): Promise<Hono<AppEnv>> {
       secureCookies: new URL(config.PUBLIC_BASE_URL).protocol === "https:",
       now,
     },
-    oauth: anyGoogleOAuthConfigured(config) ? await buildOAuthDeps(config, storage) : undefined,
+    oauth,
   });
+  return { app, storage, revokeCalendars: calendarRevoker(oauth) };
 }
 
-function getApp(env: Env): Promise<Hono<AppEnv>> {
-  cachedApp ??= buildApp(env);
-  return cachedApp;
+function getBuilt(env: Env): Promise<Built> {
+  cached ??= build(env);
+  return cached;
 }
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    const app = await getApp(env);
+    const { app } = await getBuilt(env);
     return app.fetch(request, env, ctx);
   },
 
-  async scheduled(_controller: ScheduledController, _env: Env, _ctx: ExecutionContext) {
+  async scheduled(_controller: ScheduledController, env: Env, _ctx: ExecutionContext) {
+    // The purge pass (§10 rc21/rc22): accounts whose 7 days are over. Bounded per run;
+    // with nothing due, one read and no writes (§16).
+    const { storage, revokeCalendars } = await getBuilt(env);
+    const erased = await eraseDue(storage, { now: now(), revokeCalendars });
+    if (erased > 0) console.log(JSON.stringify({ reason: "accounts_erased", count: erased }));
     // M2: fan out to one ConnectionDO per active calendar_connection (§11).
     // Cron is the only scheduler of regular ticks — never per-tick DO alarms (§16).
-    console.log(JSON.stringify({ reason: "tick_noop", milestone: "M1" }));
   },
 };

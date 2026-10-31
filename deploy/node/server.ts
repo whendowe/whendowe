@@ -8,13 +8,14 @@ import { cappedMailPort } from "../../src/mail/capped.js";
 import { cloudflareRestMailPort } from "../../src/mail/cloudflare.js";
 import { consoleMailPort } from "../../src/mail/console.js";
 import { disabledMailPort, type MailPort } from "../../src/mail/port.js";
-import { createApp } from "../../src/web/app.js";
+import { eraseDue } from "../../src/privacy/erasure.js";
+import { calendarRevoker, createApp } from "../../src/web/app.js";
 import type { OAuthRouteDeps } from "../../src/web/routes/oauth.js";
 import { buildOAuthDeps } from "../../src/web/routes/oauth-deps.js";
 
 // Node entry (DESIGN.md §8): the same Hono app object as the Cloudflare worker,
-// served by @hono/node-server. The in-process scheduler (the Node twin of cron
-// fan-out — §6) lands in MVP-4 alongside runTick().
+// served by @hono/node-server, with an in-process scheduler as the Node twin of the
+// Worker's cron (§6). Today it runs the purge pass; runTick() joins it in MVP-4.
 const config = loadConfig(process.env);
 const storage = sqliteStoragePort(createClient({ url: config.DATABASE_URL }));
 const now = () => new Date().toISOString();
@@ -70,6 +71,21 @@ const app = createApp({
   },
   oauth,
 });
+
+// The purge pass (§10 rc21/rc22), each minute like the Worker's cron. Ticks never
+// overlap: the next is scheduled when this one is done.
+const PASS_INTERVAL_MS = 60_000;
+const revokeCalendars = calendarRevoker(oauth);
+async function purgePass(): Promise<void> {
+  try {
+    const erased = await eraseDue(storage, { now: now(), revokeCalendars });
+    if (erased > 0) console.log(JSON.stringify({ reason: "accounts_erased", count: erased }));
+  } catch (error) {
+    console.error(JSON.stringify({ reason: "purge_pass_failed", error: String(error) }));
+  }
+  setTimeout(() => void purgePass(), PASS_INTERVAL_MS).unref();
+}
+setTimeout(() => void purgePass(), PASS_INTERVAL_MS).unref();
 
 serve({ fetch: app.fetch, port: config.PORT }, (info) => {
   console.log(

@@ -726,9 +726,19 @@ it("deleting an account revokes its calendar grant at Google, then deletes the t
   await callback(h, `code=c&state=${encodeURIComponent(state)}`, cookie);
   expect(await connections(h)).toHaveLength(1);
 
-  const done = await h.app.request(
+  const asked = await h.app.request(
     "/account/delete",
     form({ csrf: h.session.csrf, confirm: OWNER_EMAIL }, h.session.cookie),
+  );
+  expect(asked.status).toBe(200);
+  // Nothing is revoked while the account waits its 7 days (§10 rc22)…
+  expect(revoked).toEqual([]);
+  expect(await connections(h)).toHaveLength(1);
+  // …and "delete it now" from the emailed link revokes, then deletes.
+  const link = /\/account\/deletion\?t=(\S+)/.exec(h.sent.at(-1)?.text ?? "")?.[1] ?? "";
+  const done = await h.app.request(
+    "/account/deletion",
+    form({ t: decodeURIComponent(link), do: "now" }),
   );
   expect(done.status).toBe(200);
   expect(revoked).toEqual([REFRESH_TOKEN]);

@@ -76,6 +76,7 @@ const accountRowSchema = z.object({
   person_id: z.string(),
   email: z.string(),
   token_hash: z.string(),
+  erase_after: z.string().nullable(),
 });
 
 /**
@@ -94,8 +95,10 @@ export async function resolveAccounts(
   const hashes = await Promise.all(wanted.map(hashToken));
   const slots = Array.from({ length: MAX_ACCOUNTS }, (_, i) => hashes[i] ?? "");
   const rows = await storage.query({
-    sql: `SELECT session.id, session.person_id, person.email, session.token_hash
+    sql: `SELECT session.id, session.person_id, person.email, session.token_hash,
+                 account_deletion.erase_after
           FROM session JOIN person ON person.id = session.person_id
+          LEFT JOIN account_deletion ON account_deletion.person_id = session.person_id
           WHERE session.token_hash IN (${SLOTS})
             AND session.revoked_at IS NULL AND session.expires_at > ?`,
     params: [...slots, options.now],
@@ -109,7 +112,13 @@ export async function resolveAccounts(
   wanted.forEach((token, i) => {
     const row = byHash.get(hashes[i] ?? "");
     if (row !== undefined) {
-      accounts.push({ token, sessionId: row.id, personId: row.person_id, email: row.email });
+      accounts.push({
+        token,
+        sessionId: row.id,
+        personId: row.person_id,
+        email: row.email,
+        deletesAt: row.erase_after,
+      });
     }
   });
   return accounts;

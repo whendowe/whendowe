@@ -663,3 +663,19 @@ export const erasureLedger = sqliteTable(
     check("erasure_ledger_kind_chk", sql`${t.kind} IN ('person', 'event', 'group', 'thread')`),
   ],
 );
+
+// rc22: an account whose deletion was asked for, waiting 7 days. The emailed link (its
+// hash here) keeps the account or deletes it at once; the cron's purge pass deletes it
+// at erase_after. The row goes with the person.
+export const accountDeletion = sqliteTable(
+  "account_deletion",
+  {
+    personId: text("person_id")
+      .primaryKey()
+      .references(() => person.id, { onDelete: "cascade" }),
+    requestedAt: text("requested_at").notNull(),
+    eraseAfter: text("erase_after").notNull(),
+    tokenHash: text("token_hash").notNull().unique(),
+  },
+  (t) => [index("account_deletion_due_idx").on(t.eraseAfter)],
+);

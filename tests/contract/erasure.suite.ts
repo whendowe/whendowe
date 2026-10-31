@@ -16,14 +16,21 @@ import { createGroup, findGroupForMember } from "../../src/people/group.js";
 import { acceptInvite, createInvite } from "../../src/people/invite.js";
 import { issueLoginToken } from "../../src/people/login.js";
 import { findOrCreatePerson } from "../../src/people/person.js";
-import { createSession } from "../../src/people/session.js";
+import { createSession, resolveAccounts } from "../../src/people/session.js";
 import { addDraftEvent, castVote, sendDraft, startDraft } from "../../src/plans/plan.js";
 import { createThread, findThreadForMember } from "../../src/plans/thread.js";
 import {
+  DELETION_WAIT_MS,
+  deleteNow,
   eraseAccount,
+  eraseDue,
   erasePreview,
   FORMER_MEMBER,
+  keepAccount,
+  peekDeletion,
+  pendingDeletion,
   reapplyErasures,
+  requestDeletion,
 } from "../../src/privacy/erasure.js";
 
 // Deleting an account (DESIGN §10 rc21, WORKFLOWS US-20) on BOTH drivers. The test that
@@ -295,6 +302,88 @@ export function runErasureContract(makePort: () => Promise<StoragePort>): void {
       ]);
       expect(await reapplyErasures(port, T1)).toBeGreaterThanOrEqual(1);
       expect(await everywhere(port)).not.toContain(f.tom.email);
+    });
+
+    it("asking signs out everywhere and waits 7 days; the pass erases it on the day (rc22)", async () => {
+      const port = await makePort();
+      const f = await busyTom(port, "wait");
+      const first = await createSession(port, f.tom.id, { now: T0 });
+      const asked = await requestDeletion(port, f.tom.id, T0);
+      expect(Date.parse(asked.eraseAfter) - Date.parse(T0)).toBe(DELETION_WAIT_MS);
+      // Every session is gone, the asking one included.
+      expect(await resolveAccounts(port, [first.token], { now: T0 })).toEqual([]);
+      // Asking again (signed in during the wait) keeps the day and replaces the link.
+      const again = await requestDeletion(port, f.tom.id, T1);
+      expect(again.eraseAfter).toBe(asked.eraseAfter);
+      expect(await peekDeletion(port, asked.token)).toBeNull();
+      expect((await peekDeletion(port, again.token))?.email).toBe(f.tom.email);
+
+      // Signed in during the wait, the session knows the day.
+      const during = await createSession(port, f.tom.id, { now: T1 });
+      const [account] = await resolveAccounts(port, [during.token], { now: T1 });
+      expect(account?.deletesAt).toBe(asked.eraseAfter);
+
+      // Not yet: the pass does nothing.
+      const justBefore = new Date(Date.parse(asked.eraseAfter) - 1).toISOString();
+      expect(await eraseDue(port, { now: justBefore })).toBe(0);
+      expect(await everywhere(port)).toContain(f.tom.email);
+      // On the day, exactly what deleting at once did.
+      expect(await eraseDue(port, { now: asked.eraseAfter })).toBe(1);
+      const after = await everywhere(port);
+      expect(after).not.toContain(f.tom.id);
+      expect(after).not.toContain(f.tom.email);
+      expect(await eraseDue(port, { now: asked.eraseAfter })).toBe(0);
+    });
+
+    it("the emailed link keeps the account, or deletes it now, once (rc22)", async () => {
+      const port = await makePort();
+      const f = await busyTom(port, "link");
+      const revoked: string[] = [];
+      const revokeCalendars = (cs: readonly { id: string }[]) => {
+        for (const c of cs) revoked.push(c.id);
+        return Promise.resolve();
+      };
+
+      const kept = await requestDeletion(port, f.tom.id, T0);
+      expect(await keepAccount(port, kept.token)).toBe(true);
+      expect(await keepAccount(port, kept.token)).toBe(false); // single-use
+      expect(await pendingDeletion(port, f.tom.id)).toBeNull();
+      expect(await deleteNow(port, kept.token, { now: T1, revokeCalendars })).toBe(false);
+      expect(await eraseDue(port, { now: "2999-01-01T00:00:00.000Z" })).toBe(0);
+      expect(await everywhere(port)).toContain(f.tom.email);
+
+      const now = await requestDeletion(port, f.tom.id, T0);
+      expect(await deleteNow(port, now.token, { now: T1, revokeCalendars })).toBe(true);
+      expect(await everywhere(port)).not.toContain(f.tom.id);
+      // Clicked twice: the link is gone with the account.
+      expect(await deleteNow(port, now.token, { now: T1, revokeCalendars })).toBe(false);
+    });
+
+    it("the pass writes nothing when nothing is due (§16), and erases a bounded number per run", async () => {
+      const port = await makePort();
+      let writes = 0;
+      const counting: StoragePort = {
+        query: (s) => {
+          if (!/^\s*SELECT/i.test(s.sql)) writes += 1;
+          return port.query(s);
+        },
+        batch: (stmts) => {
+          writes += stmts.length;
+          return port.batch(stmts);
+        },
+      };
+      const f = await busyTom(port, "pass");
+      expect(await eraseDue(counting, { now: T1 })).toBe(0);
+      const asked = await requestDeletion(port, f.tom.id, T0);
+      const other = await requestDeletion(port, f.adam.id, T0);
+      expect(other.eraseAfter).toBe(asked.eraseAfter);
+      writes = 0;
+      expect(await eraseDue(counting, { now: T0 })).toBe(0);
+      expect(writes).toBe(0);
+      // Two due, one per run.
+      expect(await eraseDue(port, { now: asked.eraseAfter })).toBe(1);
+      expect(await eraseDue(port, { now: asked.eraseAfter })).toBe(1);
+      expect(await eraseDue(port, { now: asked.eraseAfter })).toBe(0);
     });
 
     it("nobody can sign in as, invite or add a tombstone's address", async () => {

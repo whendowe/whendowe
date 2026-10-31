@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import type { Context, Hono } from "hono";
-import { ZodError } from "zod";
+import { ZodError, z } from "zod";
 import type { StoragePort } from "../../db/port.js";
 import { signOutActive } from "../../people/accounts.js";
 import {
@@ -12,23 +12,27 @@ import {
   setAppearance,
 } from "../../people/person.js";
 import {
-  type ConnectionToRevoke,
-  connectionsOf,
-  eraseAccount,
+  DELETION_WAIT_MS,
+  deleteNow,
   erasePreview,
   FORMER_MEMBER,
+  keepAccount,
+  keepOwnAccount,
+  peekDeletion,
+  type RevokeCalendars,
+  requestDeletion,
 } from "../../privacy/erasure.js";
 import { exportPerson } from "../../privacy/export.js";
-import { ACCOUNT_PATH, appearanceForm, html } from "../layout.js";
+import { ACCOUNT_PATH, appearanceForm, deletionDay, html, KEEP_ACCOUNT_PATH } from "../layout.js";
 import {
   type AppEnv,
   page,
   rejectedPage,
   requireSignedIn,
-  type SessionDeps,
   verifyFormCsrf,
   writeAccountsCookie,
 } from "../session.js";
+import type { AuthDeps } from "./auth.js";
 
 // Your account (DESIGN §10 rc21 *Privacy basics*): the handle others see by default,
 // your data, and deleting the account.
@@ -37,7 +41,11 @@ import {
 //   POST /account          change it
 //   GET  /account/export   everything about you, as one JSON file (a read: GET)
 //   GET  /account/delete   what deleting it would take with it
-//   POST /account/delete   delete it, once you've typed your address
+//   POST /account/delete   ask for it to be deleted, once you've typed your address:
+//                          signed out everywhere, emailed, deleted in 7 days (rc22)
+//   POST /account/keep     keep it, signed in during the wait
+//   GET  /account/deletion the emailed link: keep it, or delete it now (GET renders)
+//   POST /account/deletion …and acts
 //
 // And the POST every group, event and thread page uses for "you appear here as…"
 // (saveAppearance below), so the three behave the same.
@@ -45,13 +53,34 @@ import {
 export { ACCOUNT_PATH };
 export const EXPORT_PATH = `${ACCOUNT_PATH}/export`;
 export const DELETE_ACCOUNT_PATH = `${ACCOUNT_PATH}/delete`;
+export const DELETION_LINK_PATH = `${ACCOUNT_PATH}/deletion`;
+export { KEEP_ACCOUNT_PATH };
 
 export interface AccountOptions {
   /**
    * Revoke this person's calendar grants at the provider, before their tokens are
    * deleted. Present when the instance has Google credentials (app.ts).
    */
-  readonly revokeCalendars?: (connections: readonly ConnectionToRevoke[]) => Promise<void>;
+  readonly revokeCalendars?: RevokeCalendars;
+}
+
+const WAIT_DAYS = DELETION_WAIT_MS / (24 * 60 * 60 * 1000);
+
+const tokenSchema = z.string().min(1).max(256);
+
+/** The emailed link's pages carry its token: out of Referer headers and every cache. */
+function sensitive(c: Context): void {
+  c.header("Referrer-Policy", "no-referrer");
+  c.header("Cache-Control", "no-store");
+}
+
+function linkGonePage(c: Context<AppEnv>) {
+  return page(
+    c,
+    "Link no longer works",
+    html`<h1>This link no longer works</h1>
+<p>The account was kept, or it has already been deleted. To delete an account, sign in and choose <em>Delete your account</em>.</p>`,
+  );
 }
 
 function accountForm(csrf: string, handle: string, error: string | null) {
@@ -76,7 +105,7 @@ function reason(error: unknown): string {
 
 export function registerAccountRoutes(
   app: Hono<AppEnv>,
-  deps: SessionDeps,
+  deps: AuthDeps,
   options: AccountOptions = {},
 ): void {
   app.get(EXPORT_PATH, async (c) => {
@@ -90,6 +119,16 @@ export function registerAccountRoutes(
   app.get(DELETE_ACCOUNT_PATH, async (c) => {
     const me = requireSignedIn(c);
     if (me instanceof Response) return me;
+    if (me.deletesAt !== null) {
+      return c.html(
+        page(
+          c,
+          "Delete your account",
+          html`<h1>Your account is being deleted</h1>
+<p>It will be deleted on ${deletionDay(me.deletesAt)}. Until then nothing changes for anyone else, and you can still <a href="${EXPORT_PATH}">download your data</a>.</p>`,
+        ),
+      );
+    }
     const p = await erasePreview(deps.storage, me.personId);
     const loses: string[] = [];
     if (p.eventsDeleted > 0)
@@ -116,7 +155,8 @@ export function registerAccountRoutes(
 <p>Everything that is yours goes: your name, your address, your answers, votes and notes, your drafts and your calendar connections. You're signed out of it everywhere.</p>
 <p>In other people's events and plans, what you changed stays, but it says <strong>${FORMER_MEMBER}</strong> — a different one in each, so nobody can tell they were all you.</p>
 ${loses.length === 0 ? "" : html`<p class="error">${loses.join(". ")}. To keep them for the others, make someone else an editor, or leave them to someone, first.</p>`}
-<p class="muted">Copies in our backups are gone within 35 days. <a href="${EXPORT_PATH}">Download your data</a> first if you want it.</p>
+<p>It happens ${WAIT_DAYS} days after you confirm. You're signed out everywhere straight away, and we email you a link to keep the account, or to delete it at once. Nothing is kept to bring it back afterwards: <a href="${EXPORT_PATH}">download your data</a> first if you want it.</p>
+<p class="muted">Copies in our backups are gone within 35 days after that.</p>
 <form method="post" action="${DELETE_ACCOUNT_PATH}">
   <input type="hidden" name="csrf" value="${me.csrfToken}" />
   <p><label>To confirm, type your email address<br /><input name="confirm" type="email" autocomplete="off" required /></label></p>
@@ -142,12 +182,102 @@ ${loses.length === 0 ? "" : html`<p class="error">${loses.join(". ")}. To keep t
         400,
       );
     }
-    if (options.revokeCalendars !== undefined)
-      await options.revokeCalendars(await connectionsOf(deps.storage, me.personId));
-    await eraseAccount(deps.storage, me.personId, { now: deps.now() });
-    // Its sessions are gone; drop it from this browser too. Other accounts here stay.
+    const asked = await requestDeletion(deps.storage, me.personId, deps.now());
+    const day = deletionDay(asked.eraseAfter);
+    // From the configured origin, never the Host header (auth.ts explains why).
+    const link = new URL(DELETION_LINK_PATH, deps.publicBaseUrl);
+    link.searchParams.set("t", asked.token);
+    let mailed = true;
+    try {
+      await deps.mail.send({
+        to: me.email,
+        subject: `Your WhenDoWe account will be deleted on ${day}`,
+        text: [
+          `You asked to delete your WhenDoWe account, ${me.email}. It will be deleted on ${day}.`,
+          "",
+          "To keep it, or to delete it now instead:",
+          "",
+          link.toString(),
+          "",
+          "You've been signed out everywhere. If you didn't ask for this, open the link and keep your account: someone else may have used it.",
+        ].join("\n"),
+      });
+    } catch {
+      // The request stands either way (§10 rc22); the page says the email didn't go.
+      mailed = false;
+    }
+    // Its sessions are revoked; drop it from this browser too. Other accounts here stay.
     const { accounts } = signOutActive(c.get("accounts"));
     writeAccountsCookie(c, accounts, deps.secureCookies);
+    return c.html(
+      page(
+        c,
+        "Account to be deleted",
+        html`<h1>Your account will be deleted on ${day}</h1>
+<p>You're signed out of it everywhere.</p>
+${
+  mailed
+    ? html`<p>We've emailed ${me.email} a link to keep it, or to delete it now.</p>`
+    : html`<p class="error">We couldn't email you just now. To keep the account, sign in again before then.</p>`
+}
+<p><a href="/">Home</a></p>`,
+      ),
+    );
+  });
+
+  app.post(KEEP_ACCOUNT_PATH, async (c) => {
+    const me = requireSignedIn(c);
+    if (me instanceof Response) return me;
+    const form = await c.req.parseBody();
+    if (!(await verifyFormCsrf(me, form))) return rejectedPage(c, form);
+    await keepOwnAccount(deps.storage, me.personId);
+    return c.redirect(ACCOUNT_PATH, 303);
+  });
+
+  app.get(DELETION_LINK_PATH, async (c) => {
+    sensitive(c);
+    const token = tokenSchema.safeParse(c.req.query("t"));
+    const pending = token.success ? await peekDeletion(deps.storage, token.data) : null;
+    if (!token.success || pending === null) return c.html(linkGonePage(c), 400);
+    const button = (action: string, label: string) =>
+      html`<form method="post" action="${DELETION_LINK_PATH}">
+  <input type="hidden" name="t" value="${token.data}" />
+  <input type="hidden" name="do" value="${action}" />
+  <p><button type="submit">${label}</button></p>
+</form>`;
+    return c.html(
+      page(
+        c,
+        "Your account",
+        html`<h1>${pending.email} will be deleted on ${deletionDay(pending.eraseAfter)}</h1>
+${button("keep", "Keep my account")}
+<p class="muted">or, if you want it gone now — this can't be undone:</p>
+${button("now", "Delete it now")}`,
+      ),
+    );
+  });
+
+  app.post(DELETION_LINK_PATH, async (c) => {
+    sensitive(c);
+    const form = await c.req.parseBody();
+    const token = tokenSchema.safeParse(form.t);
+    if (!token.success) return c.html(linkGonePage(c), 400);
+    if (form.do === "keep") {
+      if (!(await keepAccount(deps.storage, token.data))) return c.html(linkGonePage(c), 400);
+      return c.html(
+        page(
+          c,
+          "Account kept",
+          html`<h1>Your account is kept</h1><p>Nothing was deleted. <a href="/auth/sign-in">Sign in</a> to use it.</p>`,
+        ),
+      );
+    }
+    if (form.do !== "now") return c.html(linkGonePage(c), 400);
+    const deleted = await deleteNow(deps.storage, token.data, {
+      now: deps.now(),
+      revokeCalendars: options.revokeCalendars,
+    });
+    if (!deleted) return c.html(linkGonePage(c), 400);
     return c.html(
       page(
         c,

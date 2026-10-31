@@ -2,6 +2,7 @@
 import { Hono } from "hono";
 import { revokeGoogleGrant } from "../oauth/token-exchange.js";
 import { findPersonById } from "../people/person.js";
+import type { RevokeCalendars } from "../privacy/erasure.js";
 import { securityHeaders } from "./csp.js";
 import { ACCOUNT_PATH, html } from "./layout.js";
 import { registerAccountRoutes } from "./routes/account.js";
@@ -30,6 +31,21 @@ async function nameNudge(auth: AuthDeps, personId: string) {
   return person?.displayName === null
     ? html`<p class="wd-nudge"><strong>Choose the name people see.</strong> Until you do, others see you as a guest, never your email address. <a href="${ACCOUNT_PATH}">Choose a name</a></p>`
     : "";
+}
+
+/**
+ * Revoke a person's Google grants before their tokens are deleted (§10 rc21), best
+ * effort; undefined on an instance with no Google credentials. Shared by the delete
+ * routes and the cron's purge pass.
+ */
+export function calendarRevoker(oauth: OAuthRouteDeps | undefined): RevokeCalendars | undefined {
+  if (oauth === undefined) return undefined;
+  return async (connections) => {
+    for (const conn of connections) {
+      const token = await oauth.cipher.decrypt(conn.refreshTokenEnc);
+      await revokeGoogleGrant(token, oauth.fetchImpl);
+    }
+  };
 }
 
 export function createApp(options: AppOptions = {}): Hono<AppEnv> {
@@ -93,18 +109,7 @@ ${connect}`,
 
   if (auth !== undefined) {
     registerAuthRoutes(app, auth, { google: oauth !== undefined });
-    registerAccountRoutes(app, auth, {
-      // Deleting an account revokes its Google grants first (§10 rc21), best effort.
-      revokeCalendars:
-        oauth === undefined
-          ? undefined
-          : async (connections) => {
-              for (const conn of connections) {
-                const token = await oauth.cipher.decrypt(conn.refreshTokenEnc);
-                await revokeGoogleGrant(token, oauth.fetchImpl);
-              }
-            },
-    });
+    registerAccountRoutes(app, auth, { revokeCalendars: calendarRevoker(oauth) });
     registerGroupRoutes(app, auth);
     registerEventRoutes(app, auth);
     registerPlanRoutes(app, auth);

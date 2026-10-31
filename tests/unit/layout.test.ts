@@ -44,6 +44,7 @@ const viewer = {
   others: [{ sessionId: "s-bob", email: "bob@example.org" }],
   canAddAccount: true,
   here: "/groups",
+  deletesAt: null,
 };
 
 it("a signed-in page names its account in the header, with the menu (rc18)", () => {
