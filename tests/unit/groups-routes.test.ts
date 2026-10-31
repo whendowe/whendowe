@@ -321,3 +321,34 @@ it("rejects tiers that aren't on the list", async () => {
     400,
   );
 });
+
+it("leaving a group: the organizer's role passes on; the last one out deletes it (§10 rc21)", async () => {
+  const h = await harness();
+  const dm = await signIn(h, "lg-dm@example.org");
+  const group = await createGroupVia(h, dm, "Jam");
+  await inviteVia(h, dm, group, "lg-lena@example.org");
+  const joined = await h.app.request(
+    "/invite",
+    post({ t: inviteLink(h).searchParams.get("t") ?? "" }),
+  );
+  const lena = (joined.headers.get("set-cookie") ?? "").split(";")[0] ?? "";
+  const lenaCsrf =
+    /name="csrf" value="([^"]+)"/.exec(
+      await (await h.app.request("/", { headers: { cookie: lena } })).text(),
+    )?.[1] ?? "";
+  const asOrganizer = await (
+    await h.app.request(`${group}/leave`, { headers: { cookie: dm.cookie } })
+  ).text();
+  expect(asOrganizer).toContain("Someone else will organize it");
+  expect((await h.app.request(`${group}/leave`, post({ csrf: dm.csrf }, dm.cookie))).status).toBe(
+    303,
+  );
+  expect((await h.app.request(group, { headers: { cookie: dm.cookie } })).status).toBe(404);
+  const lenaPage = await (await h.app.request(group, { headers: { cookie: lena } })).text();
+  expect(lenaPage).toContain("Invite someone"); // she organizes it now
+
+  const last = await (await h.app.request(`${group}/leave`, { headers: { cookie: lena } })).text();
+  expect(last).toContain("leaving deletes the group");
+  expect((await h.app.request(`${group}/leave`, post({ csrf: lenaCsrf }, lena))).status).toBe(303);
+  expect((await h.app.request(group, { headers: { cookie: lena } })).status).toBe(404);
+});

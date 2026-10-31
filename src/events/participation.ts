@@ -10,6 +10,7 @@ import {
   visibilitySchema,
 } from "../people/invite.js";
 import { findOrCreatePerson, type Shown, shownAs, shownRowSchema } from "../people/person.js";
+import { collect } from "../privacy/purge.js";
 import type { EventAccess } from "./event.js";
 
 // Who takes part in an event, and on what terms (DESIGN §10 rc7). Two independent
@@ -447,4 +448,83 @@ export async function resolveInvitees(
     });
   }
   return [...byPerson.values()];
+}
+
+export type LeaveEventResult =
+  | { readonly kind: "left"; readonly deleted: boolean }
+  /** Someone must agree before it happens, and it's you: answer instead (rc13). */
+  | { readonly kind: "awaited" }
+  | { readonly kind: "not_taking_part" };
+
+/**
+ * Leave an event (DESIGN §10 rc21): your participation, answers, votes, notes and links
+ * go, and your pending proposals are withdrawn. Your past changes in its history stay
+ * yours (WORKFLOWS US-12). The change row decides, as with removal, and records "left".
+ * If nobody can edit it any more, it is deleted for everyone (garbage collection).
+ */
+export async function leaveEvent(
+  storage: StoragePort,
+  access: EventAccess,
+  input: { readonly now: string; readonly newId?: () => string },
+): Promise<LeaveEventResult> {
+  const eventId = access.event.id;
+  const me = access.participation.personId;
+  const changeId = (input.newId ?? (() => uuidv7()))();
+  const taking = "SELECT 1 FROM event_participation WHERE canonical_event_id = ? AND person_id = ?";
+  const awaited = `SELECT 1 FROM event_participation ep JOIN canonical_event e ON e.id = ep.canonical_event_id
+    WHERE ep.canonical_event_id = ? AND ep.person_id = ? AND ep.response_kind = 'accept' AND e.status = 'proposed'`;
+  const recorded = "EXISTS (SELECT 1 FROM event_participant_change WHERE id = ?)";
+  await storage.batch([
+    {
+      sql: `INSERT INTO event_participant_change (id, canonical_event_id, person_id, action, actor_id, created_at)
+            SELECT ?, ?, ?, 'removed', ?, ?
+            WHERE EXISTS (${taking}) AND NOT EXISTS (${awaited})`,
+      params: [changeId, eventId, me, me, input.now, eventId, me, eventId, me],
+    },
+    {
+      sql: `DELETE FROM response_token WHERE canonical_event_id = ? AND person_id = ? AND ${recorded}`,
+      params: [eventId, me, changeId],
+    },
+    {
+      sql: `DELETE FROM slot_response WHERE canonical_event_id = ? AND person_id = ? AND ${recorded}`,
+      params: [eventId, me, changeId],
+    },
+    {
+      sql: `DELETE FROM event_feedback WHERE canonical_event_id = ? AND person_id = ? AND ${recorded}`,
+      params: [eventId, me, changeId],
+    },
+    {
+      sql: `UPDATE event_change_proposal SET status = 'withdrawn', decided_at = ?
+            WHERE canonical_event_id = ? AND proposed_by = ? AND status = 'pending' AND ${recorded}`,
+      params: [input.now, eventId, me, changeId],
+    },
+    {
+      sql: `DELETE FROM event_participation WHERE canonical_event_id = ? AND person_id = ? AND ${recorded}`,
+      params: [eventId, me, changeId],
+    },
+  ]);
+  const written = await storage.query({
+    sql: "SELECT 1 AS present FROM event_participant_change WHERE id = ?",
+    params: [changeId],
+  });
+  if (written.length === 0) {
+    const still = await storage.query({ sql: taking, params: [eventId, me] });
+    return { kind: still.length === 0 ? "not_taking_part" : "awaited" };
+  }
+  const gone = await collect(storage, { events: [eventId] }, input.now);
+  return { kind: "left", deleted: gone.events.length > 0 };
+}
+
+/** The other editors an event has: 0 means leaving deletes it, for this many people. */
+export async function othersAfterLeaving(
+  storage: StoragePort,
+  access: EventAccess,
+): Promise<{ readonly editors: number; readonly people: number }> {
+  const rows = await storage.query({
+    sql: `SELECT sum(edit_tier = 'edit') AS editors, count(*) AS people
+          FROM event_participation WHERE canonical_event_id = ? AND person_id <> ?`,
+    params: [access.event.id, access.participation.personId],
+  });
+  const r = z.object({ editors: z.number().nullable(), people: z.number() }).parse(rows[0]);
+  return { editors: r.editors ?? 0, people: r.people };
 }

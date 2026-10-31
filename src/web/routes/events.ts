@@ -5,13 +5,16 @@ import { ZodError } from "zod";
 import type { StoragePort } from "../../db/port.js";
 import {
   type CanonicalEvent,
+  canDelete,
   createEvent,
+  deleteEvent,
   type EventAccess,
   type EventFieldsInput,
   editEvent,
   eventFieldsSchema,
   findEventForParticipant,
   type HistoryEntry,
+  isOver,
   listEventsFor,
   listHistory,
   setCancelled,
@@ -22,8 +25,10 @@ import {
   addParticipant,
   canSee,
   canSeeField,
+  leaveEvent,
   listParticipantChanges,
   listParticipants,
+  othersAfterLeaving,
   type ParticipantView,
   removeParticipant,
   resolveInvitees,
@@ -248,19 +253,6 @@ export function eventSummary(access: EventAccess): Html {
 }
 
 /**
- * Whether an event is over: its end, in its own zone, has passed. A series never is. An
- * all-day event has no zone (a floating date), so it is over once its last day has
- * ended everywhere — the last zone on Earth, UTC−12.
- */
-function isPast(event: CanonicalEvent, now: string): boolean {
-  if (event.rrule !== null) return false;
-  const end = Temporal.PlainDateTime.from(event.endLocal).toZonedDateTime(
-    event.tzid ?? "Etc/GMT+12",
-  );
-  return Temporal.Instant.compare(end.toInstant(), Temporal.Instant.from(now)) <= 0;
-}
-
-/**
  * Home for a signed-in person: Your events (DESIGN rc15). Open polls first — they need
  * an answer — then what's coming up, soonest first, then the past, folded away. Every
  * line at the viewer's own tier (eventSummary → canSee).
@@ -273,8 +265,8 @@ export async function yourEvents(
   const all = await listEventsFor(storage, personId);
   const voting = all.filter((a) => isPoll(a) && a.event.status === "proposed");
   const rest = all.filter((a) => !voting.includes(a));
-  const upcoming = rest.filter((a) => !isPast(a.event, now));
-  const past = rest.filter((a) => isPast(a.event, now)).reverse();
+  const upcoming = rest.filter((a) => !isOver(a.event, now));
+  const past = rest.filter((a) => isOver(a.event, now)).reverse();
   const list = (items: readonly EventAccess[]) =>
     html`<ul>${items.map((a) => html`<li>${eventSummary(a)}</li>`)}</ul>`;
   return html`<h1>Your events</h1>
@@ -1066,7 +1058,11 @@ async function eventPage(
     ...edits.map((h) => ({ at: h.at, entry: historyEntry(h) })),
     ...peopleChanges.map((h) => ({
       at: h.at,
-      entry: html`<span class="muted">${h.at.slice(0, 16).replace("T", " ")}</span> · ${who(h.actor)} ${h.action === "added" ? "added" : "removed"} ${who(h.person)}`,
+      entry: html`<span class="muted">${h.at.slice(0, 16).replace("T", " ")}</span> · ${
+        h.actorId === h.personId
+          ? html`${who(h.person)} ${h.action === "added" ? "joined" : "left"}`
+          : html`${who(h.actor)} ${h.action === "added" ? "added" : "removed"} ${who(h.person)}`
+      }`,
     })),
   ].sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
 
@@ -1094,7 +1090,12 @@ ${people.length === 0 ? "" : peopleSection(access, people, csrf)}
 ${see("participants") ? await appearanceSection(deps.storage, { kind: "event", id: event.id }, { personId: participation.personId, csrfToken: csrf }, `${EVENTS_PATH}/${event.id}/me`, "event") : ""}
 ${await responsesSection(deps, access, csrf)}
 <h2>History</h2>
-<ul>${history.map((h) => html`<li>${h.entry}</li>`)}</ul>`,
+<ul>${history.map((h) => html`<li>${h.entry}</li>`)}</ul>
+<p class="muted"><a href="${EVENTS_PATH}/${event.id}/leave">Leave this event</a>${
+      participation.editTier === "edit"
+        ? html` · <a href="${EVENTS_PATH}/${event.id}/delete">Delete it for everyone</a>`
+        : ""
+    }</p>`,
   );
 }
 
@@ -1472,6 +1473,134 @@ ${pollForm(`/groups/${membership.group.id}/polls`, csrf, values, error, peopleFi
           ),
           409,
         );
+    }
+  });
+
+  // Leaving and deleting (DESIGN §10 rc21). GET says what will happen; POST does it.
+  const visible = async (c: Context<AppEnv>, personId: string) => {
+    const access = await findEventForParticipant(deps.storage, c.req.param("id") ?? "", personId);
+    return access === null || access.participation.visibility === "HIDDEN" ? null : access;
+  };
+  const titleOf = (access: EventAccess) =>
+    canSee(access.participation.visibility, "title") ? access.event.title : BUSY_LABEL;
+  const confirmPage = (
+    c: Context<AppEnv>,
+    title: string,
+    body: Html,
+    action: string,
+    button: string,
+    csrf: string,
+  ) =>
+    page(
+      c,
+      title,
+      html`<h1>${title}</h1>${body}
+<form method="post" action="${action}">
+  <input type="hidden" name="csrf" value="${csrf}" />
+  <p><button type="submit">${button}</button> <a href="${action.replace(/\/(leave|delete)$/, "")}">Keep it</a></p>
+</form>`,
+    );
+
+  app.get(`${EVENTS_PATH}/:id/leave`, async (c) => {
+    const me = requireSignedIn(c);
+    if (me instanceof Response) return me;
+    const access = await visible(c, me.personId);
+    if (access === null) return c.html(notFound(c), 404);
+    const after = await othersAfterLeaving(deps.storage, access);
+    const lastEditor = access.participation.editTier === "edit" && after.editors === 0;
+    return c.html(
+      confirmPage(
+        c,
+        `Leave “${titleOf(access)}”?`,
+        html`<p>Your answers, votes and notes here go, and it leaves your events. What you changed stays in its history under your name.</p>${
+          lastEditor
+            ? html`<p class="error">Nobody else can edit it, so leaving deletes it${
+                after.people > 0
+                  ? ` for the ${after.people} other ${after.people === 1 ? "person" : "people"} on it too`
+                  : ""
+              }. To keep it for them, make someone else an editor first.</p>`
+            : ""
+        }`,
+        `${EVENTS_PATH}/${access.event.id}/leave`,
+        lastEditor ? "Leave and delete it" : "Leave",
+        me.csrfToken,
+      ),
+    );
+  });
+
+  app.post(`${EVENTS_PATH}/:id/leave`, async (c) => {
+    const me = requireSignedIn(c);
+    if (me instanceof Response) return me;
+    const form = await c.req.parseBody();
+    if (!(await verifyFormCsrf(me, form))) return rejectedPage(c, form);
+    const access = await visible(c, me.personId);
+    if (access === null) return c.html(notFound(c), 404);
+    const left = await leaveEvent(deps.storage, access, { now: deps.now() });
+    if (left.kind === "awaited")
+      return c.html(
+        page(
+          c,
+          "Answer first",
+          html`<h1>It's waiting for your answer</h1><p>This won't happen unless you agree. Decline it instead of leaving: then everyone knows.</p><p><a href="${EVENTS_PATH}/${access.event.id}">← Back</a></p>`,
+        ),
+        409,
+      );
+    return c.redirect("/", 303);
+  });
+
+  app.get(`${EVENTS_PATH}/:id/delete`, async (c) => {
+    const me = requireSignedIn(c);
+    if (me instanceof Response) return me;
+    const access = await visible(c, me.personId);
+    if (access === null) return c.html(notFound(c), 404);
+    const allowed = canDelete(access, deps.now());
+    if (allowed === "forbidden")
+      return c.html(page(c, "Not allowed", html`<h1>Only its editors can delete it</h1>`), 403);
+    if (allowed === "upcoming")
+      return c.html(
+        page(
+          c,
+          "Cancel it first",
+          html`<h1>Cancel it first</h1><p>It's still ahead, and its people think it's on. Cancel it so they're told; then you can delete it.</p><p><a href="${EVENTS_PATH}/${access.event.id}">← Back</a></p>`,
+        ),
+        409,
+      );
+    return c.html(
+      confirmPage(
+        c,
+        `Delete “${titleOf(access)}” for everyone?`,
+        html`<p>It goes from everyone's events, with its answers, notes and history. This can't be undone.</p>`,
+        `${EVENTS_PATH}/${access.event.id}/delete`,
+        "Delete it",
+        me.csrfToken,
+      ),
+    );
+  });
+
+  app.post(`${EVENTS_PATH}/:id/delete`, async (c) => {
+    const me = requireSignedIn(c);
+    if (me instanceof Response) return me;
+    const form = await c.req.parseBody();
+    if (!(await verifyFormCsrf(me, form))) return rejectedPage(c, form);
+    const access = await visible(c, me.personId);
+    if (access === null) return c.html(notFound(c), 404);
+    const result = await deleteEvent(deps.storage, access, deps.now());
+    switch (result.kind) {
+      case "deleted":
+        return c.redirect("/", 303);
+      case "forbidden":
+        return c.html(page(c, "Not allowed", html`<h1>Only its editors can delete it</h1>`), 403);
+      case "upcoming":
+        return c.html(page(c, "Cancel it first", html`<h1>Cancel it first</h1>`), 409);
+      case "mirrored":
+        return c.html(
+          page(c, "Deleting", html`<h1>It will be gone once it's out of everyone's calendars</h1>`),
+          202,
+        );
+      default: {
+        const unreachable: never = result;
+        return unreachable;
+      }
     }
   });
 

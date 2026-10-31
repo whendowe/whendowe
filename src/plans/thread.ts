@@ -3,6 +3,7 @@ import { z } from "zod";
 import type { StoragePort } from "../db/port.js";
 import { uuidv7 } from "../ids.js";
 import { type Shown, shownAs, shownRowSchema } from "../people/person.js";
+import { collect } from "../privacy/purge.js";
 
 // Plan threads (DESIGN §10 rc19, slice P1): what people are planning — "Kiddo's weeks",
 // "Christmas 2026" — its members, and the organizer who decides when more than two plan.
@@ -200,4 +201,54 @@ export async function listThreadsFor(
       onTable: r.on_table,
     };
   });
+}
+
+/**
+ * Leave a plan thread (DESIGN §10 rc21): your drafts, votes and notes go, and plans of
+ * yours still on the table are withdrawn. Accepted plans are ordinary events by now and
+ * stay. The organizer role passes to the longest-standing member; the last member
+ * leaving deletes the thread.
+ */
+export async function leaveThread(
+  storage: StoragePort,
+  access: ThreadAccess,
+  now: string,
+): Promise<{ readonly deleted: boolean }> {
+  const t = access.thread.id;
+  const me = access.personId;
+  await storage.batch([
+    {
+      sql: `UPDATE plan SET status = 'withdrawn', decided_at = ?, updated_at = ?
+            WHERE thread_id = ? AND author_id = ? AND status = 'on_table'`,
+      params: [now, now, t, me],
+    },
+    {
+      sql: `DELETE FROM plan_event WHERE plan_id IN
+              (SELECT id FROM plan WHERE thread_id = ? AND author_id = ? AND status = 'draft')`,
+      params: [t, me],
+    },
+    {
+      sql: "DELETE FROM plan WHERE thread_id = ? AND author_id = ? AND status = 'draft'",
+      params: [t, me],
+    },
+    {
+      sql: "DELETE FROM plan_vote WHERE person_id = ? AND plan_id IN (SELECT id FROM plan WHERE thread_id = ?)",
+      params: [me, t],
+    },
+    { sql: "DELETE FROM plan_note WHERE thread_id = ? AND author_id = ?", params: [t, me] },
+    {
+      sql: `UPDATE plan_thread SET organizer_id =
+              (SELECT person_id FROM plan_thread_member WHERE thread_id = ? AND person_id <> ?
+               ORDER BY created_at, person_id LIMIT 1)
+            WHERE id = ? AND organizer_id = ?
+              AND EXISTS (SELECT 1 FROM plan_thread_member WHERE thread_id = ? AND person_id <> ?)`,
+      params: [t, me, t, me, t, me],
+    },
+    {
+      sql: "DELETE FROM plan_thread_member WHERE thread_id = ? AND person_id = ?",
+      params: [t, me],
+    },
+  ]);
+  const gone = await collect(storage, { threads: [t] }, now);
+  return { deleted: gone.threads.length > 0 };
 }

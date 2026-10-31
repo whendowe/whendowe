@@ -233,3 +233,13 @@ it("only members see a thread; a form without its token does nothing; text is es
   expect(res.status).toBe(404);
   expect(await res.text()).toContain("This is visible to adam@example.org");
 });
+
+it("leaving a plan thread: the last one out deletes it (§10 rc21)", async () => {
+  const b = await browser();
+  await addAccount(b, "adam@example.org");
+  await nameActive(b, "adam@example.org");
+  const t = await thread(b);
+  expect(await page(b, `${t}/leave`)).toContain("Someone else will organize it");
+  expect(location(await act(b, `${t}/leave`))).toBe(PLANS_PATH);
+  expect((await b.request(t)).status).toBe(404);
+});

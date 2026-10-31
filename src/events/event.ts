@@ -6,6 +6,7 @@ import type { SqlStatement, StoragePort } from "../db/port.js";
 import { uuidv7 } from "../ids.js";
 import type { GroupMembership } from "../people/group.js";
 import { type Shown, shownAs } from "../people/person.js";
+import { purge } from "../privacy/purge.js";
 import { expandOccurrences, formatRRule, parseRRule } from "../recurrence.js";
 import {
   type GroupDefault,
@@ -778,4 +779,46 @@ export async function setCancelled(
     actorId: access.participation.personId,
     now: input.now,
   });
+}
+
+// --- Deleting (DESIGN §10 rc21 *Privacy basics*) ---------------------------------------
+
+/**
+ * Whether an event is over: its end, in its own zone, has passed. A series never is. An
+ * all-day event has no zone (a floating date), so it is over once its last day has
+ * ended everywhere — the last zone on Earth, UTC−12.
+ */
+export function isOver(event: CanonicalEvent, now: string): boolean {
+  if (event.rrule !== null) return false;
+  const end = Temporal.PlainDateTime.from(event.endLocal).toZonedDateTime(
+    event.tzid ?? "Etc/GMT+12",
+  );
+  return Temporal.Instant.compare(end.toInstant(), Temporal.Instant.from(now)) <= 0;
+}
+
+export type DeleteEventResult =
+  | { readonly kind: "deleted" }
+  | { readonly kind: "forbidden" }
+  /** Still ahead and still on: cancel it first, so its people are told (rc13). */
+  | { readonly kind: "upcoming" }
+  /** Mirrored into a calendar still (MVP-4): purged once the mirrors are gone. */
+  | { readonly kind: "mirrored" };
+
+/** Whether this event may be deleted now, by this participant — for the page's buttons. */
+export function canDelete(access: EventAccess, now: string): DeleteEventResult["kind"] {
+  if (access.participation.editTier !== "edit") return "forbidden";
+  const live = access.event.status === "scheduled" || access.event.status === "proposed";
+  return live && !isOver(access.event, now) ? "upcoming" : "deleted";
+}
+
+/** Delete an event for everyone: any editor, once it's over or no longer on (§10 rc21). */
+export async function deleteEvent(
+  storage: StoragePort,
+  access: EventAccess,
+  now: string,
+): Promise<DeleteEventResult> {
+  const allowed = canDelete(access, now);
+  if (allowed !== "deleted") return { kind: allowed };
+  const done = await purge(storage, "event", access.event.id, now);
+  return { kind: done.kind === "purged" ? "deleted" : "mirrored" };
 }

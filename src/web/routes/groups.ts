@@ -8,6 +8,7 @@ import {
   createGroup,
   findGroupForMember,
   type GroupMembership,
+  leaveGroup,
   listGroupsFor,
   listMembers,
 } from "../../people/group.js";
@@ -194,13 +195,54 @@ ${events.length === 0 ? html`<p class="muted">Nothing planned yet.</p>` : html`<
             html`<li>${who(m.shown)}${m.personId === me.personId ? " (you)" : ""}${m.role === "organizer" ? html` <span class="muted">· organizer</span>` : ""}</li>`,
         )}</ul>
 ${await appearanceSection(deps.storage, { kind: "group", id: membership.group.id }, me, `${GROUPS_PATH}/${membership.group.id}/me`, "group")}
-${membership.role === "organizer" ? inviteForm(membership, me.csrfToken, null) : ""}`,
+${membership.role === "organizer" ? inviteForm(membership, me.csrfToken, null) : ""}
+<p class="muted"><a href="${GROUPS_PATH}/${membership.group.id}/leave">Leave this group</a></p>`,
       ),
     );
   });
 
   // "You appear here as…" (§10 rc21). Membership is the access check; saveAppearance
   // checks CSRF and writes only this person's own row.
+  // Leaving (DESIGN §10 rc21). GET says what will happen; POST does it.
+  app.get(`${GROUPS_PATH}/:id/leave`, async (c) => {
+    const me = requireSignedIn(c);
+    if (me instanceof Response) return me;
+    const membership = await findGroupForMember(deps.storage, c.req.param("id"), me.personId);
+    if (membership === null) return c.notFound();
+    const others = (await listMembers(deps.storage, membership)).length - 1;
+    const id = membership.group.id;
+    return c.html(
+      page(
+        c,
+        "Leave group",
+        html`<h1>Leave “${membership.group.name}”?</h1>
+<p>Your events stay as they are: leaving a group doesn't take you off its events, and doesn't take anyone off yours.</p>
+${
+  others === 0
+    ? html`<p class="error">You're the last one in it, so leaving deletes the group.</p>`
+    : membership.role === "organizer"
+      ? html`<p>Someone else will organize it: whoever has been in it longest.</p>`
+      : ""
+}
+<form method="post" action="${GROUPS_PATH}/${id}/leave">
+  <input type="hidden" name="csrf" value="${me.csrfToken}" />
+  <p><button type="submit">${others === 0 ? "Leave and delete it" : "Leave"}</button> <a href="${GROUPS_PATH}/${id}">Stay</a></p>
+</form>`,
+      ),
+    );
+  });
+
+  app.post(`${GROUPS_PATH}/:id/leave`, async (c) => {
+    const me = requireSignedIn(c);
+    if (me instanceof Response) return me;
+    const form = await c.req.parseBody();
+    if (!(await verifyFormCsrf(me, form))) return rejectedPage(c, form);
+    const membership = await findGroupForMember(deps.storage, c.req.param("id"), me.personId);
+    if (membership === null) return c.notFound();
+    await leaveGroup(deps.storage, membership, me.personId, deps.now());
+    return c.redirect(GROUPS_PATH, 303);
+  });
+
   app.post(`${GROUPS_PATH}/:id/me`, async (c) => {
     const me = requireSignedIn(c);
     if (me instanceof Response) return me;

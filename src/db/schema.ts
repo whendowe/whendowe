@@ -642,3 +642,20 @@ export type PersonRow = typeof person.$inferSelect;
 export type LoginTokenRow = typeof loginToken.$inferSelect;
 export type SessionRow = typeof session.$inferSelect;
 export type EventParticipationRow = typeof eventParticipation.$inferSelect;
+
+// --- Privacy basics (DESIGN §10 rc21) -------------------------------------------------
+// What the purge pipeline removed, by id only — never an address or any content — kept
+// for the backup window (35 days) so a restore can re-apply it before serving again.
+
+export const erasureLedger = sqliteTable(
+  "erasure_ledger",
+  {
+    kind: text("kind").notNull(), // person | event | group | thread
+    id: text("id").notNull(),
+    erasedAt: text("erased_at").notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.kind, t.id] }),
+    check("erasure_ledger_kind_chk", sql`${t.kind} IN ('person', 'event', 'group', 'thread')`),
+  ],
+);

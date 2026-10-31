@@ -1316,3 +1316,36 @@ it("in an event: your name there, and your address only if you show it (§10 rc2
   expect(empty.status).toBe(400);
   expect(await text(h, group, dm)).toContain("<li>ann");
 });
+
+it("leaving and deleting: a page that says what will happen, then a POST that does it (§10 rc21)", async () => {
+  const h = await harness();
+  const { mara, group, david } = await household(h);
+  const event = await createVia(h, mara, group);
+
+  // David leaves: the page says so, the POST needs his token, and afterwards he's gone
+  // from it and the history says he left.
+  const confirm = await text(h, `${event}/leave`, david);
+  expect(confirm).toContain("Your answers, votes and notes here go");
+  expect(confirm).not.toContain("deletes it");
+  const forged = await h.app.request(`${event}/leave`, post({ csrf: "nope" }, david.cookie));
+  expect(forged.status).toBe(403);
+  expect((await act(h, event, david, "leave")).status).toBe(303);
+  expect((await get(h, event, david)).status).toBe(404);
+  expect(await text(h, event, mara)).toContain("david left");
+
+  // Deleting: only editors, and not while it's still ahead and on.
+  expect(await text(h, event, mara)).toContain("Delete it for everyone");
+  const ahead = await get(h, `${event}/delete`, mara);
+  expect(ahead.status).toBe(409);
+  expect(await ahead.text()).toContain("Cancel it first");
+  expect((await act(h, event, mara, "cancel")).status).toBe(303);
+  expect(await text(h, `${event}/delete`, mara)).toContain("This can't be undone");
+  expect((await act(h, event, mara, "delete")).status).toBe(303);
+  expect((await get(h, event, mara)).status).toBe(404);
+
+  // The last editor leaving is warned that it deletes the event for the others.
+  const other = await createVia(h, mara, group);
+  expect(await text(h, `${other}/leave`, mara)).toContain(
+    "leaving deletes it for the 2 other people",
+  );
+});

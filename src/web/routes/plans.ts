@@ -34,6 +34,7 @@ import {
   createThread,
   decidesByConsensus,
   findThreadForMember,
+  leaveThread,
   listThreadsFor,
   MAX_MEMBERS,
   memberName,
@@ -1045,8 +1046,53 @@ export function registerPlanRoutes(app: Hono<AppEnv>, deps: PlanRouteDeps): void
       "plan",
     );
     return c.html(
-      page(c, access.thread.name, html`${threadPage(v, DAY.test(day) ? day : null)}${appearance}`),
+      page(
+        c,
+        access.thread.name,
+        html`${threadPage(v, DAY.test(day) ? day : null)}${appearance}
+<p class="muted"><a href="${threadPath(id)}/leave">Leave this plan</a></p>`,
+      ),
     );
+  });
+
+  // Leaving (DESIGN §10 rc21). GET says what will happen; POST does it.
+  app.get(`${PLANS_PATH}/:thread/leave`, async (c) => {
+    const me = requireSignedIn(c);
+    if (me instanceof Response) return me;
+    const access = await gate(c, deps, me);
+    if (access instanceof Response) return access;
+    const others = access.members.length - 1;
+    const id = access.thread.id;
+    return c.html(
+      page(
+        c,
+        "Leave",
+        html`<h1>Leave “${access.thread.name}”?</h1>
+<p>Your drafts, votes and notes here go, and plans of yours still on the table are withdrawn. What was agreed stays: those are ordinary events now.</p>
+${
+  others === 0
+    ? html`<p class="error">You're the last one planning here, so leaving deletes it.</p>`
+    : access.thread.organizerId === me.personId
+      ? html`<p>Someone else will organize it: whoever has been in it longest.</p>`
+      : ""
+}
+<form method="post" action="${threadPath(id)}/leave">
+  <input type="hidden" name="csrf" value="${me.csrfToken}" />
+  <p><button type="submit">${others === 0 ? "Leave and delete it" : "Leave"}</button> <a href="${threadPath(id)}">Stay</a></p>
+</form>`,
+      ),
+    );
+  });
+
+  app.post(`${PLANS_PATH}/:thread/leave`, async (c) => {
+    const me = requireSignedIn(c);
+    if (me instanceof Response) return me;
+    const form = await c.req.parseBody();
+    if (!(await verifyFormCsrf(me, form))) return rejectedPage(c, form);
+    const access = await gate(c, deps, me);
+    if (access instanceof Response) return access;
+    await leaveThread(deps.storage, access, deps.now());
+    return c.redirect(PLANS_PATH, 303);
   });
 
   // "You appear here as…" (§10 rc21): membership (gate) is the access check.

@@ -2,6 +2,7 @@
 import { z } from "zod";
 import type { StoragePort } from "../db/port.js";
 import { uuidv7 } from "../ids.js";
+import { collect } from "../privacy/purge.js";
 import { type Shown, shownAs, shownRowSchema } from "./person.js";
 
 // Groups (MVP-1 slice D): a reusable set of people — a household, a D&D table.
@@ -153,4 +154,35 @@ export async function listMembers(
       role: r.role,
     };
   });
+}
+
+/**
+ * Leave a group (DESIGN §10 rc21). Events stay as they are: a group is an address book
+ * (rc15). An organizer leaving hands the role to the longest-standing member; the last
+ * member leaving deletes the group.
+ */
+export async function leaveGroup(
+  storage: StoragePort,
+  membership: GroupMembership,
+  personId: string,
+  now: string,
+): Promise<{ readonly deleted: boolean }> {
+  const groupId = membership.group.id;
+  await storage.batch([
+    {
+      sql: `UPDATE group_member SET role = 'organizer'
+            WHERE group_id = ? AND person_id =
+                (SELECT person_id FROM group_member WHERE group_id = ? AND person_id <> ?
+                 ORDER BY joined_at, person_id LIMIT 1)
+              AND NOT EXISTS (SELECT 1 FROM group_member
+                              WHERE group_id = ? AND role = 'organizer' AND person_id <> ?)`,
+      params: [groupId, groupId, personId, groupId, personId],
+    },
+    {
+      sql: "DELETE FROM group_member WHERE group_id = ? AND person_id = ?",
+      params: [groupId, personId],
+    },
+  ]);
+  const gone = await collect(storage, { groups: [groupId] }, now);
+  return { deleted: gone.groups.length > 0 };
 }
