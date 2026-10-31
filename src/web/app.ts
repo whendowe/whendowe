@@ -5,6 +5,7 @@ import { type AuthDeps, registerAuthRoutes, SIGN_IN_PATH } from "./routes/auth.j
 import { EVENTS_PATH, POLLS_PATH, registerEventRoutes, yourEvents } from "./routes/events.js";
 import { GROUPS_PATH, registerGroupRoutes } from "./routes/groups.js";
 import { CONNECT_PATH, type OAuthRouteDeps, registerOAuthRoutes } from "./routes/oauth.js";
+import { registerPlanRoutes, yourPlans } from "./routes/plans.js";
 import { registerRespondRoutes } from "./routes/respond.js";
 import { type AppEnv, page, sessionMiddleware } from "./session.js";
 
@@ -67,6 +68,7 @@ export function createApp(options: AppOptions = {}): Hono<AppEnv> {
 ${connect}`
           : html`${await yourEvents(auth.storage, signedIn.personId, auth.now())}
 <p><a href="${EVENTS_PATH}/new">+ New event</a> · <a href="${POLLS_PATH}/new">+ Find a time (poll)</a></p>
+${await yourPlans(auth.storage, signedIn.personId)}
 <p><a href="${GROUPS_PATH}">Your groups</a></p>
 ${connect}`,
       ),
@@ -79,6 +81,7 @@ ${connect}`,
     registerAuthRoutes(app, auth);
     registerGroupRoutes(app, auth);
     registerEventRoutes(app, auth);
+    registerPlanRoutes(app, auth);
     registerRespondRoutes(app, auth);
   }
   if (oauth !== undefined) registerOAuthRoutes(app, oauth);

@@ -6,6 +6,7 @@ import type { MailMessage } from "../../src/mail/port.js";
 import { createApp } from "../../src/web/app.js";
 import { CONFIRM_PATH, SIGN_IN_PATH, SWITCH_PATH } from "../../src/web/routes/auth.js";
 import { GROUPS_PATH } from "../../src/web/routes/groups.js";
+import { PLANS_PATH } from "../../src/web/routes/plans.js";
 import { loadMigrationSql } from "../conftest.js";
 
 // Renders the pages the browser tier drives (DESIGN §9 rc16) through the app itself —
@@ -81,8 +82,152 @@ const evening = await app.request(
 );
 const event = must(evening.headers.get("location"), "event location");
 
+// Plans (DESIGN §10 rc19): a game table of three, where the DM decides, with Lea's
+// answer to the DM's plan on the table; and a pair planning week-long stretches.
+const asPost = (fields: Record<string, string | string[]>, c: string): RequestInit => {
+  const body = new URLSearchParams();
+  for (const [k, v] of Object.entries(fields)) for (const x of [v].flat()) body.append(k, x);
+  return {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded", cookie: c },
+    body: body.toString(),
+  };
+};
+const csrfOf = async (c: string) =>
+  must(
+    /name="csrf" value="([^"]+)"/.exec(
+      await (await app.request("/", { headers: { cookie: c } })).text(),
+    )?.[1],
+    "CSRF token",
+  );
+async function startThread(c: string, name: string, emails: string[]): Promise<string> {
+  const res = await app.request(
+    PLANS_PATH,
+    asPost({ csrf: await csrfOf(c), name, tzid: "Europe/Prague", email: emails }, c),
+  );
+  return must(res.headers.get("location"), "thread location");
+}
+async function draw(
+  c: string,
+  thread: string,
+  events: Record<string, string | string[]>[],
+  from?: string,
+): Promise<void> {
+  const token = await csrfOf(c);
+  await app.request(
+    `${thread}/drafts`,
+    asPost({ csrf: token, ...(from === undefined ? {} : { from }) }, c),
+  );
+  for (const e of events)
+    await app.request(`${thread}/draft/events`, asPost({ csrf: token, ...e }, c));
+}
+async function send(c: string, thread: string, name: string, message: string): Promise<string> {
+  const res = await app.request(
+    `${thread}/draft/details`,
+    asPost({ csrf: await csrfOf(c), name, message, after: "send" }, c),
+  );
+  return must(res.headers.get("location"), "plan location").replace("?sent=1", "");
+}
+const session = (title: string, day: string, start = "19:00", length = "240") => ({
+  title,
+  kind: "time",
+  day,
+  start,
+  length,
+});
+const table = await startThread(cookie, "Thursday Table", ["lea@example.org", "cat@example.org"]);
+await draw(cookie, table, [
+  session("Session 15", "2026-11-05"),
+  session("Session 16", "2026-11-19"),
+  session("Session 17", "2026-12-03"),
+]);
+const planA = await send(cookie, table, "Every other Thursday", "Same as before, to Christmas.");
+
+const leaCookie = await (async () => {
+  const h = await (await app.request("/", { headers: { cookie } })).text();
+  const lea = must(
+    /name="session" value="([^"]+)" \/>\s*<input type="hidden" name="back"[^>]*>\s*<button type="submit">Switch to <strong>lea@/.exec(
+      h,
+    )?.[1],
+    "Lea's session",
+  );
+  const sw = await app.request(
+    SWITCH_PATH,
+    post(
+      { csrf: must(/name="csrf" value="([^"]+)"/.exec(h)?.[1], "csrf"), session: lea, back: "/" },
+      cookie,
+    ),
+  );
+  return must(sw.headers.get("set-cookie")?.split(";")[0], "Lea's cookie");
+})();
+// Lea answers: the 19th moves a week, and a Saturday session is new.
+await app.request(
+  `${table}/drafts`,
+  asPost(
+    { csrf: await csrfOf(leaCookie), from: must(planA.split("/p/")[1], "plan id") },
+    leaCookie,
+  ),
+);
+const leaDraft = await (
+  await app.request(`${table}/draft`, { headers: { cookie: leaCookie } })
+).text();
+const moved = must(
+  /draft\?e=([0-9a-f-]+)#w-[^"]*" data-sid="[^"]+" data-kind="plan"[^>]*aria-label="Thu 19 Nov/.exec(
+    leaDraft,
+  )?.[1],
+  "the 19th",
+);
+await app.request(
+  `${table}/draft/events/${moved}`,
+  asPost({ csrf: await csrfOf(leaCookie), ...session("Session 16", "2026-11-26") }, leaCookie),
+);
+await app.request(
+  `${table}/draft/events`,
+  asPost(
+    { csrf: await csrfOf(leaCookie), ...session("Session 18", "2026-12-12", "15:00", "360") },
+    leaCookie,
+  ),
+);
+const planB = await send(leaCookie, table, "", "I'm away on the 19th.");
+
+const kid = await startThread(cookie, "Kiddo's weeks", ["lea@example.org"]);
+await app.request(`${kid}/drafts`, asPost({ csrf: await csrfOf(cookie) }, cookie));
+const ids = [
+  ...(
+    await (
+      await app.request(`${kid}/draft?add=2026-11-02&kind=days`, { headers: { cookie } })
+    ).text()
+  ).matchAll(/name="who" value="([^"]+)" \/> ([^<]+)<\/label>/g),
+];
+const who = (n: string) => must(ids.find((m) => m[2] === n)?.[1], `${n}'s id`);
+const week = (title: string, from: string, to: string, w: string) => ({
+  title,
+  kind: "days",
+  from,
+  to,
+  who: w,
+});
+for (const e of [
+  week("With dm", "2026-11-02", "2026-11-08", who("dm")),
+  week("With lea", "2026-11-09", "2026-11-15", who("lea")),
+  week("Scout trip: dm on standby", "2026-11-14", "2026-11-17", who("dm")),
+  week("With dm", "2026-11-16", "2026-11-22", who("dm")),
+])
+  await app.request(`${kid}/draft/events`, asPost({ csrf: await csrfOf(cookie), ...e }, cookie));
+const kidDraft = await (await app.request(`${kid}/draft`, { headers: { cookie } })).text();
+const stretch = must(
+  /draft\?e=([0-9a-f-]+)#w-[^"]*" data-sid="[^"]+" data-kind="plan"[^>]*aria-label="Mon 9 Nov/.exec(
+    kidDraft,
+  )?.[1],
+  "Lea's week",
+);
+
 const pages: Record<string, string> = {
   home: "/",
+  "plan-thread": table,
+  "plan-answer": planB,
+  "plan-draft": `${kid}/draft`,
+  "plan-draft-editing": `${kid}/draft?e=${stretch}`,
   "event-new": `${group}/events/new`,
   "event-edit": `${event}/edit`,
   "poll-new": `${group}/polls/new`,
