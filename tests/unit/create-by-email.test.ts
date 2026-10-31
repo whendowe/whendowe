@@ -3,7 +3,14 @@ import { expect, it } from "vitest";
 import { findPersonByEmail } from "../../src/people/person.js";
 import { EVENTS_PATH, POLLS_PATH } from "../../src/web/routes/events.js";
 import { GROUPS_PATH, INVITE_PATH } from "../../src/web/routes/groups.js";
-import { addAccount, type Browser, browser, home, post } from "../property/one-browser.js";
+import {
+  addAccount,
+  type Browser,
+  browser,
+  home,
+  nameActive,
+  post,
+} from "../property/one-browser.js";
 
 // An event names its people directly (DESIGN §10 rc15): by email, each on their own
 // terms, with a group only a way to fill the list.
@@ -27,6 +34,7 @@ const participants = async (b: Browser, event: string) =>
 it("creates an event for people by email alone, each on their own terms", async () => {
   const b = await browser();
   await addAccount(b, "ann@example.org");
+  await nameActive(b, "ann@example.org");
   const form = await (await b.request(`${EVENTS_PATH}/new`)).text();
   expect(form).toContain('name="email_0"');
   expect(form).toContain('name="ask_0"');
@@ -46,9 +54,12 @@ it("creates an event for people by email alone, each on their own terms", async 
   expect(res.status).toBe(303);
   const event = res.headers.get("location") ?? "";
   const people = await participants(b, event);
-  expect(people).toMatch(/ann@example\.org <span class="muted">· can edit/);
-  expect(people).toMatch(/bob@example\.org <span class="muted">· can edit/);
-  expect(people).toContain("cat@example.org");
+  // Ann by her handle; Bob and Cat have never signed in, so they show as guests — and
+  // nobody's address appears (DESIGN §10 rc21).
+  expect(people).toMatch(/ann <span class="muted">· can edit/);
+  expect(people).toMatch(/Guest \d{4} <span class="muted">· can edit/);
+  expect(people.match(/<li>/g)).toHaveLength(3);
+  expect(people).not.toContain("@example.org");
 
   await addAccount(b, "cat@example.org"); // Cat, in no group, sees it at her tier
   const asCat = await (await b.request(event)).text();
@@ -112,6 +123,7 @@ it("from a group: its members are copied in, and anyone else can be added by ema
     /https?:\/\/\S+\/invite\?t=\S+/.exec(b.sent.at(-1)?.text ?? "")?.[0] ?? "",
   ).searchParams.get("t");
   await b.request(INVITE_PATH, post({ t: t ?? "" })); // Dan joins, here
+  await nameActive(b, "dan@example.org");
   const h = await home(b);
   const annSession = h.others[0]?.sessionId ?? "";
   await b.request("/auth/switch", post({ csrf: h.csrf, session: annSession, back: "/" }));
@@ -129,8 +141,9 @@ it("from a group: its members are copied in, and anyone else can be added by ema
   });
   const event = res.headers.get("location") ?? "";
   const people = await participants(b, event);
-  expect(people).toContain("eve@example.org");
-  expect(people).toMatch(/dan@example\.org <span class="muted">· can edit/);
+  expect(people).toMatch(/dan <span class="muted">· can edit/);
+  expect(people).toMatch(/<li>Guest \d{4}/); // Eve, who has never signed in
+  expect(people).not.toContain("@example.org");
 
   // Eve is on the event, not in the group: joining an event is not joining a group.
   await addAccount(b, "eve@example.org");

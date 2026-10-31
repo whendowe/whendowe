@@ -254,6 +254,10 @@ export const groupMember = sqliteTable(
     defaultEditTier: text("default_edit_tier").notNull().default("view"),
     defaultVisibility: text("default_visibility").notNull().default("FULL"),
     joinedAt: text("joined_at").notNull(),
+    // rc21 (DESIGN §10 *Privacy basics*): how this person appears here. NULL handle =
+    // their account's handle; their address is shown to the others only if show_email = 1.
+    handle: text("handle"),
+    showEmail: integer("show_email").notNull().default(0),
   },
   (t) => [
     unique("group_member_uq").on(t.groupId, t.personId),
@@ -322,6 +326,10 @@ export const eventParticipation = sqliteTable(
     respondedAt: text("responded_at"),
     // When response_state last changed — "seen ✓ 14:02" (DESIGN §10 rc13, US-4).
     responseStateAt: text("response_state_at"),
+    // rc21 (DESIGN §10 *Privacy basics*): how this person appears here. NULL handle =
+    // their account's handle; their address is shown to the others only if show_email = 1.
+    handle: text("handle"),
+    showEmail: integer("show_email").notNull().default(0),
   },
   (t) => [
     unique("event_participation_uq").on(t.canonicalEventId, t.personId),
@@ -513,6 +521,10 @@ export const planThreadMember = sqliteTable(
       .notNull()
       .references(() => person.id, { onDelete: "cascade" }),
     createdAt: text("created_at").notNull(),
+    // rc21 (DESIGN §10 *Privacy basics*): how this person appears here. NULL handle =
+    // their account's handle; their address is shown to the others only if show_email = 1.
+    handle: text("handle"),
+    showEmail: integer("show_email").notNull().default(0),
   },
   (t) => [
     primaryKey({ columns: [t.threadId, t.personId] }),

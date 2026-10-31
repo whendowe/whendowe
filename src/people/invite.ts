@@ -3,7 +3,7 @@ import { z } from "zod";
 import type { StoragePort } from "../db/port.js";
 import { uuidv7 } from "../ids.js";
 import type { GroupMembership } from "./group.js";
-import { findOrCreatePerson, normalizeEmail } from "./person.js";
+import { findOrCreatePerson, normalizeEmail, type Shown, shownAs } from "./person.js";
 import { hashToken, issueToken } from "./tokens.js";
 
 // Group invites (MVP-1 slice D2).
@@ -103,13 +103,19 @@ export async function createInvite(
 
 const peekSchema = z.object({
   group_name: z.string(),
+  group_id: z.string(),
+  invited_by: z.string(),
   inviter_email: z.string(),
+  inviter_name: z.string().nullable(),
+  inviter_handle: z.string().nullable(),
+  inviter_show_email: z.number().nullable(),
   email: z.string(),
 });
 
 export interface InvitePreview {
   readonly groupName: string;
-  readonly inviterEmail: string;
+  /** As the group sees the inviter (DESIGN §10 rc21). */
+  readonly inviter: Shown;
   /** The account accepting will sign the browser into. */
   readonly email: string;
 }
@@ -121,16 +127,32 @@ export async function peekInvite(
   now: string,
 ): Promise<InvitePreview | null> {
   const rows = await storage.query({
-    sql: `SELECT g.name AS group_name, p.email AS inviter_email, i.email
+    sql: `SELECT g.name AS group_name, g.id AS group_id, i.invited_by, p.email AS inviter_email,
+                 p.display_name AS inviter_name, m.handle AS inviter_handle,
+                 m.show_email AS inviter_show_email, i.email
           FROM group_invite i
           JOIN person_group g ON g.id = i.group_id
           JOIN person p ON p.id = i.invited_by
+          LEFT JOIN group_member m ON m.group_id = i.group_id AND m.person_id = i.invited_by
           WHERE i.token_hash = ? AND i.accepted_at IS NULL AND i.expires_at > ?`,
     params: [await hashToken(token), now],
   });
   if (rows[0] === undefined) return null;
   const r = peekSchema.parse(rows[0]);
-  return { groupName: r.group_name, inviterEmail: r.inviter_email, email: r.email };
+  return {
+    groupName: r.group_name,
+    inviter: shownAs(
+      r.invited_by,
+      {
+        email: r.inviter_email,
+        display_name: r.inviter_name,
+        handle: r.inviter_handle,
+        show_email: r.inviter_show_email,
+      },
+      r.group_id,
+    ),
+    email: r.email,
+  };
 }
 
 const acceptedSchema = z.object({

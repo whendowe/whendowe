@@ -19,8 +19,8 @@ import {
   peekInvite,
   visibilitySchema,
 } from "../../people/invite.js";
-import { normalizeEmail } from "../../people/person.js";
-import { html } from "../layout.js";
+import { appearanceIn, normalizeEmail } from "../../people/person.js";
+import { html, who } from "../layout.js";
 import {
   type AppEnv,
   notVisible,
@@ -30,6 +30,7 @@ import {
   signInAs,
   verifyFormCsrf,
 } from "../session.js";
+import { appearanceSection, saveAppearance } from "./account.js";
 import { eventSummary } from "./events.js";
 
 // Groups (MVP-1 slice D1). Every route needs a signed-in person; every group page
@@ -190,11 +191,23 @@ ${events.length === 0 ? html`<p class="muted">Nothing planned yet.</p>` : html`<
 <h2>People</h2>
 <ul>${members.map(
           (m) =>
-            html`<li>${m.displayName ?? m.email}${m.personId === me.personId ? " (you)" : ""}${m.role === "organizer" ? html` <span class="muted">· organizer</span>` : ""}</li>`,
+            html`<li>${who(m.shown)}${m.personId === me.personId ? " (you)" : ""}${m.role === "organizer" ? html` <span class="muted">· organizer</span>` : ""}</li>`,
         )}</ul>
+${await appearanceSection(deps.storage, { kind: "group", id: membership.group.id }, me, `${GROUPS_PATH}/${membership.group.id}/me`, "group")}
 ${membership.role === "organizer" ? inviteForm(membership, me.csrfToken, null) : ""}`,
       ),
     );
+  });
+
+  // "You appear here as…" (§10 rc21). Membership is the access check; saveAppearance
+  // checks CSRF and writes only this person's own row.
+  app.post(`${GROUPS_PATH}/:id/me`, async (c) => {
+    const me = requireSignedIn(c);
+    if (me instanceof Response) return me;
+    const membership = await findGroupForMember(deps.storage, c.req.param("id"), me.personId);
+    if (membership === null) return c.notFound();
+    const id = membership.group.id;
+    return saveAppearance(c, deps.storage, { kind: "group", id }, `${GROUPS_PATH}/${id}`);
   });
 
   app.post(`${GROUPS_PATH}/:id/invites`, async (c) => {
@@ -260,6 +273,10 @@ ${inviteForm(membership, me.csrfToken, notice)}`,
 
     const link = new URL(INVITE_PATH, deps.publicBaseUrl);
     link.searchParams.set("t", invite.token);
+    // Named as the group sees them, never by address (§10 rc21).
+    const from =
+      (await appearanceIn(deps.storage, { kind: "group", id: membership.group.id }, me.personId))
+        ?.shown.name ?? "Someone";
     try {
       // The group name is user-written text inside an email from our domain. It is
       // plain text (no HTML to inject) and capped at 80 characters; within a group of
@@ -267,9 +284,9 @@ ${inviteForm(membership, me.csrfToken, notice)}`,
       // revisit before discoverable groups exist.
       await deps.mail.send({
         to: invite.email,
-        subject: `${me.email} invited you to "${membership.group.name}" on WhenDoWe`,
+        subject: `${from} invited you to "${membership.group.name}" on WhenDoWe`,
         text: [
-          `${me.email} invited you to the group "${membership.group.name}" on WhenDoWe.`,
+          `${from} invited you to the group "${membership.group.name}" on WhenDoWe.`,
           "",
           "Join (this also signs you in — no password, nothing to install):",
           link.toString(),
@@ -306,7 +323,7 @@ ${inviteForm(membership, me.csrfToken, notice)}`,
         c,
         "Join group",
         html`<h1>Join “${preview.groupName}”?</h1>
-<p><strong>${preview.inviterEmail}</strong> invited <strong>${preview.email}</strong>.</p>
+<p><strong>${preview.inviter.name}</strong> invited <strong>${preview.email}</strong>.</p>
 ${
   signedIn !== null && signedIn.email !== preview.email
     ? html`<p class="muted">You're signed in as ${signedIn.email}. Joining also signs this browser in as ${preview.email}, and you can switch between them from the menu at the top.</p>`

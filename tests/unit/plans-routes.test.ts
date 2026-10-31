@@ -1,7 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { expect, it } from "vitest";
 import { PLANS_PATH } from "../../src/web/routes/plans.js";
-import { addAccount, type Browser, browser, home, post } from "../property/one-browser.js";
+import {
+  addAccount,
+  type Browser,
+  browser,
+  home,
+  nameActive,
+  post,
+} from "../property/one-browser.js";
 
 // The plan pages (DESIGN §10 rc19), driven through the whole app as two people on one
 // browser would: start a thread, draw a plan with no JavaScript at all, send it, answer
@@ -53,7 +60,9 @@ async function thread(b: Browser, name = "Kiddo's weeks") {
 it("two co-parents agree two weeks, with no JavaScript", async () => {
   const b = await browser({ now: () => "2101-11-01T09:00:00.000Z" });
   await addAccount(b, "mara@example.org");
+  await nameActive(b, "mara@example.org");
   await addAccount(b, "adam@example.org");
+  await nameActive(b, "adam@example.org");
   const t = await thread(b);
   expect(await page(b, t)).toContain("Propose a plan");
 
@@ -141,6 +150,15 @@ it("two co-parents agree two weeks, with no JavaScript", async () => {
   expect(await page(b, t)).toContain(
     "Both said yes to “mara&#39;s changes to A”: 2 events now agreed.",
   );
+
+  // In this thread Mara goes by "M" (DESIGN §10 rc21): her name here, nowhere else.
+  await switchTo(b, "mara@example.org");
+  expect(location(await act(b, `${t}/me`, { handle: "M" }))).toBe(t);
+  expect(await page(b, t)).toContain("You appear here as <strong>M</strong>");
+  await switchTo(b, "adam@example.org");
+  // Both joined at the same moment, so either order is right. (Her address is still in
+  // Adam's account menu: both are signed in on this browser.)
+  expect(await page(b, t)).toMatch(/class="l2">(adam, M|M, adam) ·/);
 });
 
 it("pages write nothing, and the no-JS editor moves a stretch by a week", async () => {

@@ -5,6 +5,7 @@ import { type Diff, diff } from "../changelog.js";
 import type { SqlStatement, StoragePort } from "../db/port.js";
 import { uuidv7 } from "../ids.js";
 import type { GroupMembership } from "../people/group.js";
+import { type Shown, shownAs } from "../people/person.js";
 import { expandOccurrences, formatRRule, parseRRule } from "../recurrence.js";
 import {
   type GroupDefault,
@@ -206,6 +207,23 @@ function logRow(
  * Who takes part besides the creator: a group's members at their defaults — a COPY,
  * never a live link — and the people named directly, whose terms win. Once each.
  */
+/**
+ * An event made from a group COPIES each member's name and address choice there, as it
+ * copies their tiers (DESIGN §10 rc21, rc15): a copy, never a live link.
+ */
+function copyAppearance(eventId: string, groupId: string): SqlStatement {
+  return {
+    sql: `UPDATE event_participation
+          SET handle = (SELECT m.handle FROM group_member m
+                        WHERE m.group_id = ? AND m.person_id = event_participation.person_id),
+              show_email = (SELECT m.show_email FROM group_member m
+                            WHERE m.group_id = ? AND m.person_id = event_participation.person_id)
+          WHERE canonical_event_id = ?
+            AND person_id IN (SELECT person_id FROM group_member WHERE group_id = ?)`,
+    params: [groupId, groupId, eventId, groupId],
+  };
+}
+
 async function takingPart(
   storage: StoragePort,
   input: {
@@ -332,6 +350,7 @@ export async function createEventWith(
         ],
       };
     }),
+    ...(input.group === null ? [] : [copyAppearance(id, input.group.group.id)]),
     ...extra(id),
     logRow(id, 1, input.creatorId, diff({}, { ...flatten(fields), status }), input.now),
   ]);
@@ -576,9 +595,10 @@ export async function editEvent(
 export interface HistoryEntry {
   readonly revision: number;
   readonly actorId: string;
-  readonly actorEmail: string | null;
+  /** As the event's people see the actor (DESIGN §10 rc21); null when it wasn't a person. */
+  readonly actor: Shown | null;
   /** When this revision was an accepted change proposal: who proposed it (proposal.ts). */
-  readonly proposedByEmail: string | null;
+  readonly proposedBy: Shown | null;
   readonly change: Diff;
   readonly at: string;
 }
@@ -587,7 +607,14 @@ const historyRowSchema = z.object({
   revision: z.number(),
   actor: z.string(),
   email: z.string().nullable(),
+  display_name: z.string().nullable(),
+  handle: z.string().nullable(),
+  show_email: z.number().nullable(),
+  proposer_id: z.string().nullable(),
   proposer_email: z.string().nullable(),
+  proposer_display_name: z.string().nullable(),
+  proposer_handle: z.string().nullable(),
+  proposer_show_email: z.number().nullable(),
   diff: z.string(),
   created_at: z.string(),
 });
@@ -608,11 +635,18 @@ export async function listHistory(
   const rows = await storage.query({
     // An accepted proposal is applied only at its base revision, so it IS revision
     // base_revision + 1 — exactly one per revision, no extra column needed.
-    sql: `SELECT c.revision, c.actor, p.email, pp.email AS proposer_email, c.diff, c.created_at
+    sql: `SELECT c.revision, c.actor, p.email, p.display_name, ap.handle, ap.show_email,
+                 ecp.proposed_by AS proposer_id, pp.email AS proposer_email,
+                 pp.display_name AS proposer_display_name, xp.handle AS proposer_handle,
+                 xp.show_email AS proposer_show_email, c.diff, c.created_at
           FROM change_log c LEFT JOIN person p ON p.id = c.actor
+            LEFT JOIN event_participation ap
+              ON ap.canonical_event_id = c.canonical_event_id AND ap.person_id = c.actor
             LEFT JOIN event_change_proposal ecp ON ecp.canonical_event_id = c.canonical_event_id
               AND ecp.status = 'accepted' AND ecp.base_revision + 1 = c.revision
             LEFT JOIN person pp ON pp.id = ecp.proposed_by
+            LEFT JOIN event_participation xp
+              ON xp.canonical_event_id = c.canonical_event_id AND xp.person_id = ecp.proposed_by
           WHERE c.canonical_event_id = ?
           ORDER BY c.revision DESC`,
     params: [access.event.id],
@@ -622,8 +656,32 @@ export async function listHistory(
     return {
       revision: r.revision,
       actorId: r.actor,
-      actorEmail: r.email,
-      proposedByEmail: r.proposer_email,
+      actor:
+        r.email === null
+          ? null
+          : shownAs(
+              r.actor,
+              {
+                email: r.email,
+                display_name: r.display_name,
+                handle: r.handle,
+                show_email: r.show_email,
+              },
+              access.event.id,
+            ),
+      proposedBy:
+        r.proposer_id === null || r.proposer_email === null
+          ? null
+          : shownAs(
+              r.proposer_id,
+              {
+                email: r.proposer_email,
+                display_name: r.proposer_display_name,
+                handle: r.proposer_handle,
+                show_email: r.proposer_show_email,
+              },
+              access.event.id,
+            ),
       change: diffSchema.parse(JSON.parse(r.diff)),
       at: r.created_at,
     };

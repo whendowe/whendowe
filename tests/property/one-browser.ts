@@ -92,6 +92,15 @@ export async function addAccount(b: Browser, email: string): Promise<Response> {
   return b.request(CONFIRM_PATH, post({ t: link.searchParams.get("t") ?? "" }));
 }
 
+/**
+ * Give the active account a handle (DESIGN §10 rc21): what others see instead of its
+ * address. Tests use the part of the address before @, so "adam@example.org" is "adam".
+ */
+export async function nameActive(b: Browser, email: string): Promise<void> {
+  const { csrf } = await home(b);
+  await b.request("/account", post({ csrf, handle: email.split("@")[0] ?? "" }));
+}
+
 /** The home page as this browser sees it: the account in use, the others, its CSRF. */
 export async function home(b: Browser) {
   const text = await (await b.request("/")).text();

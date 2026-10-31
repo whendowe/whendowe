@@ -22,7 +22,13 @@ import { createPoll, pollResults, vote } from "../../src/events/poll.js";
 import { issueResponseLinks } from "../../src/events/response.js";
 import { createGroup, findGroupForMember } from "../../src/people/group.js";
 import { acceptInvite, createInvite } from "../../src/people/invite.js";
-import { findOrCreatePerson, findPersonByEmail } from "../../src/people/person.js";
+import {
+  appearanceIn,
+  findOrCreatePerson,
+  findPersonByEmail,
+  guestName,
+  setAppearance,
+} from "../../src/people/person.js";
 
 // People added to and removed from an existing event (DESIGN rc15, slice 2F) on BOTH
 // drivers. Each change is a reservation row that the participation write is gated on,
@@ -84,6 +90,65 @@ async function added(port: StoragePort, eventId: string, by: string, email: stri
 }
 
 export function runParticipantsContract(makePort: () => Promise<StoragePort>): void {
+  describe("how people appear (DESIGN §10 rc21)", () => {
+    it("an event from a group copies each member's name and address choice; later changes don't follow", async () => {
+      const port = await makePort();
+      const mara = await findOrCreatePerson(port, "pp-mara-copy@example.org", { now: T0 });
+      const group = await createGroup(port, { name: "Rope jam", creatorId: mara.id, now: T0 });
+      const membership = await findGroupForMember(port, group.id, mara.id);
+      if (membership === null) throw new Error("expected membership");
+      const invite = await createInvite(port, membership, {
+        email: "pp-lena-copy@example.org",
+        invitedBy: mara.id,
+        editTier: "view",
+        visibility: "FULL",
+        now: T0,
+      });
+      if (!invite.ok) throw new Error(invite.reason);
+      const lena = (await acceptInvite(port, invite.token, T0))?.personId ?? "";
+      const inGroup = { kind: "group", id: group.id } as const;
+      expect(await setAppearance(port, inGroup, lena, { handle: "Kestrel", showEmail: true })).toBe(
+        true,
+      );
+      expect(
+        await setAppearance(port, inGroup, mara.id, { handle: "Mara", showEmail: false }),
+      ).toBe(true);
+
+      const event = await createEvent(port, {
+        creatorId: mara.id,
+        group: membership,
+        fields: DINNER,
+        now: T0,
+      });
+      const shown = new Map(
+        (await listParticipants(port, event.id)).map((p) => [p.personId, p.shown] as const),
+      );
+      expect(shown.get(lena)).toEqual({ name: "Kestrel", email: "pp-lena-copy@example.org" });
+      expect(shown.get(mara.id)).toEqual({ name: "Mara", email: null });
+
+      // A copy, not a link: changing the group afterwards leaves the event alone…
+      await setAppearance(port, inGroup, lena, { handle: "", showEmail: false });
+      const later = await listParticipants(port, event.id);
+      expect(later.find((p) => p.personId === lena)?.shown).toEqual({
+        name: "Kestrel",
+        email: "pp-lena-copy@example.org",
+      });
+      // …and the event's own setting is hers to change, there.
+      const inEvent = { kind: "event", id: event.id } as const;
+      await setAppearance(port, inEvent, lena, { handle: "", showEmail: false });
+      expect((await appearanceIn(port, inEvent, lena))?.shown).toEqual({
+        name: guestName(event.id, lena),
+        email: null,
+      });
+      // Only members have a row to change.
+      const stranger = await findOrCreatePerson(port, "pp-stranger-copy@example.org", { now: T0 });
+      expect(
+        await setAppearance(port, inEvent, stranger.id, { handle: "X", showEmail: true }),
+      ).toBe(false);
+      expect(await appearanceIn(port, inEvent, stranger.id)).toBeNull();
+    });
+  });
+
   describe("people on an existing event", () => {
     it("an editor adds an address; a person is created for it, at the given tiers", async () => {
       const port = await makePort();
@@ -102,8 +167,16 @@ export function runParticipantsContract(makePort: () => Promise<StoragePort>): v
       });
 
       const changes = await listParticipantChanges(port, mine);
+      // Both named as the event's people see them (§10 rc21): no handles yet, so guests.
       expect(changes).toEqual([
-        { action: "added", personEmail: email, actorEmail: "pp-mara-add@example.org", at: T1 },
+        {
+          action: "added",
+          personId: ann?.id,
+          actorId: d.mara,
+          person: { name: guestName(d.eventId, ann?.id ?? ""), email: null },
+          actor: { name: guestName(d.eventId, d.mara), email: null },
+          at: T1,
+        },
       ]);
       // Not a revision: the event's own history and revision are untouched.
       expect(mine.event.revision).toBe(1);
@@ -143,8 +216,12 @@ export function runParticipantsContract(makePort: () => Promise<StoragePort>): v
         now: T0,
         people,
       });
+      const emailOf = new Map([
+        [mara.id, mara.email],
+        ...people.map((p) => [p.personId, p.email] as const),
+      ]);
       const terms = (await listParticipants(port, event.id)).map(
-        (p) => `${p.email} ${p.editTier} ${p.visibility}`,
+        (p) => `${emailOf.get(p.personId)} ${p.editTier} ${p.visibility}`,
       );
       expect(terms.sort()).toEqual([
         "pp-bob-named@example.org edit FULL",
@@ -230,7 +307,8 @@ export function runParticipantsContract(makePort: () => Promise<StoragePort>): v
       expect(both.map((r) => r.kind).sort()).toEqual(["added", "already"]);
       expect((await add(port, d.eventId, d.mara, email)).kind).toBe("already");
       const changes = await listParticipantChanges(port, await access(port, d.eventId, d.mara));
-      expect(changes.filter((c) => c.personEmail === email)).toHaveLength(1);
+      const guest = await findPersonByEmail(port, email);
+      expect(changes.filter((c) => c.personId === guest?.id)).toHaveLength(1);
     });
 
     it(`adds are bounded at ${ADDS_PER_EVENT_PER_DAY} per event per rolling day`, async () => {

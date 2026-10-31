@@ -3,6 +3,7 @@ import { z } from "zod";
 import { diff } from "../changelog.js";
 import type { StoragePort } from "../db/port.js";
 import type { GroupMembership } from "../people/group.js";
+import { type Shown, shownAs, shownRowSchema } from "../people/person.js";
 import {
   type CanonicalEvent,
   createEventWith,
@@ -140,8 +141,7 @@ async function candidatesOf(storage: StoragePort, eventId: string): Promise<Cand
 
 export interface Voter {
   readonly personId: string;
-  readonly email: string;
-  readonly displayName: string | null;
+  readonly shown: Shown;
   readonly answer: Answer;
 }
 
@@ -162,12 +162,10 @@ export interface PollResults {
   readonly everyoneYes: readonly number[];
 }
 
-const voteRowSchema = z.object({
+const voteRowSchema = shownRowSchema.extend({
   slot_index: z.number(),
   person_id: z.string(),
   answer: answerSchema,
-  email: z.string(),
-  display_name: z.string().nullable(),
 });
 
 /** The poll's candidates and answers, for someone who passed findEventForParticipant. */
@@ -176,10 +174,12 @@ export async function pollResults(storage: StoragePort, access: EventAccess): Pr
   const candidates = await candidatesOf(storage, eventId);
   const votes = (
     await storage.query({
-      sql: `SELECT r.slot_index, r.person_id, r.answer, p.email, p.display_name
+      sql: `SELECT r.slot_index, r.person_id, r.answer, p.email, p.display_name, ep.handle, ep.show_email
             FROM slot_response r JOIN person p ON p.id = r.person_id
+              LEFT JOIN event_participation ep
+                ON ep.canonical_event_id = r.canonical_event_id AND ep.person_id = r.person_id
             WHERE r.canonical_event_id = ?
-            ORDER BY p.email`,
+            ORDER BY r.person_id`,
       params: [eventId],
     })
   ).map((row) => voteRowSchema.parse(row));
@@ -200,8 +200,7 @@ export async function pollResults(storage: StoragePort, access: EventAccess): Pr
       mine: here.find((v) => v.person_id === access.participation.personId)?.answer ?? null,
       voters: here.map((v) => ({
         personId: v.person_id,
-        email: v.email,
-        displayName: v.display_name,
+        shown: shownAs(v.person_id, v, eventId),
         answer: v.answer,
       })),
     };

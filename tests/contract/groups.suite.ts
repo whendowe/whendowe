@@ -8,7 +8,7 @@ import {
   listMembers,
   normalizeGroupName,
 } from "../../src/people/group.js";
-import { findOrCreatePerson } from "../../src/people/person.js";
+import { findOrCreatePerson, guestName } from "../../src/people/person.js";
 
 // Groups on BOTH drivers. Residue-tolerant: the D1 run shares one database, so each
 // test makes its own people (unique addresses) and only queries through them.
@@ -60,7 +60,12 @@ export function runGroupsContract(makePort: () => Promise<StoragePort>): void {
       const membership = await findGroupForMember(port, group.id, dm.id);
       if (membership === null) throw new Error("expected membership");
       expect(await listMembers(port, membership)).toEqual([
-        { personId: dm.id, email: "g-dm@example.org", displayName: null, role: "organizer" },
+        // No handle yet, and no address shown: a guest name (DESIGN §10 rc21).
+        {
+          personId: dm.id,
+          shown: { name: guestName(group.id, dm.id), email: null },
+          role: "organizer",
+        },
       ]);
     });
 

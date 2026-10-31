@@ -71,14 +71,14 @@ import {
   type Visibility,
   visibilitySchema,
 } from "../../people/invite.js";
-import { normalizeEmail } from "../../people/person.js";
+import { appearanceIn, normalizeEmail } from "../../people/person.js";
 import {
   formatRRule,
   parseRRule,
   type RRuleSubset,
   upcomingOccurrences,
 } from "../../recurrence.js";
-import { type Html, html, ZONE_GUESS } from "../layout.js";
+import { type Html, html, who, ZONE_GUESS } from "../layout.js";
 import { pickerAssets } from "../picker.js";
 import {
   type AppEnv,
@@ -88,6 +88,7 @@ import {
   requireSignedIn,
   verifyFormCsrf,
 } from "../session.js";
+import { appearanceSection, saveAppearance } from "./account.js";
 import { sendResponseLink } from "./respond.js";
 
 // Event pages (MVP-2 slice 2B). Every read goes through findEventForParticipant (no
@@ -492,7 +493,7 @@ async function requestsFieldset(
   return html`<fieldset style="margin-bottom:1em"><legend>Ask people <span class="muted">(optional)</span></legend>
 <p class="muted">If anyone must agree, the event waits — and only they and you see it — until all of them do. "Please acknowledge" never holds it up.</p>
 ${others.map(
-  (m) => html`<p><label>${m.displayName ?? m.email}
+  (m) => html`<p><label>${who(m.shown)}
   <select name="req_${m.personId}">
     <option value="">—</option>
     ${REQUESTS.map((r) => html`<option value="${r}" ${chosen.get(m.personId) === r ? html`selected` : ""}>${REQUEST_LABEL[r]}</option>`)}
@@ -624,7 +625,7 @@ function pollSection(
         html`<label style="margin-right:.8em"><input type="radio" name="slot_${c.slotIndex}" value="${a}" ${c.mine === a ? html`checked` : ""} /> ${ANSWER_LABEL[a]}</label>`,
     );
     const names = showNames
-      ? html`<br /><span class="muted">${c.voters.map((v) => `${v.displayName ?? v.email}: ${ANSWER_LABEL[v.answer]}`).join(" · ")}</span>`
+      ? html`<br /><span class="muted">${c.voters.map((v) => `${v.shown.name}: ${ANSWER_LABEL[v.answer]}`).join(" · ")}</span>`
       : "";
     const everyone = poll.everyoneYes.includes(c.slotIndex)
       ? html` <strong>· works for everyone</strong>`
@@ -676,7 +677,6 @@ async function responsesSection(
   const names = canSee(participation.visibility, "participants");
   const responses = await listResponses(deps.storage, access);
   const count = (a: Attendance) => responses.attendance.filter((r) => r.attendance === a).length;
-  const label = (p: { displayName: string | null; email: string }) => p.displayName ?? p.email;
   const notes = names
     ? responses.feedback
     : responses.feedback.filter((f) => f.personId === participation.personId);
@@ -695,7 +695,7 @@ async function responsesSection(
   const tally = scheduled
     ? html`<p class="muted">${count("going")} going · ${count("maybe")} maybe · ${count("not_going")} can't make it</p>${
         names && responses.attendance.length > 0
-          ? html`<ul>${responses.attendance.map((r) => html`<li>${label(r)}: ${ATTENDANCE_LABEL[r.attendance]}</li>`)}</ul>`
+          ? html`<ul>${responses.attendance.map((r) => html`<li>${who(r.shown)}: ${ATTENDANCE_LABEL[r.attendance]}</li>`)}</ul>`
           : ""
       }`
     : "";
@@ -717,7 +717,7 @@ async function responsesSection(
       : "";
   return html`${scheduled ? html`<h2>Are you coming?</h2>${attendanceForm}${tally}` : ""}
 <h2>Notes</h2>
-${notes.length === 0 ? html`<p class="muted">No notes yet.</p>` : html`<ul>${notes.map((n) => html`<li><span class="muted">${n.at.slice(0, 16).replace("T", " ")}</span> · ${label(n)}: <span style="white-space:pre-wrap">${n.body}</span></li>`)}</ul>`}
+${notes.length === 0 ? html`<p class="muted">No notes yet.</p>` : html`<ul>${notes.map((n) => html`<li><span class="muted">${n.at.slice(0, 16).replace("T", " ")}</span> · ${who(n.shown)}: <span style="white-space:pre-wrap">${n.body}</span></li>`)}</ul>`}
 ${noteForm}
 ${sendLinks}`;
 }
@@ -794,7 +794,7 @@ ${button(event.id, "acknowledge", csrf, again ? "I've seen the change" : "Seen i
       ? ""
       : html`<h2>Asked</h2><ul>${requests.map(
           (r) =>
-            html`<li>${r.displayName ?? r.email}: ${REQUEST_LABEL[r.kind]} — ${STATE_LABEL[r.state] ?? r.state}${
+            html`<li>${who(r.shown)}: ${REQUEST_LABEL[r.kind]} — ${STATE_LABEL[r.state] ?? r.state}${
               r.at === null
                 ? ""
                 : html` <span class="muted">${r.at.slice(0, 16).replace("T", " ")}</span>`
@@ -934,7 +934,7 @@ async function proposalsSection(
   const vis = participation.visibility;
   const { pending, mine } = await listProposals(deps.storage, access);
   const forEditor = pending.map(
-    (p) => html`<li><strong>${p.proposerName ?? p.proposerEmail}</strong> proposes:
+    (p) => html`<li><strong>${who(p.proposer)}</strong> proposes:
 ${p.change === null ? "" : changeList(vis, p.change)}
 ${button(event.id, "proposal", csrf, "Accept", { proposal: p.id, decision: "accept" })}${button(event.id, "proposal", csrf, "Reject", { proposal: p.id, decision: "reject" })}</li>`,
   );
@@ -947,7 +947,7 @@ ${mine.change === null ? "" : changeList(vis, mine.change)}
 ${button(event.id, "proposal/withdraw", csrf, "Withdraw my proposal", { proposal: mine.id })}`;
     } else if (status !== "withdrawn") {
       const by =
-        status === "superseded" || mine.decidedByEmail === null ? "" : ` by ${mine.decidedByEmail}`;
+        status === "superseded" || mine.decidedBy === null ? "" : ` by ${mine.decidedBy.name}`;
       own = html`<p class="muted">Your proposal ${OUTCOME[status]}${by}.</p>`;
     }
   }
@@ -970,12 +970,12 @@ function seriesSection(event: CanonicalEvent, now: string): Html | string {
 function historyEntry(
   h: HistoryEntry & { readonly fields: [string, HistoryEntry["change"][string]][] },
 ): Html {
-  return html`<span class="muted">${h.at.slice(0, 16).replace("T", " ")}</span> · ${h.actorEmail ?? "someone"} ${
+  return html`<span class="muted">${h.at.slice(0, 16).replace("T", " ")}</span> · ${h.actor === null ? "someone" : who(h.actor)} ${
     h.revision === 1
       ? "created it"
-      : h.proposedByEmail === null
+      : h.proposedBy === null
         ? "changed"
-        : `accepted ${h.proposedByEmail}'s proposal`
+        : `accepted ${h.proposedBy.name}'s proposal`
   }${
     h.revision === 1
       ? ""
@@ -1000,7 +1000,7 @@ function peopleSection(
     !(event.status === "proposed" && p.responseKind === "accept");
   return html`<h2>Taking part</h2><ul>${people.map(
     (p) =>
-      html`<li>${p.displayName ?? p.email}${p.editTier === "edit" ? html` <span class="muted">· can edit</span>` : ""}${
+      html`<li>${who(p.shown)}${p.editTier === "edit" ? html` <span class="muted">· can edit</span>` : ""}${
         removable(p)
           ? html` <form method="post" action="${EVENTS_PATH}/${event.id}/people/remove" style="display:inline"><input type="hidden" name="csrf" value="${csrf}" /><input type="hidden" name="person" value="${p.personId}" /><button type="submit">Remove</button></form>`
           : ""
@@ -1066,7 +1066,7 @@ async function eventPage(
     ...edits.map((h) => ({ at: h.at, entry: historyEntry(h) })),
     ...peopleChanges.map((h) => ({
       at: h.at,
-      entry: html`<span class="muted">${h.at.slice(0, 16).replace("T", " ")}</span> · ${h.actorEmail} ${h.action === "added" ? "added" : "removed"} ${h.personEmail}`,
+      entry: html`<span class="muted">${h.at.slice(0, 16).replace("T", " ")}</span> · ${who(h.actor)} ${h.action === "added" ? "added" : "removed"} ${who(h.person)}`,
     })),
   ].sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
 
@@ -1091,10 +1091,17 @@ ${
 ${await requestsSection(deps, access, csrf)}
 ${await proposalsSection(deps, access, csrf)}
 ${people.length === 0 ? "" : peopleSection(access, people, csrf)}
+${see("participants") ? await appearanceSection(deps.storage, { kind: "event", id: event.id }, { personId: participation.personId, csrfToken: csrf }, `${EVENTS_PATH}/${event.id}/me`, "event") : ""}
 ${await responsesSection(deps, access, csrf)}
 <h2>History</h2>
 <ul>${history.map((h) => html`<li>${h.entry}</li>`)}</ul>`,
   );
+}
+
+/** How the event's people see this person: mail names them this way, never by address. */
+async function nameIn(storage: StoragePort, access: EventAccess, personId: string) {
+  const a = await appearanceIn(storage, { kind: "event", id: access.event.id }, personId);
+  return a?.shown.name ?? "Someone";
 }
 
 export function registerEventRoutes(app: Hono<AppEnv>, deps: EventRouteDeps): void {
@@ -1468,6 +1475,17 @@ ${pollForm(`/groups/${membership.group.id}/polls`, csrf, values, error, peopleFi
     }
   });
 
+  // "You appear here as…" (§10 rc21): participation is the access check.
+  app.post(`${EVENTS_PATH}/:id/me`, async (c) => {
+    const me = requireSignedIn(c);
+    if (me instanceof Response) return me;
+    const access = await findEventForParticipant(deps.storage, c.req.param("id"), me.personId);
+    if (access === null || access.participation.visibility === "HIDDEN")
+      return c.html(notFound(c), 404);
+    const id = access.event.id;
+    return saveAppearance(c, deps.storage, { kind: "event", id }, `${EVENTS_PATH}/${id}`);
+  });
+
   app.post(`${EVENTS_PATH}/:id/attendance`, async (c) => {
     const me = requireSignedIn(c);
     if (me instanceof Response) return me;
@@ -1607,7 +1625,7 @@ ${pollForm(`/groups/${membership.group.id}/polls`, csrf, values, error, peopleFi
       await sendResponseLink(deps.mail, {
         link,
         access,
-        from: me.email,
+        from: await nameIn(deps.storage, access, me.personId),
         publicBaseUrl: deps.publicBaseUrl,
       });
     } catch {
@@ -1699,7 +1717,7 @@ ${pollForm(`/groups/${membership.group.id}/polls`, csrf, values, error, peopleFi
         await sendResponseLink(deps.mail, {
           link,
           access,
-          from: me.email,
+          from: await nameIn(deps.storage, access, me.personId),
           publicBaseUrl: deps.publicBaseUrl,
         });
         sent += 1;

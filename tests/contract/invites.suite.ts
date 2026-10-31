@@ -10,7 +10,7 @@ import {
   peekInvite,
   type Visibility,
 } from "../../src/people/invite.js";
-import { findOrCreatePerson, findPersonByEmail } from "../../src/people/person.js";
+import { findOrCreatePerson, findPersonByEmail, guestName } from "../../src/people/person.js";
 
 // Invites on BOTH drivers. Residue-tolerant: each test uses its own addresses.
 
@@ -104,7 +104,8 @@ export function runInvitesContract(makePort: () => Promise<StoragePort>): void {
       for (let i = 0; i < 3; i += 1) {
         expect(await peekInvite(port, invite.token, at(1))).toEqual({
           groupName: "Table",
-          inviterEmail: "i-dm4@example.org",
+          // Named as the group sees them, never by address (§10 rc21).
+          inviter: { name: guestName(membership.group.id, organizerId), email: null },
           email: "i-once@example.org",
         });
       }

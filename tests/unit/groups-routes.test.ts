@@ -4,6 +4,7 @@ import { expect, it } from "vitest";
 import { sqliteStoragePort } from "../../src/db/sqlite.js";
 import type { MailMessage } from "../../src/mail/port.js";
 import { createApp } from "../../src/web/app.js";
+import { ACCOUNT_PATH } from "../../src/web/layout.js";
 import { CONFIRM_PATH, SIGN_IN_PATH } from "../../src/web/routes/auth.js";
 import { GROUPS_PATH } from "../../src/web/routes/groups.js";
 import { loadMigrationSql } from "../conftest.js";
@@ -77,7 +78,12 @@ it("creates a group and shows it with its organizer", async () => {
   const location = await createGroupVia(h, me, "Thursday Table");
   const page = await (await h.app.request(location, { headers: { cookie: me.cookie } })).text();
   expect(page).toContain("<h1>Thursday Table</h1>");
-  expect(page).toContain("dm@example.org (you)");
+  // No name chosen yet: a guest to everyone, themselves included — never the address
+  // (DESIGN §10 rc21). Home asks for a name.
+  expect(page).toMatch(/<li>Guest \d{4} \(you\)/);
+  expect(page).toContain("You appear here as");
+  const front = await (await h.app.request("/", { headers: { cookie: me.cookie } })).text();
+  expect(front).toContain("Choose the name people see");
   const list = await (await h.app.request(GROUPS_PATH, { headers: { cookie: me.cookie } })).text();
   expect(list).toContain("you organize");
 });
@@ -169,6 +175,7 @@ it("an organizer sees the invite form; the invite email links to PUBLIC_BASE_URL
 it("the invitee joins with one click, is signed in, and sees the group — but cannot invite", async () => {
   const h = await harness();
   const dm = await signIn(h, "inv-dm2@example.org");
+  await h.app.request(ACCOUNT_PATH, post({ csrf: dm.csrf, handle: "The DM" }, dm.cookie));
   const group = await createGroupVia(h, dm, "Thursday Table");
   await inviteVia(h, dm, group, "player2@example.org");
   const link = inviteLink(h);
@@ -178,14 +185,16 @@ it("the invitee joins with one click, is signed in, and sees the group — but c
   expect(preview.headers.get("referrer-policy")).toBe("no-referrer");
   const body = await preview.text();
   expect(body).toContain("Join “Thursday Table”?");
-  expect(body).toContain("inv-dm2@example.org");
+  expect(body).toContain("<strong>The DM</strong> invited <strong>player2@example.org</strong>");
+  expect(body).not.toContain("inv-dm2@example.org");
+  expect(h.sent.at(-1)?.subject).toBe('The DM invited you to "Thursday Table" on WhenDoWe');
 
   const joined = await h.app.request("/invite", post({ t: link.searchParams.get("t") ?? "" }));
   expect(joined.status).toBe(303);
   expect(joined.headers.get("location")).toBe(group);
   const cookie = (joined.headers.get("set-cookie") ?? "").split(";")[0] ?? "";
   const page = await (await h.app.request(group, { headers: { cookie } })).text();
-  expect(page).toContain("player2@example.org (you)");
+  expect(page).toMatch(/<li>Guest \d{4} \(you\)/);
   expect(page).not.toContain("Invite someone");
 
   // A member who tries the organizer's invite action anyway is refused.
@@ -202,6 +211,59 @@ it("an invite works once", async () => {
   const t = inviteLink(h).searchParams.get("t") ?? "";
   expect((await h.app.request("/invite", post({ t }))).status).toBe(303);
   expect((await h.app.request("/invite", post({ t }))).status).toBe(400);
+});
+
+it("each member chooses a name per group, and whether this group sees their address", async () => {
+  // DESIGN §10 rc21: a handle by default, changeable per group; addresses hidden unless
+  // their owner turns them on, for that one group.
+  const h = await harness();
+  const dm = await signIn(h, "pg-dm@example.org");
+  await h.app.request(ACCOUNT_PATH, post({ csrf: dm.csrf, handle: "Mara" }, dm.cookie));
+  const group = await createGroupVia(h, dm, "Rope jam");
+  const other = await createGroupVia(h, dm, "Swing practice");
+  await inviteVia(h, dm, group, "pg-lena@example.org");
+  const joined = await h.app.request(
+    "/invite",
+    post({ t: inviteLink(h).searchParams.get("t") ?? "" }),
+  );
+  const lenaCookie = (joined.headers.get("set-cookie") ?? "").split(";")[0] ?? "";
+  const asLena = async (path: string) =>
+    (await h.app.request(path, { headers: { cookie: lenaCookie } })).text();
+  const lenaCsrf = /name="csrf" value="([^"]+)"/.exec(await asLena("/"))?.[1] ?? "";
+
+  expect(await asLena(group)).toMatch(/<li>Mara <span class="muted">· organizer/);
+  expect(await asLena(group)).not.toContain("pg-dm@example.org");
+
+  // Mara is "Kestrel" in the rope group, and shows her address there only.
+  const me = await h.app.request(
+    `${group}/me`,
+    post({ csrf: dm.csrf, handle: "Kestrel", show_email: "1" }, dm.cookie),
+  );
+  expect(me.status).toBe(303);
+  const rope = await asLena(group);
+  expect(rope).toContain('<li>Kestrel <span class="muted">pg-dm@example.org</span>');
+  const page = async (path: string) =>
+    (await h.app.request(path, { headers: { cookie: dm.cookie } })).text();
+  expect(await page(other)).toMatch(/<li>Mara \(you\)/);
+
+  // Emptied, the group name falls back to the account's; unticked, the address goes.
+  await h.app.request(`${group}/me`, post({ csrf: dm.csrf, handle: "" }, dm.cookie));
+  expect(await asLena(group)).toMatch(/<li>Mara <span class="muted">· organizer/);
+  expect(await asLena(group)).not.toContain("pg-dm@example.org");
+
+  // Only your own row, only with your CSRF token, only where you're a member.
+  const forged = await h.app.request(`${group}/me`, post({ csrf: "nope", handle: "X" }, dm.cookie));
+  expect(forged.status).toBe(403);
+  const notMine = await h.app.request(
+    `${other}/me`,
+    post({ csrf: lenaCsrf, handle: "Intruder" }, lenaCookie),
+  );
+  expect(notMine.status).toBe(404);
+  const bad = await h.app.request(
+    `${group}/me`,
+    post({ csrf: dm.csrf, handle: "x".repeat(41) }, dm.cookie),
+  );
+  expect(bad.status).toBe(400);
 });
 
 // rc18 (DESIGN §13): this used to sign the other account out. A browser now holds

@@ -191,7 +191,7 @@ export function runPollsContract(makePort: () => Promise<StoragePort>): void {
       const history = await listHistory(port, after);
       expect(history[0]).toMatchObject({
         revision: 2,
-        actorEmail: "poll-dm-confirm@example.org",
+        actorId: dm.id,
         change: {
           status: { before: "proposed", after: "scheduled" },
           startLocal: { before: "2101-10-20T19:00:00", after: "2101-10-22T18:00:00" },

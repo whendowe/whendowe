@@ -3,6 +3,7 @@ import { z } from "zod";
 import type { StoragePort } from "../db/port.js";
 import { uuidv7 } from "../ids.js";
 import { type Visibility, visibilitySchema } from "../people/invite.js";
+import { type Shown, shownAs, shownRowSchema } from "../people/person.js";
 import { hashToken, issueToken } from "../people/tokens.js";
 import {
   type EventAccess,
@@ -102,16 +103,14 @@ export async function addFeedback(
 
 export interface AttendanceEntry {
   readonly personId: string;
-  readonly email: string;
-  readonly displayName: string | null;
+  readonly shown: Shown;
   readonly attendance: Attendance;
   readonly at: string | null;
 }
 
 export interface FeedbackEntry {
   readonly personId: string;
-  readonly email: string;
-  readonly displayName: string | null;
+  readonly shown: Shown;
   readonly body: string;
   readonly at: string;
 }
@@ -121,18 +120,14 @@ export interface Responses {
   readonly feedback: readonly FeedbackEntry[];
 }
 
-const attendanceRowSchema = z.object({
+const attendanceRowSchema = shownRowSchema.extend({
   person_id: z.string(),
-  email: z.string(),
-  display_name: z.string().nullable(),
   attendance: attendanceSchema,
   responded_at: z.string().nullable(),
 });
 
-const feedbackRowSchema = z.object({
+const feedbackRowSchema = shownRowSchema.extend({
   person_id: z.string(),
-  email: z.string(),
-  display_name: z.string().nullable(),
   body: z.string(),
   created_at: z.string(),
 });
@@ -143,15 +138,18 @@ const feedbackRowSchema = z.object({
  */
 export async function listResponses(storage: StoragePort, access: EventAccess): Promise<Responses> {
   const attendance = await storage.query({
-    sql: `SELECT ep.person_id, p.email, p.display_name, ep.attendance, ep.responded_at
+    sql: `SELECT ep.person_id, p.email, p.display_name, ep.handle, ep.show_email,
+                 ep.attendance, ep.responded_at
           FROM event_participation ep JOIN person p ON p.id = ep.person_id
           WHERE ep.canonical_event_id = ? AND ep.attendance IS NOT NULL
-          ORDER BY p.email`,
+          ORDER BY ep.created_at, ep.person_id`,
     params: [access.event.id],
   });
   const feedback = await storage.query({
-    sql: `SELECT f.person_id, p.email, p.display_name, f.body, f.created_at
+    sql: `SELECT f.person_id, p.email, p.display_name, ep.handle, ep.show_email, f.body, f.created_at
           FROM event_feedback f JOIN person p ON p.id = f.person_id
+            LEFT JOIN event_participation ep
+              ON ep.canonical_event_id = f.canonical_event_id AND ep.person_id = f.person_id
           WHERE f.canonical_event_id = ?
           ORDER BY f.created_at, f.id`,
     params: [access.event.id],
@@ -161,8 +159,7 @@ export async function listResponses(storage: StoragePort, access: EventAccess): 
       const r = attendanceRowSchema.parse(row);
       return {
         personId: r.person_id,
-        email: r.email,
-        displayName: r.display_name,
+        shown: shownAs(r.person_id, r, access.event.id),
         attendance: r.attendance,
         at: r.responded_at,
       };
@@ -171,8 +168,7 @@ export async function listResponses(storage: StoragePort, access: EventAccess): 
       const r = feedbackRowSchema.parse(row);
       return {
         personId: r.person_id,
-        email: r.email,
-        displayName: r.display_name,
+        shown: shownAs(r.person_id, r, access.event.id),
         body: r.body,
         at: r.created_at,
       };
@@ -466,17 +462,14 @@ export async function acknowledge(
 
 export interface RequestEntry {
   readonly personId: string;
-  readonly email: string;
-  readonly displayName: string | null;
+  readonly shown: Shown;
   readonly kind: Extract<ResponseKind, "accept" | "ack">;
   readonly state: ResponseState;
   readonly at: string | null;
 }
 
-const requestRowSchema = z.object({
+const requestRowSchema = shownRowSchema.extend({
   person_id: z.string(),
-  email: z.string(),
-  display_name: z.string().nullable(),
   response_kind: responseKindSchema.extract(["accept", "ack"]),
   response_state: responseStateSchema,
   response_state_at: z.string().nullable(),
@@ -488,18 +481,18 @@ export async function listRequests(
   access: EventAccess,
 ): Promise<RequestEntry[]> {
   const rows = await storage.query({
-    sql: `SELECT ep.person_id, p.email, p.display_name, ep.response_kind, ep.response_state, ep.response_state_at
+    sql: `SELECT ep.person_id, p.email, p.display_name, ep.handle, ep.show_email,
+                 ep.response_kind, ep.response_state, ep.response_state_at
           FROM event_participation ep JOIN person p ON p.id = ep.person_id
           WHERE ep.canonical_event_id = ? AND ep.response_kind IN ('accept', 'ack')
-          ORDER BY p.email`,
+          ORDER BY ep.created_at, ep.person_id`,
     params: [access.event.id],
   });
   return rows.map((row) => {
     const r = requestRowSchema.parse(row);
     return {
       personId: r.person_id,
-      email: r.email,
-      displayName: r.display_name,
+      shown: shownAs(r.person_id, r, access.event.id),
       kind: r.response_kind,
       state: r.response_state,
       at: r.response_state_at,

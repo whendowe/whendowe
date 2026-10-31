@@ -87,7 +87,7 @@ export function runEventsContract(makePort: () => Promise<StoragePort>): void {
       });
       const history = await listHistory(port, await access(port, event.id, dm.id));
       expect(history).toHaveLength(1);
-      expect(history[0]).toMatchObject({ revision: 1, actorEmail: "ev-dm-create@example.org" });
+      expect(history[0]).toMatchObject({ revision: 1, actorId: dm.id });
     });
 
     it("an outsider cannot read an event — same answer as a missing one", async () => {

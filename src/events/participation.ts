@@ -9,7 +9,7 @@ import {
   type Visibility,
   visibilitySchema,
 } from "../people/invite.js";
-import { findOrCreatePerson } from "../people/person.js";
+import { findOrCreatePerson, type Shown, shownAs, shownRowSchema } from "../people/person.js";
 import type { EventAccess } from "./event.js";
 
 // Who takes part in an event, and on what terms (DESIGN §10 rc7). Two independent
@@ -46,8 +46,8 @@ export const PARTICIPATION_COLUMNS =
   "ep.canonical_event_id, ep.person_id, ep.edit_tier, ep.visibility, ep.attendance, ep.response_kind, ep.response_state";
 
 export interface ParticipantView extends Participation {
-  readonly email: string;
-  readonly displayName: string | null;
+  /** As the event's people see them (DESIGN §10 rc21): a handle, an address only if shown. */
+  readonly shown: Shown;
 }
 
 export interface GroupDefault {
@@ -104,10 +104,7 @@ export function toParticipation(row: unknown): Participation {
   };
 }
 
-const participantRowSchema = participationRowSchema.extend({
-  email: z.string(),
-  display_name: z.string().nullable(),
-});
+const participantRowSchema = participationRowSchema.extend(shownRowSchema.shape);
 
 /** Everyone taking part, for someone who has already passed findEventForParticipant. */
 export async function listParticipants(
@@ -116,15 +113,15 @@ export async function listParticipants(
 ): Promise<ParticipantView[]> {
   const rows = await storage.query({
     sql: `SELECT ${PARTICIPATION_COLUMNS},
-                 p.email, p.display_name
+                 p.email, p.display_name, ep.handle, ep.show_email
           FROM event_participation ep JOIN person p ON p.id = ep.person_id
           WHERE ep.canonical_event_id = ?
-          ORDER BY ep.edit_tier = 'edit' DESC, p.email`,
+          ORDER BY ep.edit_tier = 'edit' DESC, ep.created_at, ep.person_id`,
     params: [eventId],
   });
   return rows.map((row) => {
     const r = participantRowSchema.parse(row);
-    return { ...toParticipation(row), email: r.email, displayName: r.display_name };
+    return { ...toParticipation(row), shown: shownAs(r.person_id, r, eventId) };
   });
 }
 
@@ -344,15 +341,26 @@ export async function removeParticipant(
 
 export interface ParticipantChange {
   readonly action: "added" | "removed";
-  readonly personEmail: string;
-  readonly actorEmail: string;
+  readonly personId: string;
+  readonly actorId: string;
+  /** Both as the event's people see them (DESIGN §10 rc21). */
+  readonly person: Shown;
+  readonly actor: Shown;
   readonly at: string;
 }
 
 const participantChangeRowSchema = z.object({
   action: z.enum(["added", "removed"]),
+  person_id: z.string(),
   person_email: z.string(),
+  person_name: z.string().nullable(),
+  person_handle: z.string().nullable(),
+  person_show_email: z.number().nullable(),
+  actor_id: z.string(),
   actor_email: z.string(),
+  actor_name: z.string().nullable(),
+  actor_handle: z.string().nullable(),
+  actor_show_email: z.number().nullable(),
   created_at: z.string(),
 });
 
@@ -365,9 +373,16 @@ export async function listParticipantChanges(
   access: EventAccess,
 ): Promise<ParticipantChange[]> {
   const rows = await storage.query({
-    sql: `SELECT c.action, p.email AS person_email, a.email AS actor_email, c.created_at
+    sql: `SELECT c.action, c.person_id, p.email AS person_email, p.display_name AS person_name,
+                 px.handle AS person_handle, px.show_email AS person_show_email,
+                 c.actor_id, a.email AS actor_email, a.display_name AS actor_name,
+                 ax.handle AS actor_handle, ax.show_email AS actor_show_email, c.created_at
           FROM event_participant_change c JOIN person p ON p.id = c.person_id
             JOIN person a ON a.id = c.actor_id
+            LEFT JOIN event_participation px
+              ON px.canonical_event_id = c.canonical_event_id AND px.person_id = c.person_id
+            LEFT JOIN event_participation ax
+              ON ax.canonical_event_id = c.canonical_event_id AND ax.person_id = c.actor_id
           WHERE c.canonical_event_id = ?
           ORDER BY c.created_at DESC, c.id DESC`,
     params: [access.event.id],
@@ -376,8 +391,28 @@ export async function listParticipantChanges(
     const r = participantChangeRowSchema.parse(row);
     return {
       action: r.action,
-      personEmail: r.person_email,
-      actorEmail: r.actor_email,
+      personId: r.person_id,
+      actorId: r.actor_id,
+      person: shownAs(
+        r.person_id,
+        {
+          email: r.person_email,
+          display_name: r.person_name,
+          handle: r.person_handle,
+          show_email: r.person_show_email,
+        },
+        access.event.id,
+      ),
+      actor: shownAs(
+        r.actor_id,
+        {
+          email: r.actor_email,
+          display_name: r.actor_name,
+          handle: r.actor_handle,
+          show_email: r.actor_show_email,
+        },
+        access.event.id,
+      ),
       at: r.created_at,
     };
   });

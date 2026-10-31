@@ -68,6 +68,7 @@ import {
   type SignedIn,
   verifyFormCsrf,
 } from "../session.js";
+import { appearanceSection, saveAppearance } from "./account.js";
 import { EVENTS_PATH } from "./events.js";
 
 // Plan pages (DESIGN §10 rc19, slices P2–P3): a thread, a plan, and your draft. Every read
@@ -1035,7 +1036,27 @@ export function registerPlanRoutes(app: Hono<AppEnv>, deps: PlanRouteDeps): void
     if (access instanceof Response) return access;
     const v = await load(deps, access, me);
     const day = c.req.query("day") ?? "";
-    return c.html(page(c, access.thread.name, threadPage(v, DAY.test(day) ? day : null)));
+    const id = access.thread.id;
+    const appearance = await appearanceSection(
+      deps.storage,
+      { kind: "thread", id },
+      me,
+      `${threadPath(id)}/me`,
+      "plan",
+    );
+    return c.html(
+      page(c, access.thread.name, html`${threadPage(v, DAY.test(day) ? day : null)}${appearance}`),
+    );
+  });
+
+  // "You appear here as…" (§10 rc21): membership (gate) is the access check.
+  app.post(`${PLANS_PATH}/:thread/me`, async (c) => {
+    const me = requireSignedIn(c);
+    if (me instanceof Response) return me;
+    const access = await gate(c, deps, me);
+    if (access instanceof Response) return access;
+    const id = access.thread.id;
+    return saveAppearance(c, deps.storage, { kind: "thread", id }, threadPath(id));
   });
 
   app.get(`${PLANS_PATH}/:thread/p/:plan`, async (c) => {

@@ -5,6 +5,7 @@ import { sqliteStoragePort } from "../../src/db/sqlite.js";
 import { MailCapReachedError } from "../../src/mail/capped.js";
 import type { MailMessage } from "../../src/mail/port.js";
 import { createApp } from "../../src/web/app.js";
+import { ACCOUNT_PATH } from "../../src/web/layout.js";
 import { CONFIRM_PATH, SIGN_IN_PATH } from "../../src/web/routes/auth.js";
 import { GROUPS_PATH, INVITE_PATH } from "../../src/web/routes/groups.js";
 import { loadMigrationSql } from "../conftest.js";
@@ -69,7 +70,17 @@ async function signIn(h: H, email: string): Promise<Who> {
     ((await h.app.request(CONFIRM_PATH, post({ t }))).headers.get("set-cookie") ?? "").split(
       ";",
     )[0] ?? "";
-  return { cookie, csrf: await csrfOf(h, cookie) };
+  return named(h, { cookie, csrf: await csrfOf(h, cookie) }, email);
+}
+
+/**
+ * People choose a name when they first sign in (DESIGN §10 rc21); here, the part of their
+ * address before @, so "dm@example.org" appears to others as "dm" and never by address.
+ */
+async function named(h: H, who: Who, email: string): Promise<Who> {
+  const handle = email.split("@")[0] ?? "";
+  await h.app.request(ACCOUNT_PATH, post({ csrf: who.csrf, handle }, who.cookie));
+  return who;
 }
 
 /** DM + group; returns the group path. */
@@ -100,7 +111,7 @@ async function join(
   );
   const res = await h.app.request(INVITE_PATH, post({ t: link.searchParams.get("t") ?? "" }));
   const cookie = (res.headers.get("set-cookie") ?? "").split(";")[0] ?? "";
-  return { cookie, csrf: await csrfOf(h, cookie) };
+  return named(h, { cookie, csrf: await csrfOf(h, cookie) }, email);
 }
 
 const NIGHT = {
@@ -249,7 +260,7 @@ it("an editor's change is saved and attributed in the history", async () => {
   );
   expect(res.status).toBe(303);
   const page = await text(h, event, dm);
-  expect(page).toContain("dm@example.org changed");
+  expect(page).toContain("dm changed");
   expect(page).toContain("startLocal: 2101-10-20T19:00:00 → 2101-10-20T20:00:00");
 });
 
@@ -416,8 +427,8 @@ it("players vote, change their mind, and the DM sees who said what", async () =>
   ).toBe(303);
 
   const page = await text(h, poll, dm);
-  expect(page).toContain("ann@example.org: If need be"); // replaced, not duplicated
-  expect(page).not.toContain("ann@example.org: No");
+  expect(page).toContain("ann: If need be"); // replaced, not duplicated
+  expect(page).not.toContain("ann: No");
   expect(page).toContain("2 yes · 0 if need be · 0 no");
   expect(page).toContain("works for everyone"); // Thursday: both said yes
   // Ann's own answers come back checked.
@@ -433,11 +444,11 @@ it("a DETAILS player sees the counts but not who voted what", async () => {
   await h.app.request(`${poll}/votes`, post({ csrf: dm.csrf, slot_0: "yes" }, dm.cookie));
   const page = await text(h, poll, petra);
   expect(page).toContain("1 yes · 0 if need be · 0 no");
-  // No voter names. (The organizer's address DOES appear once — as the author in the
-  // history, "… created it" — which is attribution, a separate policy question.)
-  expect(page).not.toContain("dm@example.org: Yes");
-  expect(page.split("dm@example.org").length - 1).toBe(1);
-  expect(page).toContain("dm@example.org created it");
+  // No voter names. The organizer is named as the history's author — attribution — by
+  // handle; their address appears nowhere (DESIGN §10 rc21).
+  expect(page).not.toContain("dm: Yes");
+  expect(page).not.toContain("dm@example.org");
+  expect(page).toContain("dm created it");
 });
 
 it("the DM confirms; the event is scheduled at that time, logged, and voting is closed", async () => {
@@ -588,9 +599,9 @@ it("a player votes from the link with no account: GET changes nothing, POST save
   );
 
   const dmPage = await text(h, poll, dm);
-  expect(dmPage).toContain("ann@example.org: Yes");
+  expect(dmPage).toContain("ann: Yes");
   // The note is user text: escaped, inside its own element.
-  expect(dmPage).toMatch(/ann@example\.org: <span[^>]*>Thursday&#39;s bad for me<\/span>/);
+  expect(dmPage).toMatch(/ann: <span[^>]*>Thursday&#39;s bad for me<\/span>/);
 });
 
 it("a response link answers only for its own event and person — and a dead link says so", async () => {
@@ -643,12 +654,13 @@ it("attendance and notes by link; a DETAILS member sees the counts but not who o
   expect(res.status).toBe(303);
 
   const dmPage = await text(h, event, dm);
-  expect(dmPage).toContain("ann@example.org: Maybe");
-  expect(dmPage).toContain("ann@example.org: <span");
+  expect(dmPage).toContain("ann: Maybe");
+  expect(dmPage).toContain("ann: <span");
   expect(dmPage).toContain("NOTE-7: running late");
   const petraPage = await text(h, event, petra);
   expect(petraPage).toContain("0 going · 1 maybe · 0 can't make it"); // literal template text
   expect(petraPage).not.toContain("ann@example.org");
+  expect(petraPage).not.toContain("ann: "); // nor her name: DETAILS doesn't see who
   // A marker, not "might be late": the note form's own example text says that.
   expect(petraPage).not.toContain("NOTE-7");
 });
@@ -697,7 +709,7 @@ it("signed in: say you're coming and leave a note from the event page", async ()
     ).status,
   ).toBe(303);
   const page = await text(h, event, dm);
-  expect(page).toContain("ann@example.org: Going");
+  expect(page).toContain("ann: Going");
   expect(page).toContain("bringing dice");
   // Ann's own answer is pre-selected for her.
   expect(await text(h, event, ann)).toMatch(/name="attendance" value="going" checked/);
@@ -736,9 +748,9 @@ it("response routes require CSRF, membership, and an editor to send links", asyn
 /** The person id behind a member's "Ask people" select on the new-event form. */
 async function memberId(h: H, dm: Who, group: string, email: string): Promise<string> {
   const formPage = await text(h, `${group}/events/new`, dm);
-  const id = new RegExp(
-    `${email.replace(/\./g, "\\.")}\\s*<select name="req_([0-9a-f-]{36})"`,
-  ).exec(formPage)?.[1];
+  const id = new RegExp(`${email.split("@")[0]}\\s*<select name="req_([0-9a-f-]{36})"`).exec(
+    formPage,
+  )?.[1];
   if (id === undefined) throw new Error(`no request select for ${email}`);
   return id;
 }
@@ -765,7 +777,7 @@ it("asking someone to agree: only the parties see it until they do, then everyon
   const event = await createVia(h, mara, group, { ...NIGHT, [`req_${davidId}`]: "accept" });
 
   expect(await text(h, event, mara)).toContain("(waiting for agreement)");
-  expect(await text(h, event, mara)).toContain("david@example.org: must agree — not answered yet");
+  expect(await text(h, event, mara)).toContain("david: must agree — not answered yet");
   expect((await get(h, event, petra)).status).toBe(404); // US-3: scheduled reality only
   expect(await text(h, group, petra)).not.toContain(event);
   const davidPage = await text(h, event, david);
@@ -775,7 +787,7 @@ it("asking someone to agree: only the parties see it until they do, then everyon
   expect((await get(h, event, petra)).status).toBe(200);
   const after = await text(h, event, mara);
   expect(after).not.toContain("waiting for agreement");
-  expect(after).toContain("david@example.org: must agree — agreed ✓");
+  expect(after).toContain("david: must agree — agreed ✓");
   expect(after).toContain("status: proposed → scheduled");
 });
 
@@ -787,7 +799,7 @@ it("one decline turns it down; the creator sees who and can no longer withdraw",
   expect((await act(h, event, david, "answer", { answer: "decline" })).status).toBe(303);
   const page = await text(h, event, mara);
   expect(page).toContain("(declined)");
-  expect(page).toMatch(/david@example\.org changed<ul><li>status: proposed → declined/);
+  expect(page).toMatch(/david changed<ul><li>status: proposed → declined/);
   expect(page).not.toContain("Withdraw");
   expect((await act(h, event, mara, "withdraw")).status).toBe(409);
 });
@@ -810,7 +822,7 @@ it("an acknowledgment request: scheduled at once, 'seen ✓' with a time, asked 
   expect(await text(h, event, david)).toContain("You&#39;re asked to acknowledge this."); // an interpolated string: escaped
   expect((await act(h, event, david, "acknowledge")).status).toBe(303);
   expect(await text(h, event, mara)).toMatch(
-    /david@example\.org: please acknowledge — seen ✓ <span class="muted">\d{4}-/,
+    /david: please acknowledge — seen ✓ <span class="muted">\d{4}-/,
   );
   expect((await act(h, event, david, "acknowledge")).status).toBe(400); // nothing left to acknowledge
 
@@ -838,9 +850,7 @@ it("an acknowledgment request: scheduled at once, 'seen ✓' with a time, asked 
   expect(await text(h, event, david)).toContain(
     "This changed since you last saw it — please look again.",
   );
-  expect(await text(h, event, mara)).toContain(
-    "david@example.org: please acknowledge — asked to look again",
-  );
+  expect(await text(h, event, mara)).toContain("david: please acknowledge — asked to look again");
 });
 
 it("a DETAILS member sees only their own request line, not everyone's", async () => {
@@ -853,8 +863,8 @@ it("a DETAILS member sees only their own request line, not everyone's", async ()
     [`req_${petraId}`]: "ack",
   });
   const page = await text(h, event, petra);
-  expect(page).toContain("petra@example.org: please acknowledge");
-  expect(page).not.toContain("david@example.org: please acknowledge");
+  expect(page).toContain("petra: please acknowledge");
+  expect(page).not.toContain("david: please acknowledge");
 });
 
 it("editors cancel and restore; others don't get the buttons and are refused", async () => {
@@ -879,7 +889,7 @@ it("by emailed link: David agrees with no account; acknowledgment by link too", 
   const before = h.sent.length;
   expect(await (await sendLinks(h, mara, proposal)).text()).toContain("Sent to 1 person."); // not Petra
   expect(h.sent.slice(before).map((m) => [m.to, m.subject])).toEqual([
-    ["david@example.org", 'dm@example.org asks you to agree: "Session 12: the Sunken Keep"'],
+    ["david@example.org", 'dm asks you to agree: "Session 12: the Sunken Keep"'],
   ]);
   const link = linkFor(h, "david@example.org");
   expect(await (await h.app.request(link)).text()).toContain("Do you agree?");
@@ -887,7 +897,7 @@ it("by emailed link: David agrees with no account; acknowledgment by link too", 
     (await h.app.request("/respond", post({ t: tokenOf(link), decision: "accept" }))).status,
   ).toBe(303);
   expect(await (await h.app.request(link)).text()).toContain("It's settled.");
-  expect(await text(h, proposal, mara)).toContain("david@example.org: must agree — agreed ✓");
+  expect(await text(h, proposal, mara)).toContain("david: must agree — agreed ✓");
 
   const fyi = await createVia(h, mara, group, {
     ...NIGHT,
@@ -900,7 +910,7 @@ it("by emailed link: David agrees with no account; acknowledgment by link too", 
   expect((await h.app.request("/respond", post({ t: tokenOf(ackLink), ack: "on" }))).status).toBe(
     303,
   );
-  expect(await text(h, fyi, mara)).toContain("david@example.org: please acknowledge — seen ✓");
+  expect(await text(h, fyi, mara)).toContain("david: please acknowledge — seen ✓");
 });
 
 it("lifecycle buttons require CSRF and membership", async () => {
@@ -951,7 +961,7 @@ it("a propose-tier change waits for an editor; accepted, history names both", as
 
   const before = await text(h, event, dm);
   expect(before).toContain("📍 Ann&#39;s place"); // nothing changed yet
-  expect(before).toContain("<strong>ann@example.org</strong> proposes:");
+  expect(before).toContain("<strong>ann</strong> proposes:");
   expect(before).toContain("location: Ann&#39;s place → Bob&#39;s place");
   expect(await text(h, event, ann)).toContain("You proposed a change — waiting");
   expect(await text(h, event, petra)).not.toContain("Proposed changes");
@@ -965,8 +975,8 @@ it("a propose-tier change waits for an editor; accepted, history names both", as
   );
   const after = await text(h, event, petra); // attribution reaches every tier (rc13)
   expect(after).toContain("📍 Bob&#39;s place");
-  expect(after).toContain("dm@example.org accepted ann@example.org&#39;s proposal");
-  expect(await text(h, event, ann)).toContain("Your proposal was accepted by dm@example.org.");
+  expect(after).toContain("dm accepted ann&#39;s proposal");
+  expect(await text(h, event, ann)).toContain("Your proposal was accepted by dm.");
   expect(await text(h, event, dm)).not.toContain("Proposed changes");
 });
 
@@ -988,7 +998,7 @@ it("the proposer is told when it is turned down, or when the event moved on firs
   expect((await act(h, event, dm, "proposal", { proposal: id, decision: "reject" })).status).toBe(
     303,
   );
-  expect(await text(h, event, ann)).toContain("Your proposal was turned down by dm@example.org.");
+  expect(await text(h, event, ann)).toContain("Your proposal was turned down by dm.");
   expect(await text(h, event, dm)).toContain("📍 Ann&#39;s place");
 });
 
@@ -1181,8 +1191,10 @@ it("an editor adds someone by email: they're mailed a link, and can then sign in
   expect(h.sent.at(-1)?.text).toMatch(/https:\/\/whendowe\.example\/respond\?t=/);
 
   const page = await text(h, event, dm);
-  expect(page).toContain("<li>newcomer@example.org");
-  expect(page).toContain("dm@example.org added newcomer@example.org");
+  // Never signed in, so no handle: a guest name, and never their address (§10 rc21).
+  expect(page).toMatch(/<li>Guest \d{4}/);
+  expect(page).toMatch(/dm added Guest \d{4}/);
+  expect(page).not.toContain("newcomer@example.org");
   // Not in the group: joining an event is not joining its group.
   const newcomer = await signIn(h, "newcomer@example.org");
   expect((await get(h, event, newcomer)).status).toBe(200);
@@ -1238,7 +1250,10 @@ it("removing someone ends their access and their emailed link", async () => {
   expect(res.status).toBe(303);
   expect((await get(h, event, guest)).status).toBe(404);
   expect((await h.app.request(new URL(link).pathname + new URL(link).search)).status).not.toBe(200);
-  expect(await text(h, event, dm)).toContain("dm@example.org removed guest@example.org");
+  const after = await text(h, event, dm);
+  // They signed in (and so chose a name) before being removed.
+  expect(after).toContain("dm removed guest");
+  expect(after).not.toContain("guest@example.org");
 });
 
 it("a failed mail keeps the person and says so; a resend then works at once", async () => {
@@ -1249,7 +1264,7 @@ it("a failed mail keeps the person and says so; a resend then works at once", as
   const res = await addVia(h, dm, event, "unlucky@example.org");
   expect(res.status).toBe(503);
   expect(await res.text()).toContain("Added unlucky@example.org, but couldn&#39;t email them");
-  expect(await text(h, event, dm)).toContain("<li>unlucky@example.org");
+  expect(await text(h, event, dm)).toMatch(/<li>Guest \d{4}/);
 
   h.mailFailure.error = null;
   const before = h.sent.length;
@@ -1272,4 +1287,32 @@ it("refuses a bad address, someone already there, a hidden tier, and no CSRF", a
       )
     ).status,
   ).toBe(403);
+});
+
+it("in an event: your name there, and your address only if you show it (§10 rc21)", async () => {
+  const h = await harness();
+  const { dm, group } = await setup(h);
+  const ann = await join(h, dm, group, "ann@example.org", "view", "FULL");
+  const event = await createVia(h, dm, group);
+  expect(await text(h, event, dm)).not.toContain("ann@example.org");
+  expect(await text(h, event, ann)).toContain("You appear here as <strong>ann</strong>");
+
+  expect((await act(h, event, ann, "me", { handle: "Annie", show_email: "1" })).status).toBe(303);
+  const page = await text(h, event, dm);
+  expect(page).toContain('<li>Annie <span class="muted">ann@example.org</span>');
+  // The group is untouched: the event's setting is the event's.
+  expect(await text(h, group, dm)).not.toContain("ann@example.org");
+
+  const forged = await h.app.request(
+    `${event}/me`,
+    post({ csrf: "nope", handle: "X" }, ann.cookie),
+  );
+  expect(forged.status).toBe(403);
+  // An account needs a name: empty is refused, and changes nothing.
+  const empty = await h.app.request(
+    ACCOUNT_PATH,
+    post({ csrf: ann.csrf, handle: " " }, ann.cookie),
+  );
+  expect(empty.status).toBe(400);
+  expect(await text(h, group, dm)).toContain("<li>ann");
 });

@@ -61,6 +61,7 @@ export const SWITCH_PATH = "/auth/switch";
 export const SIGN_OUT_PATH = "/auth/sign-out";
 export const SIGN_OUT_ALL_PATH = "/auth/sign-out-all";
 export const ADD_ACCOUNT_PATH = "/auth/sign-in";
+export const ACCOUNT_PATH = "/account";
 
 /** A one-button form that makes another account on this browser active, then comes back here. */
 export function switchForm(v: Viewer, to: { sessionId: string; email: string }): Html {
@@ -83,6 +84,7 @@ function accountHeader(v: Viewer): Html {
   <details class="wd-who">
     <summary><span class="muted">Signed in as</span> <strong>${v.email}</strong></summary>
     <div class="wd-menu">
+      <a href="${ACCOUNT_PATH}">Your name and account</a>
       ${v.others.map((o) => switchForm(v, o))}
       ${
         v.canAddAccount
@@ -98,6 +100,42 @@ function accountHeader(v: Viewer): Html {
     </div>
   </details>
 </header>`;
+}
+
+/**
+ * A person as others see them in one group, event or thread (DESIGN §10 rc21): their
+ * handle, and their address only where they chose to show it.
+ */
+export function who(shown: { readonly name: string; readonly email: string | null }): Html {
+  return shown.email === null
+    ? html`${shown.name}`
+    : html`${shown.name} <span class="muted">${shown.email}</span>`;
+}
+
+/** How the viewer appears in one group, event or thread: its form (DESIGN §10 rc21). */
+export interface AppearanceView {
+  readonly action: string;
+  readonly csrf: string;
+  readonly handle: string | null;
+  readonly accountHandle: string | null;
+  readonly showEmail: boolean;
+  readonly shownName: string;
+  /** "group", "event", "plan": the word for where they are. */
+  readonly here: string;
+}
+
+/** "You appear here as …": a handle for this one place, and whether these people see your address. */
+export function appearanceForm(v: AppearanceView): Html {
+  return html`<details class="wd-me"><summary>You appear here as <strong>${v.shownName}</strong>${
+    v.showEmail ? " · your email is shown" : ""
+  }</summary>
+<form method="post" action="${v.action}">
+  <input type="hidden" name="csrf" value="${v.csrf}" />
+  <p><label>Your name in this ${v.here}<br /><input name="handle" maxlength="40" value="${v.handle ?? ""}" placeholder="${v.accountHandle ?? "Your name"}" /></label><br />
+  <span class="muted">Leave it empty to use the name on <a href="${ACCOUNT_PATH}">your account</a>.</span></p>
+  <p><label><input type="checkbox" name="show_email" value="1"${v.showEmail ? html` checked` : ""} /> Show my email address to the people in this ${v.here}</label></p>
+  <p><button type="submit">Save</button></p>
+</form></details>`;
 }
 
 /**

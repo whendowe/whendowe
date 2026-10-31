@@ -135,7 +135,10 @@ it("US-14: the D&D table finds a date and says who's coming — players never si
 
   const tally = await dmGet(poll);
   expect(tally).toMatch(/2101-11-08 18:00[^<]*<\/strong> <strong>· works for everyone/);
-  expect(tally).toContain("cid@example.org: <span");
+  // Players never chose a name, so they show as guests; nobody's address is on the page
+  // but the DM's own, in the header (DESIGN §10 rc21).
+  expect(tally).toMatch(/Guest \d{4}: <span/);
+  expect(tally).not.toContain("cid@example.org");
 
   // --- The DM confirms Saturday ---------------------------------------------------------
   const revision = /name="revision" value="(\d+)"/.exec(tally)?.[1] ?? "";
@@ -172,8 +175,11 @@ it("US-14: the D&D table finds a date and says who's coming — players never si
   // --- Done when: the DM sees attendance and feedback, attributed -------------------------
   const final = await dmGet(poll);
   expect(final).toContain("4 going · 1 maybe · 0 can't make it");
-  expect(final).toContain("dee@example.org: Maybe");
-  expect(final).toMatch(/dee@example\.org: <span[^>]*>might be late<\/span>/);
+  // Attributed: the same name on Dee's "maybe" and on her note — a guest name, as she
+  // never chose one, and never her address (DESIGN §10 rc21).
+  const dee = /<li>(Guest \d{4}): Maybe<\/li>/.exec(final)?.[1] ?? "no maybe";
+  expect(final).toMatch(new RegExp(`${dee}: <span[^>]*>might be late</span>`));
+  expect(final).not.toContain("dee@example.org");
   expect(final).toContain("status: proposed → scheduled");
   // …and the group page shows the session at its time.
   expect(await dmGet(group)).toContain("2101-11-08 18:00 – 22:00 · Europe/Prague");

@@ -2,6 +2,7 @@
 import { z } from "zod";
 import type { StoragePort } from "../db/port.js";
 import { uuidv7 } from "../ids.js";
+import { type Shown, shownAs, shownRowSchema } from "./person.js";
 
 // Groups (MVP-1 slice D): a reusable set of people — a household, a D&D table.
 //
@@ -30,8 +31,8 @@ export interface GroupSummary extends Group {
 
 export interface GroupMemberView {
   readonly personId: string;
-  readonly email: string;
-  readonly displayName: string | null;
+  /** As the other members see them (DESIGN §10 rc21): a handle, an address only if shown. */
+  readonly shown: Shown;
   readonly role: GroupRole;
 }
 
@@ -124,10 +125,8 @@ export async function listGroupsFor(
   });
 }
 
-const memberRowSchema = z.object({
+const memberRowSchema = shownRowSchema.extend({
   person_id: z.string(),
-  email: z.string(),
-  display_name: z.string().nullable(),
   role: roleSchema,
 });
 
@@ -140,14 +139,18 @@ export async function listMembers(
   membership: GroupMembership,
 ): Promise<GroupMemberView[]> {
   const rows = await storage.query({
-    sql: `SELECT p.id AS person_id, p.email, p.display_name, m.role
+    sql: `SELECT p.id AS person_id, p.email, p.display_name, m.handle, m.show_email, m.role
           FROM group_member m JOIN person p ON p.id = m.person_id
           WHERE m.group_id = ?
-          ORDER BY m.role = 'organizer' DESC, p.email`,
+          ORDER BY m.role = 'organizer' DESC, m.joined_at, p.id`,
     params: [membership.group.id],
   });
   return rows.map((row) => {
     const r = memberRowSchema.parse(row);
-    return { personId: r.person_id, email: r.email, displayName: r.display_name, role: r.role };
+    return {
+      personId: r.person_id,
+      shown: shownAs(r.person_id, r, membership.group.id),
+      role: r.role,
+    };
   });
 }

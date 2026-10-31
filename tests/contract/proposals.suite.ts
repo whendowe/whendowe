@@ -20,7 +20,7 @@ import {
 import { acknowledge, listRequests } from "../../src/events/response.js";
 import { createGroup, findGroupForMember } from "../../src/people/group.js";
 import { acceptInvite, createInvite, type EditTier } from "../../src/people/invite.js";
-import { findOrCreatePerson } from "../../src/people/person.js";
+import { findOrCreatePerson, guestName } from "../../src/people/person.js";
 
 // Change proposals — the propose tier (DESIGN §10 rc13, MVP-2 slice 2E-2) — on BOTH
 // drivers. Accepting chains changes() through the edit, its log row, the proposal's own
@@ -121,7 +121,7 @@ export function runProposalsContract(makePort: () => Promise<StoragePort>): void
         startLocal: { before: "2101-11-20T18:00:00", after: "2101-11-20T19:00:00" },
         endLocal: { before: "2101-11-20T20:00:00", after: "2101-11-20T21:00:00" },
       });
-      expect(forMara.pending[0]?.proposerEmail).toBe("prop-david-wait@example.org");
+      expect(forMara.pending[0]?.proposedBy).toBe(f.david);
 
       const forDavid = await listProposals(port, await access(port, f.eventId, f.david));
       expect(forDavid.pending).toEqual([]);
@@ -179,21 +179,21 @@ export function runProposalsContract(makePort: () => Promise<StoragePort>): void
       expect(after.event.startLocal).toBe("2101-11-20T19:00:00");
       expect(after.event.revision).toBe(2);
       const [latest] = await listHistory(port, after);
-      expect(latest?.actorEmail).toBe("prop-ann-accept@example.org");
-      expect(latest?.proposedByEmail).toBe("prop-david-accept@example.org");
+      expect(latest?.actorId).toBe(f.ann);
+      expect(latest?.proposedBy?.name).toBe(guestName(f.eventId, f.david));
       expect(Object.keys(latest?.change ?? {})).toEqual(["startLocal", "endLocal"]);
 
       const mine = (await listProposals(port, await access(port, f.eventId, f.david))).mine;
       expect(mine?.status).toBe("accepted");
-      expect(mine?.decidedByEmail).toBe("prop-ann-accept@example.org");
+      expect(mine?.decidedBy?.name).toBe(guestName(f.eventId, f.ann));
       expect((await listProposals(port, after)).pending).toEqual([]);
 
       // A later plain edit is Mara's alone; the accepted revision keeps its proposer.
       await editEvent(port, after, { fields: DINNER, actorId: f.mara, now: T2 });
       const history = await listHistory(port, await access(port, f.eventId, f.mara));
-      expect(history.map((h) => [h.revision, h.proposedByEmail])).toEqual([
+      expect(history.map((h) => [h.revision, h.proposedBy?.name ?? null])).toEqual([
         [3, null],
-        [2, "prop-david-accept@example.org"],
+        [2, guestName(f.eventId, f.david)],
         [1, null],
       ]);
     });
@@ -213,7 +213,7 @@ export function runProposalsContract(makePort: () => Promise<StoragePort>): void
         now: T1,
       });
       const [latest] = await listHistory(port, await access(port, f.eventId, f.mara));
-      expect(latest?.proposedByEmail).toBeNull();
+      expect(latest?.proposedBy).toBeNull();
     });
 
     it("an accepted material change asks for acknowledgment again", async () => {

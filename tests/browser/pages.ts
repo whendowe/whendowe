@@ -5,6 +5,7 @@ import { createTokenCipher } from "../../src/crypto/tokens.js";
 import { sqliteStoragePort } from "../../src/db/sqlite.js";
 import type { MailMessage } from "../../src/mail/port.js";
 import { createApp } from "../../src/web/app.js";
+import { ACCOUNT_PATH } from "../../src/web/layout.js";
 import { CONFIRM_PATH, SIGN_IN_PATH, SWITCH_PATH } from "../../src/web/routes/auth.js";
 import { GROUPS_PATH } from "../../src/web/routes/groups.js";
 import { PLANS_PATH } from "../../src/web/routes/plans.js";
@@ -53,7 +54,15 @@ async function signIn(email: string, cookie?: string): Promise<string> {
   const link = must(/https?:\/\/\S+/.exec(sent.at(-1)?.text ?? "")?.[0], "sign-in link");
   const token = must(new URL(link).searchParams.get("t"), "sign-in token");
   const confirmed = await app.request(CONFIRM_PATH, post({ t: token }, cookie));
-  return must(confirmed.headers.get("set-cookie")?.split(";")[0], "session cookie");
+  const signedIn = must(confirmed.headers.get("set-cookie")?.split(";")[0], "session cookie");
+  // Everyone chooses the name others see (DESIGN §10 rc21): here, the part before @.
+  const page = await (await app.request("/", { headers: { cookie: signedIn } })).text();
+  const token2 = must(/name="csrf" value="([^"]+)"/.exec(page)?.[1], "CSRF token");
+  await app.request(
+    ACCOUNT_PATH,
+    post({ csrf: token2, handle: email.split("@")[0] ?? "" }, signedIn),
+  );
+  return signedIn;
 }
 
 // Three accounts on this browser, so the header's menu has someone to switch to; the

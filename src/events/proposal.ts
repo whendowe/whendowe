@@ -3,6 +3,7 @@ import { z } from "zod";
 import { type Diff, diff } from "../changelog.js";
 import type { StoragePort } from "../db/port.js";
 import { uuidv7 } from "../ids.js";
+import { type Shown, shownAs } from "../people/person.js";
 import {
   type EventAccess,
   type EventFields,
@@ -31,14 +32,14 @@ export const PROPOSAL_CEILING = 50;
 export interface ChangeProposal {
   readonly id: string;
   readonly proposedBy: string;
-  readonly proposerEmail: string;
-  readonly proposerName: string | null;
+  /** As the event's people see the proposer (DESIGN §10 rc21). */
+  readonly proposer: Shown;
   /** As it stands NOW: a pending proposal on a revision that has moved reads `superseded`. */
   readonly status: ProposalStatus;
   readonly fields: EventFields;
   /** What accepting would change; only while it can still be accepted. */
   readonly change: Diff | null;
-  readonly decidedByEmail: string | null;
+  readonly decidedBy: Shown | null;
   readonly decidedAt: string | null;
   readonly createdAt: string;
 }
@@ -48,10 +49,16 @@ const proposalRowSchema = z.object({
   proposed_by: z.string(),
   proposer_email: z.string(),
   proposer_name: z.string().nullable(),
+  proposer_handle: z.string().nullable(),
+  proposer_show_email: z.number().nullable(),
   base_revision: z.number(),
   fields: z.string(),
   status: proposalStatusSchema,
+  decided_by: z.string().nullable(),
   decided_by_email: z.string().nullable(),
+  decided_by_name: z.string().nullable(),
+  decided_by_handle: z.string().nullable(),
+  decided_by_show_email: z.number().nullable(),
   decided_at: z.string().nullable(),
   created_at: z.string(),
 });
@@ -63,23 +70,49 @@ function toProposal(row: unknown, access: EventAccess): ChangeProposal {
   return {
     id: r.id,
     proposedBy: r.proposed_by,
-    proposerEmail: r.proposer_email,
-    proposerName: r.proposer_name,
+    proposer: shownAs(
+      r.proposed_by,
+      {
+        email: r.proposer_email,
+        display_name: r.proposer_name,
+        handle: r.proposer_handle,
+        show_email: r.proposer_show_email,
+      },
+      access.event.id,
+    ),
     status: r.status === "pending" && !live ? "superseded" : r.status,
     fields,
     change: live ? diff(flatten(access.event), flatten(fields)) : null,
-    decidedByEmail: r.decided_by_email,
+    decidedBy:
+      r.decided_by === null || r.decided_by_email === null
+        ? null
+        : shownAs(
+            r.decided_by,
+            {
+              email: r.decided_by_email,
+              display_name: r.decided_by_name,
+              handle: r.decided_by_handle,
+              show_email: r.decided_by_show_email,
+            },
+            access.event.id,
+          ),
     decidedAt: r.decided_at,
     createdAt: r.created_at,
   };
 }
 
 const PROPOSAL_COLUMNS = `ecp.id, ecp.proposed_by, pp.email AS proposer_email,
-  pp.display_name AS proposer_name, ecp.base_revision, ecp.fields, ecp.status,
-  dp.email AS decided_by_email, ecp.decided_at, ecp.created_at`;
+  pp.display_name AS proposer_name, px.handle AS proposer_handle, px.show_email AS proposer_show_email,
+  ecp.base_revision, ecp.fields, ecp.status, ecp.decided_by, dp.email AS decided_by_email,
+  dp.display_name AS decided_by_name, dx.handle AS decided_by_handle,
+  dx.show_email AS decided_by_show_email, ecp.decided_at, ecp.created_at`;
 const PROPOSAL_FROM = `event_change_proposal ecp
   JOIN person pp ON pp.id = ecp.proposed_by
-  LEFT JOIN person dp ON dp.id = ecp.decided_by`;
+  LEFT JOIN event_participation px
+    ON px.canonical_event_id = ecp.canonical_event_id AND px.person_id = ecp.proposed_by
+  LEFT JOIN person dp ON dp.id = ecp.decided_by
+  LEFT JOIN event_participation dx
+    ON dx.canonical_event_id = ecp.canonical_event_id AND dx.person_id = ecp.decided_by`;
 
 export type ProposeResult =
   | { readonly kind: "proposed"; readonly id: string }

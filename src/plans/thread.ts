@@ -2,6 +2,7 @@
 import { z } from "zod";
 import type { StoragePort } from "../db/port.js";
 import { uuidv7 } from "../ids.js";
+import { type Shown, shownAs, shownRowSchema } from "../people/person.js";
 
 // Plan threads (DESIGN §10 rc19, slice P1): what people are planning — "Kiddo's weeks",
 // "Christmas 2026" — its members, and the organizer who decides when more than two plan.
@@ -21,15 +22,15 @@ export interface Thread {
 
 export interface ThreadMember {
   readonly personId: string;
-  readonly email: string;
-  readonly displayName: string | null;
+  /** As the other members see them (DESIGN §10 rc21): a handle, an address only if shown. */
+  readonly shown: Shown;
 }
 
 /** Proof that a person is a member of a thread, with everyone who plans in it. */
 export interface ThreadAccess {
   readonly thread: Thread;
   readonly personId: string;
-  /** Sorted by email, so every page lists people in the same order. */
+  /** In the order they joined, so every page lists people (and colours them) the same way. */
   readonly members: readonly ThreadMember[];
 }
 
@@ -48,11 +49,9 @@ export function deciders(access: ThreadAccess): readonly string[] {
     : [access.thread.organizerId];
 }
 
-/** A member's name for headlines: their display name, or the part of the address before @. */
-export function memberName(m: Pick<ThreadMember, "email" | "displayName">): string {
-  if (m.displayName !== null && m.displayName.trim() !== "") return m.displayName.trim();
-  const at = m.email.indexOf("@");
-  return at > 0 ? m.email.slice(0, at) : m.email;
+/** A member's name: their handle here, never any part of their address (§10 rc21). */
+export function memberName(m: Pick<ThreadMember, "shown">): string {
+  return m.shown.name;
 }
 
 export const MAX_THREAD_NAME = 80;
@@ -121,10 +120,8 @@ const threadRowSchema = z.object({
   created_at: z.string(),
 });
 
-const memberRowSchema = z.object({
+const memberRowSchema = shownRowSchema.extend({
   person_id: z.string(),
-  email: z.string(),
-  display_name: z.string().nullable(),
 });
 
 function toThread(row: unknown): Thread {
@@ -153,14 +150,14 @@ export async function findThreadForMember(
   if (rows[0] === undefined) return null;
   const members = (
     await storage.query({
-      sql: `SELECT m.person_id, p.email, p.display_name
+      sql: `SELECT m.person_id, p.email, p.display_name, m.handle, m.show_email
             FROM plan_thread_member m JOIN person p ON p.id = m.person_id
-            WHERE m.thread_id = ? ORDER BY p.email`,
+            WHERE m.thread_id = ? ORDER BY m.created_at, m.person_id`,
       params: [threadId],
     })
   ).map((row) => {
     const r = memberRowSchema.parse(row);
-    return { personId: r.person_id, email: r.email, displayName: r.display_name };
+    return { personId: r.person_id, shown: shownAs(r.person_id, r, threadId) };
   });
   return { thread: toThread(rows[0]), personId, members };
 }
