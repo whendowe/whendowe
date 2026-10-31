@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+import { z } from "zod";
 import { expect, type Page, test } from "./fixtures.js";
 
 // The plan pages (DESIGN §10 rc19) in a real browser. pages.ts renders a game table of
@@ -102,5 +103,100 @@ test.describe("without JavaScript", () => {
     await expect(page.locator('form[method="post"] button[name="shift"]')).toHaveCount(4);
     // Days and ribbons are links: tapping one is a GET of the same page.
     await expect(page.locator('.dh[href*="day=2026-11-11"]')).toHaveCount(1);
+  });
+});
+
+// The week-row editor (slice P4). The pages are files here, so instead of navigating,
+// sending the form records the fields it would have sent: the only output the script has.
+async function recordSends(page: Page): Promise<void> {
+  // A string, run in the page: this file is typed without the DOM.
+  await page.evaluate(`(() => {
+    window.sent = [];
+    HTMLFormElement.prototype.requestSubmit = function () {
+      var out = {};
+      new FormData(this).forEach(function (v, k) { out[k] = String(v); });
+      window.sent.push(out);
+    };
+  })()`);
+}
+const sentSchema = z.array(z.record(z.string(), z.string()));
+const sent = async (page: Page) => sentSchema.parse(await page.evaluate("window.sent"));
+const cell = (page: Page, k: string) => page.locator(`[data-plan-editor] .dh[data-k="${k}"]`);
+async function centre(page: Page, selector: string) {
+  const b = await page.locator(selector).first().boundingBox();
+  if (b === null) throw new Error(`${selector} is not on screen`);
+  return { x: b.x + b.width / 2, y: b.y + b.height / 2 };
+}
+
+test.describe("the week-row editor", () => {
+  test("tap an end to pick it up, then a day in the next week to put it down", async ({ page }) => {
+    const errors = await open(page, "plan-draft-editing");
+    await recordSends(page);
+    await cell(page, "2026-11-12").click(); // a middle day: nothing happens
+    await expect(page.locator(".dh.grab")).toHaveCount(0);
+    await cell(page, "2026-11-15").click();
+    await expect(cell(page, "2026-11-15")).toHaveClass(/grab/);
+    await expect(page.locator(".rib.sel .grip.e")).toHaveClass(/on/);
+    await expect(page.locator("[data-hint]")).toContainText("Picked up its last day");
+    await expect(page).toHaveScreenshot("plan-draft-held.png");
+    await cell(page, "2026-11-15").click(); // put back
+    await expect(page.locator(".dh.grab")).toHaveCount(0);
+    expect(await sent(page)).toEqual([]);
+
+    await cell(page, "2026-11-15").click();
+    await cell(page, "2026-11-18").click();
+    const [form] = await sent(page);
+    expect(form?.from).toBe("2026-11-09");
+    expect(form?.to).toBe("2026-11-18");
+    expect(form?.title).toBe("With lea");
+    expect(errors).toEqual([]);
+  });
+
+  test("drag the last day's grip across the week boundary", async ({ page }) => {
+    const errors = await open(page, "plan-draft-editing");
+    await recordSends(page);
+    const from = await centre(page, ".rib.sel .grip.e");
+    const to = await centre(page, '[data-plan-editor] .dh[data-k="2026-11-18"]');
+    await page.mouse.move(from.x, from.y);
+    await page.mouse.down();
+    for (let i = 1; i <= 10; i++)
+      await page.mouse.move(
+        from.x + ((to.x - from.x) * i) / 10,
+        from.y + ((to.y - from.y) * i) / 10,
+      );
+    await expect(cell(page, "2026-11-18")).toHaveClass(/sel-end/);
+    await page.mouse.up();
+    const [form] = await sent(page);
+    expect([form?.from, form?.to]).toEqual(["2026-11-09", "2026-11-18"]);
+    expect(errors).toEqual([]);
+  });
+
+  test.describe("on a touch screen", () => {
+    test.use({ hasTouch: true });
+
+    test("dragging the whole stretch a week later, with a finger", async ({ page }) => {
+      const errors = await open(page, "plan-draft-editing");
+      await recordSends(page);
+      const from = await centre(page, ".rib.sel");
+      const to = await centre(page, '[data-plan-editor] .dh[data-k="2026-11-19"]');
+      const cdp = await page.context().newCDPSession(page);
+      const touch = (type: "touchStart" | "touchMove" | "touchEnd", x: number, y: number) =>
+        cdp.send("Input.dispatchTouchEvent", {
+          type,
+          touchPoints: type === "touchEnd" ? [] : [{ x: Math.round(x), y: Math.round(y) }],
+        });
+      // The ribbon's centre is Thursday 12th; Thursday 19th is a week later.
+      await touch("touchStart", from.x, from.y);
+      for (let i = 1; i <= 12; i++)
+        await touch(
+          "touchMove",
+          from.x + ((to.x - from.x) * i) / 12,
+          from.y + ((to.y - from.y) * i) / 12,
+        );
+      await touch("touchEnd", to.x, to.y);
+      const [form] = await sent(page);
+      expect([form?.from, form?.to]).toEqual(["2026-11-16", "2026-11-22"]);
+      expect(errors).toEqual([]);
+    });
   });
 });

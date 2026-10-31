@@ -60,7 +60,7 @@ export const PLAN_STYLE = html`<style>
   .pl .seg button[aria-pressed=true] { background: var(--accent); color: var(--on); font-weight: 700; }
 
   .pl .weeks { display: grid; gap: 8px; }
-  .pl .week { border: 1px solid var(--line); border-radius: 10px; padding: 6px; background: var(--card); display: grid; gap: 5px; }
+  .pl .week { scroll-margin-top: 150px; border: 1px solid var(--line); border-radius: 10px; padding: 6px; background: var(--card); display: grid; gap: 5px; }
   .pl .wh { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; font-size: .85rem; padding: 0 2px; }
   .pl .st { font-size: .72rem; font-weight: 700; color: var(--muted); white-space: nowrap; }
   .pl .wg { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 3px; grid-auto-rows: minmax(1.7rem, auto); }
@@ -169,3 +169,243 @@ export const PLAN_STYLE = html`<style>
   .pl .card { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; background: var(--card); display: grid; gap: 4px; }
   .pl .card .when { font-weight: 700; font-size: 1.05rem; }
 </style>`;
+
+// The week-row editor script (slice P4). Progressive enhancement, never a replacement:
+// the draft page works with plain links and forms, and this only adds gestures that
+// write the same plain fields and submit the same form.
+//
+// - Tap an end of the selected stretch (or its grip) to pick it up; tap it again to
+//   put it back; tap any other day, in any week, to put it down there (ends that cross
+//   swap). Middle days do nothing while no end is held. A timed event moves to the
+//   tapped day. This works wherever dragging doesn't (owner, 2026-10-30).
+// - Drag a grip to move that end, or the ribbon to move the whole stretch, by the
+//   finger's movement in days. The preview only toggles classes: nothing the finger is
+//   on is ever re-rendered, so phones keep delivering the gesture (the prototype's v9
+//   lesson: a detached touch target stops receiving moves).
+// - Days are found from the week row under the pointer, never from a ribbon's box.
+//
+// Like the picker, the script is a literal inside the `html` tag: no backtick, no
+// dollar-brace, no backslash. Its pure logic is published as globalThis.WhenDoWePlanEditor
+// for the unit tests, which run exactly this code.
+const EDITOR_SCRIPT = html`<script>
+(function () {
+  "use strict";
+  /* ---------- pure: whole days as "YYYY-MM-DD" keys, in UTC ---------- */
+  var MS = 86400000;
+  function pad(n) { return (n < 10 ? "0" : "") + n; }
+  function isDay(k) {
+    if (typeof k !== "string" || k.length !== 10 || k.charAt(4) !== "-" || k.charAt(7) !== "-") return false;
+    var d = new Date(k + "T00:00:00Z");
+    return !isNaN(d.getTime()) && iso(d) === k;
+  }
+  function iso(d) { return d.getUTCFullYear() + "-" + pad(d.getUTCMonth() + 1) + "-" + pad(d.getUTCDate()); }
+  function addDays(k, n) { return iso(new Date(Date.parse(k + "T00:00:00Z") + n * MS)); }
+  function daysBetween(a, b) { return Math.round((Date.parse(b + "T00:00:00Z") - Date.parse(a + "T00:00:00Z")) / MS); }
+  function ordered(a, z) { return a <= z ? { start: a, end: z } : { start: z, end: a }; }
+
+  /*
+   * One tap on day k while a whole-day stretch start..end (inclusive) is selected and
+   * "grab" names the end held (or null). Returns the next state; commit says the
+   * stretch changed and the form should be sent.
+   */
+  function tap(state, k) {
+    if (!state.grab) {
+      if (k === state.end) return { start: state.start, end: state.end, grab: "end", commit: false };
+      if (k === state.start) return { start: state.start, end: state.end, grab: "start", commit: false };
+      return { start: state.start, end: state.end, grab: null, commit: false };
+    }
+    var held = state.grab === "start" ? state.start : state.end;
+    if (k === held) return { start: state.start, end: state.end, grab: null, commit: false };
+    var r = state.grab === "start" ? ordered(k, state.end) : ordered(state.start, k);
+    return { start: r.start, end: r.end, grab: null, commit: true };
+  }
+
+  /* A drag of one end (or the whole stretch: "body") by delta days, from where it began. */
+  function dragged(orig, which, delta) {
+    if (which === "body") return { start: addDays(orig.start, delta), end: addDays(orig.end, delta) };
+    if (which === "start") return ordered(addDays(orig.start, delta), orig.end);
+    return ordered(orig.start, addDays(orig.end, delta));
+  }
+
+  globalThis.WhenDoWePlanEditor = { addDays: addDays, daysBetween: daysBetween, isDay: isDay, tap: tap, dragged: dragged };
+  if (typeof document === "undefined") return;
+
+  /* ---------- the page ---------- */
+  var root = document.querySelector("[data-plan-editor]");
+  var form = document.getElementById("editor");
+  var sheet = document.querySelector(".pl .sheet");
+  var head = document.querySelector(".pl .head");
+  var sel = root ? root.getAttribute("data-sel") : "";
+
+  function sheetTop() { return sheet ? sheet.getBoundingClientRect().top : window.innerHeight; }
+  function headBottom() { return head ? head.getBoundingClientRect().bottom : 0; }
+
+  /* Keep the event being edited in sight: just above the sheet, never under the header. */
+  function reveal() {
+    var rib = document.querySelector(".pl .rib.sel");
+    if (!rib) return;
+    var r = rib.getBoundingClientRect();
+    var limit = sheetTop() - 72;
+    if (r.bottom > limit) window.scrollBy(0, r.bottom - limit);
+    else if (r.top < headBottom() + 8) window.scrollBy(0, r.top - headBottom() - 8);
+  }
+  reveal();
+
+  if (!root || !form || !sel) return;
+  var field = function (name) { return form.querySelector("[name=" + name + "]"); };
+  var kindDays = form.querySelector("input[name=kind][value=days]");
+  var allDay = !!(kindDays && kindDays.checked);
+  var from = field("from"), to = field("to"), dayField = field("day");
+  var hint = form.querySelector("[data-hint]");
+  var state = { start: from ? from.value : "", end: to ? to.value : "", grab: null };
+  var g0 = root.getAttribute("data-grab");
+  if (allDay && (g0 === "start" || g0 === "end")) state.grab = g0;
+  if (allDay && !(isDay(state.start) && isDay(state.end))) allDay = false;
+
+  function paint(range) {
+    var cells = document.querySelectorAll(".pl .dh[data-k]");
+    for (var i = 0; i < cells.length; i++) {
+      var c = cells[i], k = c.getAttribute("data-k");
+      var inside = range && k >= range.start && k <= range.end;
+      var isEnd = range && (k === range.start || k === range.end);
+      c.classList.toggle("sel-end", !!(inside && isEnd));
+      c.classList.toggle("sel-mid", !!(inside && !isEnd));
+      c.classList.toggle("grab", !!(range && state.grab && k === (state.grab === "start" ? range.start : range.end)));
+    }
+    var grips = document.querySelectorAll(".pl .rib.sel .grip");
+    for (var j = 0; j < grips.length; j++)
+      grips[j].classList.toggle("on", grips[j].getAttribute("data-grip") === state.grab);
+    if (hint && allDay) {
+      hint.textContent = state.grab
+        ? "Picked up its " + (state.grab === "start" ? "first" : "last") + " day: tap the day it should move to, or tap it again to leave it."
+        : "Tap its first or last day to pick it up, then tap where it goes. Or drag an end.";
+    }
+  }
+  function send() {
+    if (typeof form.requestSubmit === "function") form.requestSubmit();
+    else form.submit();
+  }
+  function commit(range) {
+    from.value = range.start;
+    to.value = range.end;
+    paint(range);
+    send();
+  }
+  if (allDay) paint(state);
+
+  /* ---------- taps ---------- */
+  var eatClick = false;
+  document.addEventListener("click", function (ev) {
+    var t = ev.target;
+    if (!(t instanceof Element)) return;
+    if (eatClick) { ev.preventDefault(); ev.stopPropagation(); return; }
+    var grip = t.closest(".pl .rib.sel .grip");
+    if (grip && allDay) {
+      ev.preventDefault();
+      var which = grip.getAttribute("data-grip");
+      state.grab = state.grab === which ? null : which;
+      paint(state);
+      return;
+    }
+    if (t.closest(".pl .rib.sel")) { ev.preventDefault(); return; }
+    var cell = t.closest(".pl .dh[data-k]");
+    if (!cell || !root.contains(cell)) return;
+    var k = cell.getAttribute("data-k");
+    ev.preventDefault();
+    if (!allDay) {
+      if (dayField && dayField.value !== k) { dayField.value = k; send(); }
+      return;
+    }
+    var next = tap(state, k);
+    state.grab = next.grab;
+    if (next.commit) commit(next);
+    else paint(state);
+  }, true);
+
+  /* ---------- drags ---------- */
+  function dayAt(x, y) {
+    var top = sheetTop() - 4;
+    if (y > top) y = top;
+    var rows = root.querySelectorAll(".wg[data-w]");
+    var best = null, bestDist = Infinity;
+    for (var i = 0; i < rows.length; i++) {
+      var r = rows[i].getBoundingClientRect();
+      if (r.height === 0) continue;
+      var dist = y < r.top ? r.top - y : y > r.bottom ? y - r.bottom : 0;
+      if (dist < bestDist) { best = { row: rows[i], rect: r }; bestDist = dist; }
+    }
+    if (!best) return null;
+    var col = Math.floor(((x - best.rect.left) / (best.rect.width + 3)) * 7);
+    if (col < 0) col = 0;
+    if (col > 6) col = 6;
+    return addDays(best.row.getAttribute("data-w"), col);
+  }
+
+  var drag = null;
+  function onMove(x, y) {
+    if (!drag) return;
+    if (!drag.moving && Math.abs(x - drag.x) + Math.abs(y - drag.y) < 6) return;
+    drag.moving = true;
+    drag.dy = y - drag.lastY;
+    drag.lastX = x; drag.lastY = y;
+    root.classList.add("dragging");
+    var k = dayAt(x, y);
+    if (!k) return;
+    drag.range = dragged(drag.orig, drag.which, daysBetween(drag.d0, k));
+    paint(drag.range);
+  }
+  /* Scroll only when the finger is at the sheet's edge (or the header's) and moving toward it. */
+  function edgeScroll() {
+    if (!drag || !drag.moving) return;
+    var step = 0;
+    if (drag.lastY > sheetTop() - 12 && drag.dy > 0) step = 8;
+    else if (drag.lastY < headBottom() + 12 && drag.dy < 0) step = -8;
+    if (step !== 0) {
+      window.scrollBy(0, step);
+      onMove(drag.lastX, drag.lastY);
+    }
+    drag.raf = window.requestAnimationFrame(edgeScroll);
+  }
+  function end() {
+    if (!drag) return;
+    var d = drag;
+    drag = null;
+    root.classList.remove("dragging");
+    if (d.raf) window.cancelAnimationFrame(d.raf);
+    if (!d.moving) return;
+    eatClick = true;
+    setTimeout(function () { eatClick = false; }, 0);
+    if (d.range && (d.range.start !== state.start || d.range.end !== state.end)) commit(d.range);
+    else paint(state);
+  }
+  root.addEventListener("pointerdown", function (ev) {
+    if (!allDay || ev.button > 0) return;
+    var t = ev.target;
+    if (!(t instanceof Element)) return;
+    var rib = t.closest(".rib.sel");
+    if (!rib) return;
+    var grip = t.closest(".grip");
+    var d0 = dayAt(ev.clientX, ev.clientY);
+    if (!d0) return;
+    drag = { which: grip ? grip.getAttribute("data-grip") : "body", d0: d0, orig: { start: state.start, end: state.end },
+      x: ev.clientX, y: ev.clientY, lastX: ev.clientX, lastY: ev.clientY, dy: 0, moving: false, range: null, raf: 0 };
+    try { rib.setPointerCapture(ev.pointerId); } catch (e) { /* capture is a nicety */ }
+    drag.raf = window.requestAnimationFrame(edgeScroll);
+  });
+  /* The ribbon is a link: a mouse would start dragging the link itself and cancel ours. */
+  var selRibs = root.querySelectorAll(".rib.sel");
+  for (var s = 0; s < selRibs.length; s++) selRibs[s].setAttribute("draggable", "false");
+  root.addEventListener("dragstart", function (ev) {
+    if (ev.target instanceof Element && ev.target.closest(".rib.sel")) ev.preventDefault();
+  });
+  root.addEventListener("pointermove", function (ev) { onMove(ev.clientX, ev.clientY); });
+  root.addEventListener("pointerup", end);
+  root.addEventListener("pointercancel", end);
+  document.addEventListener("touchmove", function (ev) { if (drag && drag.moving) ev.preventDefault(); }, { passive: false });
+})();
+</script>`;
+
+/** The plan pages' styles and the editor script, for a page that has week rows. */
+export function planAssets() {
+  return html`${PLAN_STYLE}${EDITOR_SCRIPT}`;
+}

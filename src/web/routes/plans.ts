@@ -58,7 +58,7 @@ import {
   whoText,
 } from "../../plans/weeks.js";
 import { type Html, html } from "../layout.js";
-import { PLAN_STYLE } from "../plan-editor.js";
+import { PLAN_STYLE, planAssets } from "../plan-editor.js";
 import {
   type AppEnv,
   notVisible,
@@ -288,8 +288,8 @@ function baseOf(v: View, p: Plan): Plan | null {
   return v.plans.find((x) => x.id === p.answersId && x.status !== "draft") ?? null;
 }
 
-function shell(body: Html): Html {
-  return html`${PLAN_STYLE}<div class="pl">${body}</div>`;
+function shell(body: Html, editor = false): Html {
+  return html`${editor ? "" : PLAN_STYLE}<div class="pl">${body}</div>${editor ? planAssets() : ""}`;
 }
 
 // --- the thread -----------------------------------------------------------------------
@@ -620,6 +620,8 @@ interface DraftQuery extends PlanQuery {
   readonly add: string | null;
   readonly kind: "days" | "time";
   readonly range: boolean;
+  /** "end" for a stretch just drawn: it starts with its end picked up (P4). */
+  readonly grab: "start" | "end" | null;
 }
 
 function draftQuery(c: Context<AppEnv>): DraftQuery {
@@ -630,6 +632,7 @@ function draftQuery(c: Context<AppEnv>): DraftQuery {
     add: DAY.test(add) ? add : null,
     kind: c.req.query("kind") === "days" ? "days" : "time",
     range: c.req.query("range") === "1",
+    grab: c.req.query("grab") === "end" ? "end" : c.req.query("grab") === "start" ? "start" : null,
   };
 }
 
@@ -801,7 +804,7 @@ function draftPage(v: View, d: Plan, q: DraftQuery, error: string | null): Html 
         : `${here}?day=${k}#w-${k}`;
   return shell(
     html`${header(v, d, base, model, { seeing, here })}
-<div data-plan-editor data-thread="${t.id}" data-csrf="${v.csrf}" data-sel="${sel?.sid ?? ""}">
+<div data-plan-editor data-sel="${sel?.sid ?? ""}" data-grab="${q.grab ?? ""}">
 ${weeksHtml(
   blocks,
   {
@@ -819,6 +822,7 @@ ${weeksHtml(
 )}</div>
 <a class="btn small" href="${here}?more=${q.more + 1}">Show another week</a>
 <section class="sheet">${draftSheet(v, d, base, q, error)}</section>`,
+    true,
   );
 }
 
@@ -1174,7 +1178,9 @@ export function registerPlanRoutes(app: Hono<AppEnv>, deps: PlanRouteDeps): void
         });
         const here = draftPath(access.thread.id);
         if (result.kind === "full") throw new PlanInputError("A plan holds at most 60 events.");
-        return result.kind === "saved" ? `${here}?e=${result.sid}` : threadPath(access.thread.id);
+        if (result.kind !== "saved") return threadPath(access.thread.id);
+        // A stretch just drawn starts with its end picked up: the next tap says where it ends.
+        return `${here}?e=${result.sid}${str(form, "kind") === "days" ? "&grab=end" : ""}`;
       },
       (form) => {
         const day = str(form, "kind") === "days" ? str(form, "from") : str(form, "day");
