@@ -1,6 +1,6 @@
 # WhenDoWe — User Workflows & Stories
 
-> **Status:** v0.7 (§3 *Plan* and US-16–US-18: several events proposed, compared and accepted as one; owner decisions from the plans prototype, 2026-10-25…30; folded into DESIGN rc19 §10 *Plans*) (v0.6: renamed to WhenDoWe) (v0.5 + delta 10 aligned to the DESIGN §6 intersection contract: HTTPS mail port, no SMTP). Companion to `DESIGN.md`.
+> **Status:** v0.8 (US-19–US-20 and a US-12 amendment: handles instead of addresses, leaving and deleting, an account that goes leaves "a former member" behind; owner decisions 2026-10-31, folded into DESIGN rc21 §10 *Privacy basics*) (v0.7: §3 *Plan* and US-16–US-18: several events proposed, compared and accepted as one; owner decisions from the plans prototype, 2026-10-25…30; folded into DESIGN rc19 §10 *Plans*) (v0.6: renamed to WhenDoWe) (v0.5 + delta 10 aligned to the DESIGN §6 intersection contract: HTTPS mail port, no SMTP). Companion to `DESIGN.md`.
 > **Audience:** the owner (product decisions) and the coding agent (what M3+ must actually do for people).
 > **Relationship to DESIGN.md:** DESIGN.md defines the sync core (canonical truth, projections, reconcile). This document defines *who* uses it, *what they're trying to do*, and which design seams each story lands on. §9 lists the schema/scope deltas these stories imply, to be folded back into DESIGN.md once accepted.
 
@@ -162,9 +162,21 @@ Jana plans the family Christmas for four households: the cottage stretch, Christ
 **Done when:** `who` survives copying, is diffed like time and title, and colours follow a person when an event is for one person; an event for nobody in particular is for everyone.
 **Maps to:** DESIGN rc19 §10 *Plans* (`who`). Phase: Plans P1–P2.
 
+### US-19 — A name, not an address (rc21)
+Lena joins the swing scene's practice group from her personal address and the rope group from another. In the swing group she is "Lena"; in the rope group she is "Kestrel". Nobody in either group sees either address: the organizer typed it once to invite her, and from then on sees the handle. The practice group's teachers want to be reachable, so they turn on *show my email* for that group only.
+**Done when:** every list of people — members, "Taking part", voters, history, the mail an invite sends — shows a handle; an address appears only to its owner, or to a container where its owner turned it on; a guest who never signed in shows as the name the inviter gave, or "Guest 2", never part of their address.
+**Maps to:** DESIGN rc21 §10 *Privacy basics*. Phase: rc21 R1.
+
+### US-20 — Leaving without a trace (rc21)
+Tom stops going to the rope jams. He leaves the group, and his RSVPs and notes there go with him. A year later the old jams themselves are gone: the group keeps 12 months. Then he deletes his account. He is signed out everywhere, his address is no longer anywhere in WhenDoWe, and in the history of the events he helped plan he is now "a former member" — not the same former member in each one. A month later, not even the backup holds him.
+Separately, Ana was added by email to a picnic by someone she doesn't know. The email tells her who added her and why she got it; one link stops all further mail to her address and deletes it.
+**Done when:** leave, delete an event (cancel first if it's upcoming), garbage collection of events nobody can edit, account deletion with per-event tombstones, export, retention and the opt-out link each have a test that checks nothing of the person is left in storage; a restore re-applies the erasure ledger.
+**Maps to:** DESIGN rc21 §10 *Privacy basics*, §13. Phase: rc21 R2–R5.
+
 ### US-12 — Someone leaves
 Worst case: David and Petra separate. David removes Petra's person from all his events (bulk action). Her mirrors are deleted from *her* calendar via normal reconcile; canonical history — including changes she made — is preserved with attribution (it's an append-only log; her past actions happened). Symmetric case: Petra disconnects her own account → connection `disconnected`, mirrors deleted, person record remains for history.
 **Done when:** no-cascade property holds (her removal deletes only her projections); change_log untouched; re-adding her later recreates mirrors (new provider ids, fine).
+*(rc21)* If Petra deletes her **account** rather than leaving, her past changes stay but are attributed to "a former member", a different one in each event (US-20).
 **Maps to:** deletion model intents (`remove_from_calendar` at person scope), connection `status`. Phase: M3.
 
 ### US-13 — Find a slot (the Doodle replacement)

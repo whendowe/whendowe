@@ -1,6 +1,6 @@
 # WhenDoWe — Design & Agent Bootstrap Brief
 
-> **Status:** v1.0-rc20 (rc19 + §13/§15: "Sign in with Google" pulled forward from MVP-4 — `openid email` only, no offline access, nothing from Google stored; it lands on the same person a magic link to that address does, and only for addresses Google is authoritative for (`@gmail.com`, Workspace); one callback shared with calendar connect, the flow's purpose sealed in the flow cookie; the trial runs on the existing Testing-mode client, so only its test users can use it, and a separate sign-in client published to Production comes before anyone else is invited; owner decision 2026-10-31) (v1.0-rc19: rc18 + §10 *Plans*: several events proposed, compared and accepted as one, before MVP-3 — threads with members and an organizer; plan states draft / on the table / accepted / replaced / withdrawn; answering a plan with a plan, compared by event identity (`sid`); `who` an event is for; two people decide by consensus, more by the organizer after voting; accepting replaces the alternatives and writes the plan's events as ordinary scheduled events; the week-row view with events as per-week pieces; and polls as one-event plans as the direction; owner decisions from the plans prototype, 2026-10-24…30) (v1.0-rc18: rc17 + §13: several accounts signed in on one browser — the session cookie carries up to four sessions, every page's header names the account in use, and switching is one POST that writes nothing to storage; accounts are never linked on the server; a form from a stale tab can't act as the wrong account; a page another signed-in account can see offers the switch, without revealing anything to an account set that can't; owner decision after staging testing with three addresses, whendowe#54) (v1.0-rc17: rc16 + §9: property tests for the UI — Hegel properties over the picker's shipped logic, including that whatever it writes the server's own parser accepts unchanged, and a Hegel state machine that drives the real picker in Chromium against a model; the pages' scripts get coverage measured in the browser tier, mapped back to `picker.ts`, with ratchet-only thresholds; and CODEOWNERS widened to the browser tier and the coverage thresholds, which now help define green) (v1.0-rc16: rc15 + §9: a browser test tier — Playwright drives the pages' own scripts in Chromium, at phone width and with JavaScript off, and compares each page against committed reference screenshots so a PR shows its visual diff; its own command and CI job, and part of the Definition of Done) (v1.0-rc15: rc14 + §10: events are center-stage and groups are an address book — an event names its people directly, people can be added to and removed from an existing event, joining a group never adds you to its earlier events, and home is "your events"; owner decision after the first staging use) (v1.0-rc14: rc13 + §18: the Worker bundle is a published artifact of its own — an OCI artifact on ghcr carrying the bundled script, the migrations it expects and the wrangler template, pinned by digest, so the deployments repo never needs product source; and a pre-Workers-Paid instance mode in §13/§18 — mail only to verified destination addresses via Email Routing on the `notify.` subdomain, enforced by the binding's recipient allowlist) (v1.0-rc13: rc12 + MVP-2 slice 2E planned in §10: response requests — accept/acknowledge states, lifecycle as built, material change = time/date/location; link actions name the phase; `event_change_proposal` for the propose tier with §8 `proposal.ts`; whole-series RRULE; history attribution shown to every tier by owner decision) (v1.0-rc12: rc11 + §10: responses — votes, attendance, feedback — are attributed rows of their own, not change_log rows, because change_log's revision key serialises edits; `event_feedback` and `response_token` sketched; §13 token links as built: re-answerable vote/attend links, 14-day expiry, rotate-on-resend by replacement, no session) (v1.0-rc11: rc10 + MVP-2 layout in §8 — `src/events/`, `routes/events.ts`, `routes/respond.ts`; the event lifecycle as a single status column in §10; and §16's one recorded exception: migration 0005 rebuilds `canonical_event`, allowed only because nothing has ever been deployed) (v1.0-rc10: rc9 + §8 entries for `src/web/layout.ts` and `src/web/session.ts`, recorded before MVP-1 slice C) (v1.0-rc9: rc8 + mail provider decided: Cloudflare Email Service, sending from `notify.whendowe.org`, behind an app-enforced hard cap — §8 entries for `src/mail/cloudflare.ts` and `src/mail/capped.ts`) (v1.0-rc8: rc7 + §8 layout for MVP-1, recorded before the code: `src/people/`, `src/ids.ts`, `src/mail/console.ts`, `src/web/routes/{auth,groups}.ts`) (v1.0-rc7: rc6 + roadmap re-sequenced people-first after an owner review: Ring 0 widened from "the household" to small groups of people who know each other; two-way Google sync is MVP scope; edit tier split from visibility tier; WORKFLOWS §9 deltas folded in — multi-person, account-less responses; §17 single-vs-multi resolved; provider-neutrality made a hard constraint) (v1.0-rc6: rc5 + M1 as-built corrections to §8: `src/crypto/` and `src/oauth/` were introduced during M1 but never documented; `src/web/routes/` contents named; `src/web/escape.ts`; `src/providers/google-event.ts`; `src/recurrence.ts` — undocumented since the M1 recurrence spike; and a `scripts/` directory. Plus §13: the deployments repo is *credential*-human-only — the boundary is credential access, not repo write access, so instance config may be agent-authored and owner-merged) (rc4 + M0 as-built corrections: change_log id in SQLite dialect, fake provider filename, publish-not-deploy workflow comment, Hegel FFI mechanism) (rc3 + security hardening: token-link semantics, ICS/HTML injection, OAuth state/PKCE, supply-chain cooldown & ignore-scripts, agent privilege model, backup-tail deletion promise) (v0.9 + artifact-store port seam for feeds/pages; v0.7 + scheduling economics: cron fan-out vs DO alarms; v0.6 + platform pivot: TypeScript intersection contract — one codebase targeting Cloudflare Workers/D1/Durable Objects free tier *and* Node/Docker self-host; SQLite dialect; Hegel-based verification; earlier history in companions/git). **Name:** WhenDoWe — repo `github.com/whendowe/whendowe`, domain `whendowe.org` (Cloudflare-registered), package name `whendowe`.
+> **Status:** v1.0-rc21 (rc20 + §10/§13 *Privacy basics*, before MVP-3: other people see a handle, never an email address, unless a person turns it on for that group, event or thread (off by default, GDPR Art. 25(2)); handles per account, changeable per group, event and thread; leaving and deleting events, garbage-collecting events nobody can edit, deleting an account (its attribution becomes "a former member", one per container), and a data export; past events purged after 12 months by default, per group; expired tokens purged; an opt-out link in every email for people who never signed up; an erasure ledger so a restore can't bring erased data back; security headers, an anonymous sub-cap on sign-in mail, and no platform invocation logs; no instance hosts groups whose membership reveals special-category data until rc22's sealed groups and explicit consent; owner decisions 2026-10-31 after a threat review) (v1.0-rc20: rc19 + §13/§15: "Sign in with Google" pulled forward from MVP-4 — `openid email` only, no offline access, nothing from Google stored; it lands on the same person a magic link to that address does, and only for addresses Google is authoritative for (`@gmail.com`, Workspace); one callback shared with calendar connect, the flow's purpose sealed in the flow cookie; the trial runs on the existing Testing-mode client, so only its test users can use it, and a separate sign-in client published to Production comes before anyone else is invited; owner decision 2026-10-31) (v1.0-rc19: rc18 + §10 *Plans*: several events proposed, compared and accepted as one, before MVP-3 — threads with members and an organizer; plan states draft / on the table / accepted / replaced / withdrawn; answering a plan with a plan, compared by event identity (`sid`); `who` an event is for; two people decide by consensus, more by the organizer after voting; accepting replaces the alternatives and writes the plan's events as ordinary scheduled events; the week-row view with events as per-week pieces; and polls as one-event plans as the direction; owner decisions from the plans prototype, 2026-10-24…30) (v1.0-rc18: rc17 + §13: several accounts signed in on one browser — the session cookie carries up to four sessions, every page's header names the account in use, and switching is one POST that writes nothing to storage; accounts are never linked on the server; a form from a stale tab can't act as the wrong account; a page another signed-in account can see offers the switch, without revealing anything to an account set that can't; owner decision after staging testing with three addresses, whendowe#54) (v1.0-rc17: rc16 + §9: property tests for the UI — Hegel properties over the picker's shipped logic, including that whatever it writes the server's own parser accepts unchanged, and a Hegel state machine that drives the real picker in Chromium against a model; the pages' scripts get coverage measured in the browser tier, mapped back to `picker.ts`, with ratchet-only thresholds; and CODEOWNERS widened to the browser tier and the coverage thresholds, which now help define green) (v1.0-rc16: rc15 + §9: a browser test tier — Playwright drives the pages' own scripts in Chromium, at phone width and with JavaScript off, and compares each page against committed reference screenshots so a PR shows its visual diff; its own command and CI job, and part of the Definition of Done) (v1.0-rc15: rc14 + §10: events are center-stage and groups are an address book — an event names its people directly, people can be added to and removed from an existing event, joining a group never adds you to its earlier events, and home is "your events"; owner decision after the first staging use) (v1.0-rc14: rc13 + §18: the Worker bundle is a published artifact of its own — an OCI artifact on ghcr carrying the bundled script, the migrations it expects and the wrangler template, pinned by digest, so the deployments repo never needs product source; and a pre-Workers-Paid instance mode in §13/§18 — mail only to verified destination addresses via Email Routing on the `notify.` subdomain, enforced by the binding's recipient allowlist) (v1.0-rc13: rc12 + MVP-2 slice 2E planned in §10: response requests — accept/acknowledge states, lifecycle as built, material change = time/date/location; link actions name the phase; `event_change_proposal` for the propose tier with §8 `proposal.ts`; whole-series RRULE; history attribution shown to every tier by owner decision) (v1.0-rc12: rc11 + §10: responses — votes, attendance, feedback — are attributed rows of their own, not change_log rows, because change_log's revision key serialises edits; `event_feedback` and `response_token` sketched; §13 token links as built: re-answerable vote/attend links, 14-day expiry, rotate-on-resend by replacement, no session) (v1.0-rc11: rc10 + MVP-2 layout in §8 — `src/events/`, `routes/events.ts`, `routes/respond.ts`; the event lifecycle as a single status column in §10; and §16's one recorded exception: migration 0005 rebuilds `canonical_event`, allowed only because nothing has ever been deployed) (v1.0-rc10: rc9 + §8 entries for `src/web/layout.ts` and `src/web/session.ts`, recorded before MVP-1 slice C) (v1.0-rc9: rc8 + mail provider decided: Cloudflare Email Service, sending from `notify.whendowe.org`, behind an app-enforced hard cap — §8 entries for `src/mail/cloudflare.ts` and `src/mail/capped.ts`) (v1.0-rc8: rc7 + §8 layout for MVP-1, recorded before the code: `src/people/`, `src/ids.ts`, `src/mail/console.ts`, `src/web/routes/{auth,groups}.ts`) (v1.0-rc7: rc6 + roadmap re-sequenced people-first after an owner review: Ring 0 widened from "the household" to small groups of people who know each other; two-way Google sync is MVP scope; edit tier split from visibility tier; WORKFLOWS §9 deltas folded in — multi-person, account-less responses; §17 single-vs-multi resolved; provider-neutrality made a hard constraint) (v1.0-rc6: rc5 + M1 as-built corrections to §8: `src/crypto/` and `src/oauth/` were introduced during M1 but never documented; `src/web/routes/` contents named; `src/web/escape.ts`; `src/providers/google-event.ts`; `src/recurrence.ts` — undocumented since the M1 recurrence spike; and a `scripts/` directory. Plus §13: the deployments repo is *credential*-human-only — the boundary is credential access, not repo write access, so instance config may be agent-authored and owner-merged) (rc4 + M0 as-built corrections: change_log id in SQLite dialect, fake provider filename, publish-not-deploy workflow comment, Hegel FFI mechanism) (rc3 + security hardening: token-link semantics, ICS/HTML injection, OAuth state/PKCE, supply-chain cooldown & ignore-scripts, agent privilege model, backup-tail deletion promise) (v0.9 + artifact-store port seam for feeds/pages; v0.7 + scheduling economics: cron fan-out vs DO alarms; v0.6 + platform pivot: TypeScript intersection contract — one codebase targeting Cloudflare Workers/D1/Durable Objects free tier *and* Node/Docker self-host; SQLite dialect; Hegel-based verification; earlier history in companions/git). **Name:** WhenDoWe — repo `github.com/whendowe/whendowe`, domain `whendowe.org` (Cloudflare-registered), package name `whendowe`.
 > **Audience:** the coding agent bootstrapping this repo, and future human contributors.
 
 ---
@@ -184,6 +184,12 @@ whendowe/
       diff.ts                  # pure: match plan events by sid -> same / changed / only in one
       weeks.ts                 # pure view-model: week rows, events as per-week pieces, folding, colours
       note.ts                  # notes on days: attributed, public or private (P5)
+    privacy/                   # rc21 (§10 *Privacy basics*): what is kept, for how long, and how it goes
+      retention.ts             # pure: which rows are due — past events, expired tokens, containers nobody can edit
+      purge.ts                 # the purge pipeline: chunked hard deletes + the erasure ledger (the only DELETE path)
+      erasure.ts               # deleting an account: own rows removed, attribution moved to per-container tombstones
+      export.ts                # a person's data as one JSON document (Art. 15/20)
+      suppression.ts           # opt-out for addresses that never signed up: hashed, checked before any add or send
     oauth/
       pkce.ts                  # RFC 7636 verifier/challenge (S256 only) + state nonce (§13)
       authorize.ts             # Google authorization request URL (§12)
@@ -220,6 +226,7 @@ whendowe/
         events.ts              # your events (home); create/view/edit; the people on an event; polls; history
         respond.ts             # token-link responses: vote / attend / acknowledge with no account (MVP-2)
         plans.ts               # threads, plans, drafts and their editor forms (rc19)
+        account.ts             # your handle, export, delete your account; the opt-out page for email recipients (rc21)
     changelog.ts               # append + diff
     mail/
       port.ts                  # HTTPS mail port (invites, token links — MVP-1)
@@ -495,6 +502,9 @@ CREATE INDEX projection_event_idx ON projection(canonical_event_id);
 --    row-hygiene backstop *inside* purge, never a code path reachable from user action.
 -- 4. Undo is free: 'restore' flips status back and reconcile recreates mirrors. New provider
 --    event ids are fine — identity is the canonical UID (§3.4), not the provider id.
+-- 5. (rc21) The purge pipeline now has callers: deleting an event, garbage collection of events
+--    nobody can edit, retention, and account erasure (§10 *Privacy basics*). Each user act still
+--    only records intent; src/privacy/purge.ts is the one place that issues DELETE.
 
 CREATE TABLE change_log (                                -- append-only
     id                 integer PRIMARY KEY AUTOINCREMENT, -- (bigserial was a Postgres-ism;
@@ -887,6 +897,109 @@ by magic link; the token-link rule returns with polls-as-plans — WORKFLOWS §1
 plan is put on the table (the page offers a short message to paste instead); adding or
 removing members after a thread starts; repeat patterns as a way to draw a plan.
 
+### Privacy basics (rc21 — before MVP-3)
+
+Owner decisions, 2026-10-31, after a threat review of the design and a reading of the GDPR. The
+reference point is a community whose members range from out to very private: everything here is
+also simply right for families and friends. Encryption of what is stored ("sealed" groups and
+events) is rc22, designed separately.
+
+**Other people see a handle, not an address.** GDPR Art. 25(2): by default, personal data is not
+made available to others without the person acting.
+- Every account has a **handle** (`person.display_name`), asked for at first sign-in and changeable
+  any time. A person may use a **different handle in each group, event and thread**; the most
+  specific one wins: the container's own, else the account's.
+- **An email address is shown only to its owner**, unless they turn on *show my email to these
+  people* for one group, event or thread. Off by default, including for every existing member when
+  this ships. Organizers and editors get no exception: they typed an address to invite someone, and
+  from then on see the handle.
+- Someone added by email who has never signed in has no handle yet. The person who added them may
+  give one ("Mara"); it is stored as that container's handle until they set their own. Without
+  one, others see "Guest" plus a number, never any part of the address.
+- Events created from a group **copy** the member's handle and setting, as tiers are copied (rc15).
+- Mail names the sender by handle, never by address.
+- This touches every list of people: group and thread members, an event's "Taking part", poll
+  voters, history entries, and the header's "This is visible to …" (which names *your own*
+  accounts, so it keeps addresses).
+
+**Leaving and deleting.** All of these are POSTs with the active account's CSRF token, confirmed on
+a page that says what will happen, and each records intent; the purge pipeline deletes (point 5
+of the deletion model above).
+- **Leave** an event, a group or a thread: your participation, responses, votes, feedback, notes
+  and tokens in it go, as removal by an editor does today (rc15). Your past changes in its
+  history stay attributed to you (WORKFLOWS US-12: they happened).
+- **Delete an event**: any `edit` participant. A past event is deleted at once. An upcoming
+  scheduled one must be **cancelled first**, so its people are told through the ordinary cancel
+  (rc13); then it can be deleted.
+- **Nobody left to edit it.** Events and editors are many-to-many. An event with no `edit`
+  participant left is garbage-collected, and so is a thread with no members and a group with no
+  members. A person whose leaving would do that is warned first ("3 events will be deleted for
+  7 people; make someone else an editor?"). A thread's organizer role, and a group's, passes to
+  the longest-standing member when the organizer leaves.
+- **Delete your account.** Everything above for every container you are in, then: sessions
+  revoked, calendar connections revoked at Google and their tokens deleted (MVP-4: its mirrors in
+  your own calendar are removed first), suppression of your address *not* added unless you ask.
+  **Attribution in other people's history becomes "a former member"**: each container where you
+  appear gets its own tombstone person, so an erased person can't be followed from one event to
+  another. Takes effect immediately, after the confirmation page.
+- **Export your data** (Art. 15/20): one JSON document of your account, your memberships, the
+  events and plans you take part in at your own tier, your responses and what you wrote. ICS is
+  added when MVP-3's serializer exists. A GET: it reads.
+
+**Retention.** Storage limitation (Art. 5(1)(e)).
+- **Past events are purged 12 months after they end** by default. A group sets its own period, and
+  events created from it copy it; an event's editors may change it. A series counts as past when
+  its last occurrence is; an endless series is never past until it is cancelled or given an end.
+- Plans that were never accepted are purged 12 months after their last day. Accepted plans
+  became ordinary events (rc19) and follow them.
+- **Expired rows go within a day:** sign-in links (they hold every address ever typed into the
+  form, including ones typed by someone else), sessions, answer links, invites, and `mail_send`
+  rows older than the month the cap needs.
+- **The backup tail.** D1 Time Travel keeps 30 days (7 on the free plan). Every purge appends the
+  ids it removed — never addresses or content — to an **erasure ledger**, kept for 35 days, and a
+  restore re-applies the ledger before the instance serves again. The privacy policy states the
+  window (§13).
+
+**People who never signed up** (Art. 14: their address came from someone else).
+- Every email carries a short notice of who added them and why they got it, and an **opt-out
+  link**. Its page (GET renders, POST acts) offers *stop emailing this address*, and, if the
+  address has never signed in, *delete everything about it* at once. An address that has signed in
+  is an account; deleting it needs signing in, as above.
+- An opt-out is kept as a hash of the normalised address, checked before any add or send. Adding
+  that address afterwards says "couldn't add this address" without saying why.
+
+```sql
+-- rc21, all additive (§16)
+ALTER TABLE person ADD COLUMN erased_at text;   -- set on tombstones; their email is '<id>@erased.invalid'
+                                                -- (RFC 6761: can never receive mail or sign in)
+ALTER TABLE group_member        ADD COLUMN handle text;
+ALTER TABLE group_member        ADD COLUMN show_email integer NOT NULL DEFAULT 0;
+ALTER TABLE event_participation ADD COLUMN handle text;
+ALTER TABLE event_participation ADD COLUMN show_email integer NOT NULL DEFAULT 0;
+ALTER TABLE plan_thread_member  ADD COLUMN handle text;
+ALTER TABLE plan_thread_member  ADD COLUMN show_email integer NOT NULL DEFAULT 0;
+ALTER TABLE person_group    ADD COLUMN retain_days integer NOT NULL DEFAULT 365;
+ALTER TABLE canonical_event ADD COLUMN retain_days integer NOT NULL DEFAULT 365;
+CREATE TABLE mail_suppression (            -- opt-outs; no address is stored
+    address_hash text PRIMARY KEY,         -- SHA-256 of the normalised address
+    created_at   text NOT NULL
+);
+CREATE TABLE opt_out_token (               -- the link in every email; replaced on each send, like response_token
+    token_hash text PRIMARY KEY,
+    person_id  text NOT NULL REFERENCES person(id),
+    created_at text NOT NULL
+);
+CREATE TABLE erasure_ledger (              -- ids only; 35 days; re-applied after a restore
+    kind      text NOT NULL,               -- person | event | group | thread
+    id        text NOT NULL,
+    erased_at text NOT NULL,
+    PRIMARY KEY (kind, id)
+);
+```
+
+The purge pass runs on the existing cron, chunked and bounded per run like a reconcile tick. With
+nothing due it writes nothing (§16 zero-write steady state).
+
 ---
 
 ## 11. Core reconcile loop
@@ -1042,7 +1155,14 @@ In every case the inbound change is a change_log fact (actor = the connection's 
   - *One callback.* Calendar connect and sign-in share the redirect URI `/oauth/google/callback`. The encrypted flow cookie names the purpose: `connect` with the person who started it, or `sign-in` with none. The callback dispatches on it. Without the key a purpose can't be changed, so neither flow's callback can be replayed as the other. State and PKCE are checked exactly as for connect. Starting is a POST (GET never mutates). Signed out there is no session to carry a CSRF token, as with the magic-link request; login CSRF is the callback's to stop, and `state` does.
   - *The trial, in Testing mode.* Sign-in uses the calendar's OAuth client, which stays in Testing (§12), so only its listed test users (≤100) can sign in with Google. Google refuses anyone else with `access_denied`; the callback says so and points to the email link. On a pre-Paid instance (rc14) it is also how a test user gets in without being on the mail allowlist.
   - *Before inviting anyone who isn't a test user,* sign-in moves to a **second OAuth client, in its own Cloud project, published to Production**. `openid email` aren't sensitive scopes, so it needs no verification and has no user cap, and the calendar client's test-user list stays the calendar's alone (§15 MVP-4). It is configuration, not a slice: the instance names a sign-in client id and secret beside the calendar ones, and the step sits on the launch checklist.
-- **Deletion promise includes the backup tail:** purge (§10 deletion model) plus D1 Time Travel's 30-day history window — state this in the privacy policy rather than over-promising instant erasure.
+- **Deletion promise includes the backup tail:** purge (§10 deletion model) plus D1 Time Travel's 30-day history window — state this in the privacy policy rather than over-promising instant erasure. (rc21: the erasure ledger keeps a restore from bringing purged rows back; §10 *Privacy basics*.)
+- **Privacy basics (rc21).** Addresses hidden by default, leaving and deleting, account erasure, export, retention and opt-outs are specified in §10 *Privacy basics*. The legal frame, for the privacy policy and the paperwork on the launch checklist:
+  - The operator is the **controller** (running a service for others is not household use). Cloudflare is a processor under its standard DPA; transfers rely on the EU-US Data Privacy Framework. A **production D1 database is created with the `eu` jurisdiction**: it can only be set at creation, and it fixes where the data is stored, not who can be compelled to produce it.
+  - Before launch: a privacy notice (Art. 13/14), a record of processing (Art. 30), a written breach procedure (Art. 33/34: the supervisory authority within 72 hours), and the DSA basics for a hosting service (contact point, terms, a way to report illegal content).
+  - **Special-category data.** A group whose membership reveals someone's sex life, health or beliefs is Art. 9 data, which needs explicit consent (or a non-profit body processing its own members' data, Art. 9(2)(d): a community's own instance). **Until rc22** (sealed groups, and an explicit-consent step on joining one) no instance offers itself to such a community. That rc also brings the impact assessment (Art. 35) the Czech supervisory authority's list requires for such data.
+- **Security headers (rc21).** Every response carries `Content-Security-Policy` (scripts by hash: the pages' inline scripts are fixed strings), `frame-ancestors 'none'` (no clickjacking of Accept or Remove), `Strict-Transport-Security`, `X-Content-Type-Options: nosniff` and `Referrer-Policy: same-origin` (no-referrer where a token is on the page, as now).
+- **Anonymous mail has its own sub-cap (rc21).** Sign-in links are requested by people with no session, so a script asking for links to many addresses could spend the whole daily cap and stop every invite and answer link. Sign-in sends reserve from a smaller share of the daily cap of their own; the rest is kept for mail that a signed-in person caused. A rate-limiting rule at the edge on `POST /auth/sign-in` is instance configuration, on the launch checklist.
+- **No platform invocation logs (rc21).** The Worker's observability keeps the app's own structured lines and turns off Workers Logs' automatic invocation logs, which record each request's URL — including sign-in and answer-link tokens — and client metadata. That is "never log URL query strings" applied to the platform, not only to the code.
 - **Outbound mail is capped in the app, not trusted to the bill** (rc9, owner decision). Provider: Cloudflare Email Service (Workers Paid: 3,000/month included, then metered; no provider-side hard spend cap). Every send first reserves a slot with ONE atomic statement — insert only if today's and this month's counts are under their caps — and sends only if a row came back. A count-then-send check would race across concurrent Workers isolates and overshoot. Defaults sit under the included allowance (200/day, 2,500/month), so the default configuration cannot incur overage; a reached cap refuses the send loudly rather than queueing it. Slots count *attempts*, so a failed send still consumes one — conservative by design. Mail is sent from the `notify.` subdomain so automated mail never shares reputation or SPF lookups with the apex domain's human mail. **Before Workers Paid** (rc14) an instance may still send, but only to *verified destination addresses*, which Cloudflare allows on every plan once Email Routing is enabled — on the `notify.` subdomain only, never the apex, whose MX belongs to the domain's human mail. The instance's `send_email` binding then carries an `allowed_destination_addresses` allowlist, so the platform, not the app, refuses any other recipient. That makes a pre-Paid instance a single-tester instance by construction: invites to anyone else fail to send, loudly, and the allowlist comes off together with the move to Workers Paid.
 - **Config via env**, parsed and validated by a zod schema (`src/config.ts`); `.env.example` documents keys with no real values; on Cloudflare, secrets via `wrangler secret`.
 - **Least scope:** request only the calendar scopes actually used.
@@ -1080,6 +1200,8 @@ The new milestones are labelled **MVP-1…MVP-5**, deliberately *not* reusing M2
 - **MVP-2 — Events & responses.** Create/edit events (single + whole-series), per-person edit and visibility tiers, the proposal lifecycle, accept / acknowledge / slot vote / attendance / feedback by token link, the change log visible in the UI. *Accept: "when do we play?" is answered without anyone installing anything.* Slices: 2A domain · 2B event pages · 2C polls · 2D account-less responses · 2E-1 agreement & acknowledgment requests, cancel/restore · 2E-2 change proposals (propose tier) · 2E-3 recurring series · 2F events center-stage, groups as an address book (rc15).
 - **Plans (rc19) — before MVP-3** (owner direction, 2026-10-24: ICS and unlisted views wait). Several events proposed, compared and accepted as one (§10 *Plans*, WORKFLOWS US-16–US-18). Slices: P1 schema and domain (threads, plans, `sid`, `who`, the diff, votes, deciding, accept) · P2 thread and plan pages (week rows, the change list, vote, accept, withdraw) · P3 drafts (Suggest changes…, Plan the rest…, the event forms, keep/drop days, send) · P4 the week-row editor script (tap to pick up and put down, drag) · P5 notes · P6 polls as one-event plans (additive migration first). *Accept: Adam and Mara agree two months of weeks on their phones without retyping a date.*
 - **Google sign-in (rc20) — pulled forward from MVP-4** (owner, 2026-10-31). One slice, §13 *Sign in with Google*, on the existing Testing-mode client. Moving it to its own Production client is configuration before inviting non-test users. *Accept: a test user signs in with Google and lands on the account their magic link gives them.*
+- **Privacy basics (rc21) — before MVP-3** (owner, 2026-10-31). §10 *Privacy basics* and the rc21 bullets in §13. Slices: R1 handles and who sees an address (migration first) · R2 leave, delete an event, garbage collection, the purge pipeline and its ledger · R3 delete your account (tombstones) and export · R4 retention and expiry purges on the cron · R5 opt-out for people who never signed up · S security headers, the sign-in sub-cap and the logging change. *Accept: a member of a group sees only handles; someone deletes their account and appears in the history they leave behind as "a former member"; nothing older than the retention period remains, a restore included.*
+- **Sealed groups and events (rc22, to be designed) — after rc21.** Three privacy levels: public, normal, and *sealed* — "this is on the DL, we're sending private links". What is sealed is encrypted in the browser and the server stores ciphertext; stage 1 carries the key in a private link (`#key`), stage 2 keeps it in a keyring unlocked by a passkey (WebAuthn PRF), with recovery by another member. Plus explicit consent on joining a sealed group (§13 rc21). Its own docs PR first.
 - **MVP-3 — Feeds & sharing.** Read-only ICS feed per person and per group (the §5 artifact-store seam's first driver; Google polls subscribed feeds slowly — hours — which is stated to users, not hidden); unlisted and invite-only views; `project()` tiers enforced in every output (§9 visibility integrity becomes load-bearing). *Accept: a player subscribes from an iPhone.*
 - **MVP-4 — Google one-way.** "Sign in with Google" on its own Production client if not moved already (built in rc20, §13; basic scopes only — must not consume the sensitive-scope user cap, §12), calendar connection as a *separate*, opt-in grant, token refresh, the reconcile loop and PUSH (§11). *Accept: the owner's household lives on it.*
 - **MVP-5 — Google two-way.** PULL classification, echo detection, tier-gated inbound edits (§11), inbound deletes as unsubscribe, conflict policy, 410 full resync with the reverse diff. *Accept: a member moves an event in Google and the group follows or receives a proposal (US-15).*
@@ -1098,6 +1220,7 @@ After the MVP, per-instance overrides are "start accepting rows into `event_over
 - **No per-instance recurrence overrides** in MVP (whole-series + single events only). The *schema* for them exists (`event_override`, `exdates` — §10) as a seam; it stays empty. The constraint is behavioral: no code path writes it yet.
 - **No multi-tenant / OAuth-verification path** in MVP. *Multi-person* is MVP scope (§2); multi-*tenant* means orgs, seats and admins over people (BUSINESS §6) and is not. Isolation between unrelated groups comes from participation — you see an event because you participate in it — not from a tenant id.
 - **No provider-specific concept in domain code.** Google is the first two-way provider, not the model. Identity metadata, sync cursors, and change classification go through the `CalendarProvider` port in provider-neutral terms, so Microsoft Graph and CalDAV are new adapters, never a refactor (§5). Google-only shortcuts belong in `src/providers/google*.ts` alone.
+- **Never show an email address to anyone but its owner** unless that person turned it on for that group, event or thread (§10 *Privacy basics*, rc21). This includes mail, history and every list of people.
 - **No business logic in views/templates.** Build a typed (zod) view-model; views only render its fields.
 - **Compute the push hash over the FILTERED fieldset**, per projection — not over raw canonical (matters once profiles exist).
 - **One recorded exception to expand/contract (rc11): migration 0005 rebuilds `canonical_event`** to widen its status CHECK, which SQLite cannot alter in place. It is safe for exactly one reason: **no instance has ever been deployed**, so no data and no running version depend on the old shape. The moment a first instance is deployed, the additive-first rule binds without exception — a later change of this kind ships as a new column plus a contract step, never as a rebuild.
@@ -1111,6 +1234,8 @@ After the MVP, per-instance overrides are "start accepting rows into `event_over
 ---
 
 ## 17. Open decisions (owner: you)
+
+- **Who is the controller, and when to incorporate** (rc21). Today the owner, as a private person. Incorporating ring-fences liability for a breach, which scales with how sensitive the data is, not with revenue: decide it before the first sealed group goes live (rc22). Commercial detail belongs in BUSINESS.md.
 
 - ~~Project name~~ — **resolved: WhenDoWe** (`whendowe.org`, `github.com/whendowe/whendowe`). It states the product's question. M0 pre-flight: verify `whendowe.org` in Google Search Console now (needed later for the OAuth consent screen branding and the push-notification endpoint — §12) and reserve the `whendowe` npm name.
 - **Confirm AGPL-3.0** vs Apache-2.0 vs open-core (§7).
