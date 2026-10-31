@@ -145,6 +145,9 @@ const session = (title: string, day: string, start = "19:00", length = "240") =>
   start,
   length,
 });
+// Cat signs in once, in a browser of her own, so she has a name: a guest's name comes from
+// random ids, and a screenshot must not (guests are covered by the route tests).
+await signIn("cat@example.org");
 const table = await startThread(cookie, "Thursday Table", ["lea@example.org", "cat@example.org"]);
 await draw(cookie, table, [
   session("Session 15", "2026-11-05"),
