@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { sql } from "drizzle-orm";
 import {
+  type AnySQLiteColumn,
   check,
   foreignKey,
   index,
@@ -9,6 +10,7 @@ import {
   sqliteTable,
   text,
   unique,
+  uniqueIndex,
 } from "drizzle-orm/sqlite-core";
 
 // DESIGN.md §10, transcribed. One SQLite dialect, two homes (D1 + SQLite file).
@@ -479,6 +481,139 @@ export const eventParticipantChange = sqliteTable(
   (t) => [
     index("event_participant_change_event_idx").on(t.canonicalEventId, t.createdAt),
     check("event_participant_change_action_chk", sql`${t.action} IN ('added', 'removed')`),
+  ],
+);
+
+// --- Plans (DESIGN §10 rc19, slice P1) ------------------------------------------------
+// Several events proposed, compared and accepted as one. People plan in a thread with
+// members and an organizer; a plan answers another plan (answers_id) and belongs to the
+// question its chain of answers started (question_id). Accepting writes each plan event
+// as a scheduled canonical_event and records the link in plan_event.canonical_event_id.
+export const planThread = sqliteTable("plan_thread", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  organizerId: text("organizer_id")
+    .notNull()
+    .references(() => person.id, { onDelete: "cascade" }),
+  tzid: text("tzid").notNull(),
+  createdAt: text("created_at").notNull(),
+});
+
+export const planThreadMember = sqliteTable(
+  "plan_thread_member",
+  {
+    threadId: text("thread_id")
+      .notNull()
+      .references(() => planThread.id, { onDelete: "cascade" }),
+    personId: text("person_id")
+      .notNull()
+      .references(() => person.id, { onDelete: "cascade" }),
+    createdAt: text("created_at").notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.threadId, t.personId] }),
+    index("plan_thread_member_person_idx").on(t.personId),
+  ],
+);
+
+export const plan = sqliteTable(
+  "plan",
+  {
+    id: text("id").primaryKey(),
+    threadId: text("thread_id")
+      .notNull()
+      .references(() => planThread.id, { onDelete: "cascade" }),
+    authorId: text("author_id")
+      .notNull()
+      .references(() => person.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    message: text("message"),
+    answersId: text("answers_id").references((): AnySQLiteColumn => plan.id),
+    restOf: integer("rest_of").notNull().default(0),
+    questionId: text("question_id").notNull(),
+    status: text("status").notNull(),
+    replacedBy: text("replaced_by").references((): AnySQLiteColumn => plan.id),
+    decidedBy: text("decided_by").references(() => person.id, { onDelete: "set null" }),
+    decisionId: text("decision_id"),
+    sentAt: text("sent_at"),
+    decidedAt: text("decided_at"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (t) => [
+    index("plan_thread_idx").on(t.threadId, t.status),
+    // At most one draft per author per thread: "Your draft" is a single thing.
+    uniqueIndex("plan_one_draft_uq").on(t.threadId, t.authorId).where(sql`${t.status} = 'draft'`),
+    check(
+      "plan_status_chk",
+      sql`${t.status} IN ('draft', 'on_table', 'accepted', 'replaced', 'withdrawn')`,
+    ),
+    check("plan_rest_of_chk", sql`${t.restOf} IN (0, 1)`),
+  ],
+);
+
+export const planEvent = sqliteTable(
+  "plan_event",
+  {
+    // Cascade only ever fires for a discarded draft: a sent plan is never deleted.
+    planId: text("plan_id")
+      .notNull()
+      .references(() => plan.id, { onDelete: "cascade" }),
+    sid: text("sid").notNull(),
+    title: text("title").notNull(),
+    allDay: integer("all_day").notNull(),
+    startLocal: text("start_local").notNull(),
+    endLocal: text("end_local").notNull(),
+    who: text("who").notNull().default("[]"),
+    canonicalEventId: text("canonical_event_id").references(() => canonicalEvent.id, {
+      onDelete: "set null",
+    }),
+  },
+  (t) => [
+    primaryKey({ columns: [t.planId, t.sid] }),
+    index("plan_event_canonical_idx").on(t.canonicalEventId),
+    check("plan_event_all_day_chk", sql`${t.allDay} IN (0, 1)`),
+  ],
+);
+
+export const planVote = sqliteTable(
+  "plan_vote",
+  {
+    planId: text("plan_id")
+      .notNull()
+      .references(() => plan.id, { onDelete: "cascade" }),
+    personId: text("person_id")
+      .notNull()
+      .references(() => person.id, { onDelete: "cascade" }),
+    answer: text("answer").notNull(),
+    respondedAt: text("responded_at").notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.planId, t.personId] }),
+    check("plan_vote_answer_chk", sql`${t.answer} IN ('yes', 'ifneedbe', 'no')`),
+  ],
+);
+
+// Notes on days (slice P5): need no agreement, only attribution; private = author only.
+export const planNote = sqliteTable(
+  "plan_note",
+  {
+    id: text("id").primaryKey(),
+    threadId: text("thread_id")
+      .notNull()
+      .references(() => planThread.id, { onDelete: "cascade" }),
+    authorId: text("author_id")
+      .notNull()
+      .references(() => person.id, { onDelete: "cascade" }),
+    firstDay: text("first_day").notNull(),
+    lastDay: text("last_day").notNull(),
+    body: text("body").notNull(),
+    private: integer("private").notNull().default(0),
+    createdAt: text("created_at").notNull(),
+  },
+  (t) => [
+    index("plan_note_thread_idx").on(t.threadId, t.firstDay),
+    check("plan_note_private_chk", sql`${t.private} IN (0, 1)`),
   ],
 );
 
