@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { Hono } from "hono";
+import { revokeGoogleGrant } from "../oauth/token-exchange.js";
 import { findPersonById } from "../people/person.js";
 import { securityHeaders } from "./csp.js";
 import { ACCOUNT_PATH, html } from "./layout.js";
@@ -92,7 +93,18 @@ ${connect}`,
 
   if (auth !== undefined) {
     registerAuthRoutes(app, auth, { google: oauth !== undefined });
-    registerAccountRoutes(app, auth);
+    registerAccountRoutes(app, auth, {
+      // Deleting an account revokes its Google grants first (§10 rc21), best effort.
+      revokeCalendars:
+        oauth === undefined
+          ? undefined
+          : async (connections) => {
+              for (const conn of connections) {
+                const token = await oauth.cipher.decrypt(conn.refreshTokenEnc);
+                await revokeGoogleGrant(token, oauth.fetchImpl);
+              }
+            },
+    });
     registerGroupRoutes(app, auth);
     registerEventRoutes(app, auth);
     registerPlanRoutes(app, auth);

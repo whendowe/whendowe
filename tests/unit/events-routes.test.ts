@@ -1349,3 +1349,46 @@ it("leaving and deleting: a page that says what will happen, then a POST that do
     "leaving deletes it for the 2 other people",
   );
 });
+
+it("your data: a download of your own, and deleting your account behind a typed address (§10 rc21)", async () => {
+  const h = await harness();
+  const { mara, group, david } = await household(h);
+  const event = await createVia(h, mara, group);
+  await act(h, event, david, "feedback", { note: "NOTE-42 bringing snacks" });
+
+  const exported = await get(h, "/account/export", david);
+  expect(exported.headers.get("content-disposition")).toContain("attachment");
+  expect(exported.headers.get("cache-control")).toBe("no-store");
+  const data = JSON.stringify(await exported.json());
+  expect(data).toContain("david@example.org"); // his own address, in his own file
+  expect(data).toContain("NOTE-42");
+  expect(data).not.toContain("dm@example.org"); // nobody else's
+
+  const page = await text(h, "/account/delete", david);
+  expect(page).toContain("a former member");
+  // A wrong address deletes nothing; neither does a missing token.
+  const wrong = await h.app.request(
+    "/account/delete",
+    post({ csrf: david.csrf, confirm: "dm@example.org" }, david.cookie),
+  );
+  expect(wrong.status).toBe(400);
+  const forged = await h.app.request(
+    "/account/delete",
+    post({ csrf: "nope", confirm: "david@example.org" }, david.cookie),
+  );
+  expect(forged.status).toBe(403);
+  expect((await get(h, event, david)).status).toBe(200);
+
+  const done = await h.app.request(
+    "/account/delete",
+    post({ csrf: david.csrf, confirm: "David@Example.org" }, david.cookie),
+  );
+  expect(done.status).toBe(200);
+  expect(await done.text()).toContain("Your account is deleted");
+  // His session is gone: this cookie signs nobody in.
+  expect((await get(h, event, david)).status).toBe(303);
+  // His note went with him; nothing in the history needed a stand-in for him here.
+  const after = await text(h, event, mara);
+  expect(after).not.toContain("david");
+  expect(after).not.toContain("NOTE-42");
+});

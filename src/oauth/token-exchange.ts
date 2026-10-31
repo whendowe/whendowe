@@ -115,3 +115,27 @@ export async function exchangeAuthorizationCode(request: ExchangeRequest): Promi
 export async function exchangeForIdToken(request: Omit<ExchangeRequest, "now">): Promise<string> {
   return (await redeem(request, idTokenResponseSchema, "sign-in token exchange")).id_token;
 }
+
+export const GOOGLE_REVOKE_ENDPOINT = "https://oauth2.googleapis.com/revoke";
+
+/**
+ * Revoke a grant at Google (DESIGN §10 rc21: deleting an account revokes its calendar
+ * connections before their tokens are deleted). Revoking the refresh token ends the whole
+ * grant. Best effort by design: a token Google already forgot answers 400, and an
+ * account is deleted whatever Google says — so this reports, and never throws.
+ */
+export async function revokeGoogleGrant(
+  token: string,
+  fetchImpl: FetchLike = defaultFetch,
+): Promise<boolean> {
+  try {
+    const response = await fetchImpl(GOOGLE_REVOKE_ENDPOINT, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: formEncode({ token }),
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}

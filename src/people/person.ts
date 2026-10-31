@@ -24,7 +24,9 @@ const emailSchema = z.email();
  */
 export function normalizeEmail(raw: string): string {
   const email = raw.trim().toLowerCase();
-  if (!emailSchema.safeParse(email).success) {
+  // `.invalid` can never be a real address (RFC 6761), and it is what tombstones of erased
+  // people carry (§10 rc21): refusing it here means nobody can sign in as, invite or add one.
+  if (!emailSchema.safeParse(email).success || email.endsWith(".invalid")) {
     throw new Error("not a valid email address");
   }
   return email;

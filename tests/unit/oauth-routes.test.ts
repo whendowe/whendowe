@@ -10,7 +10,7 @@ import { GOOGLE_AUTHORIZE_ENDPOINT } from "../../src/oauth/authorize.js";
 import { FLOW_COOKIE_NAME } from "../../src/oauth/flow-cookie.js";
 import type { FetchLike } from "../../src/oauth/http.js";
 import { GOOGLE_PRIMARY_CALENDAR_URL } from "../../src/oauth/primary-calendar.js";
-import { GOOGLE_TOKEN_ENDPOINT } from "../../src/oauth/token-exchange.js";
+import { GOOGLE_REVOKE_ENDPOINT, GOOGLE_TOKEN_ENDPOINT } from "../../src/oauth/token-exchange.js";
 import { createApp } from "../../src/web/app.js";
 import { CONFIRM_PATH, GOOGLE_SIGN_IN_PATH, SIGN_IN_PATH } from "../../src/web/routes/auth.js";
 import { CALLBACK_PATH, CONNECT_PATH } from "../../src/web/routes/oauth.js";
@@ -708,4 +708,29 @@ it("refuses a fifth account before anyone is created", async () => {
   const res = await finishSignIn(h, browser);
   expect(res.status).toBe(409);
   expect(await people(h)).not.toContain("fifth@gmail.com");
+});
+
+// --- deleting an account revokes its Google grant (§10 rc21) ---------------------------
+
+it("deleting an account revokes its calendar grant at Google, then deletes the tokens", async () => {
+  const revoked: string[] = [];
+  const base = googleFake();
+  const h = await harness((url, init) => {
+    if (url === GOOGLE_REVOKE_ENDPOINT) {
+      revoked.push(new URLSearchParams(init.body ?? "").get("token") ?? "");
+      return Promise.resolve({ ok: true, status: 200, text: () => Promise.resolve("") });
+    }
+    return base(url, init);
+  });
+  const { cookie, state } = await startFlow(h);
+  await callback(h, `code=c&state=${encodeURIComponent(state)}`, cookie);
+  expect(await connections(h)).toHaveLength(1);
+
+  const done = await h.app.request(
+    "/account/delete",
+    form({ csrf: h.session.csrf, confirm: OWNER_EMAIL }, h.session.cookie),
+  );
+  expect(done.status).toBe(200);
+  expect(revoked).toEqual([REFRESH_TOKEN]);
+  expect(await connections(h)).toHaveLength(0);
 });

@@ -172,6 +172,10 @@ export const person = sqliteTable("person", {
   email: text("email").notNull().unique(),
   displayName: text("display_name"),
   createdAt: text("created_at").notNull(),
+  // rc21: set on a TOMBSTONE — "a former member", standing in for an erased person in
+  // one event, group or thread's history. Its address is '<id>@erased.invalid' (RFC 6761:
+  // can never receive mail or sign in).
+  erasedAt: text("erased_at"),
 });
 
 export const loginToken = sqliteTable(
