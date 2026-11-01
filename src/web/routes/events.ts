@@ -80,7 +80,7 @@ import {
 } from "../../people/invite.js";
 import { appearanceIn, normalizeEmail } from "../../people/person.js";
 import { createPollThread } from "../../plans/plan.js";
-import { ThreadInputError } from "../../plans/thread.js";
+import { listThreadsFor, ThreadInputError, type ThreadSummary } from "../../plans/thread.js";
 import { retainDaysSchema } from "../../privacy/retention.js";
 import {
   formatRRule,
@@ -259,10 +259,20 @@ export function eventSummary(access: EventAccess): Html {
   return html`<a href="${EVENTS_PATH}/${event.id}">${title}</a>${statusBadge(access)} <span class="muted">· ${when}${repeats}</span>`;
 }
 
+/** A thread with a plan on the table, as one line of "Finding a time" (rc28). */
+function threadSummary(t: ThreadSummary): Html {
+  return html`<a href="${PLANS_PATH}/${t.id}">${t.name}</a> <span class="muted">·</span> ${
+    t.waiting > 0
+      ? html`<strong>${t.waiting} waiting for your vote</strong>`
+      : html`<span class="muted">${t.onTable} on the table</span>`
+  }`;
+}
+
 /**
- * Home for a signed-in person: Your events (DESIGN rc15). Open polls first — they need
- * an answer — then what's coming up, soonest first, then the past, folded away. Every
- * line at the viewer's own tier (eventSummary → canSee).
+ * Home for a signed-in person: Your events (DESIGN rc15). Everything still being decided
+ * first, in ONE list (rc28) — threads waiting for this person's vote, event-polls, then
+ * threads waiting for others — then what's coming up, soonest first, then the past,
+ * folded away. Every event line at the viewer's own tier (eventSummary → canSee).
  */
 export async function yourEvents(
   storage: StoragePort,
@@ -271,16 +281,22 @@ export async function yourEvents(
 ): Promise<Html> {
   const all = await listEventsFor(storage, personId);
   const voting = all.filter((a) => isPoll(a) && a.event.status === "proposed");
+  const open = (await listThreadsFor(storage, personId)).filter((t) => t.onTable > 0);
+  const deciding = [
+    ...open.filter((t) => t.waiting > 0).map(threadSummary),
+    ...voting.map(eventSummary),
+    ...open.filter((t) => t.waiting === 0).map(threadSummary),
+  ];
   const rest = all.filter((a) => !voting.includes(a));
   const upcoming = rest.filter((a) => !isOver(a.event, now));
   const past = rest.filter((a) => isOver(a.event, now)).reverse();
   const list = (items: readonly EventAccess[]) =>
     html`<ul>${items.map((a) => html`<li>${eventSummary(a)}</li>`)}</ul>`;
   return html`<h1>Your events</h1>
-${voting.length === 0 ? "" : html`<h2>Finding a time</h2>${list(voting)}`}
+${deciding.length === 0 ? "" : html`<h2>Finding a time</h2><ul>${deciding.map((line) => html`<li>${line}</li>`)}</ul>`}
 ${
   upcoming.length === 0
-    ? voting.length === 0
+    ? deciding.length === 0
       ? html`<p class="muted">Nothing planned yet. Events you create, or are added to, show up here.</p>`
       : ""
     : html`<h2>Coming up</h2>${list(upcoming)}`

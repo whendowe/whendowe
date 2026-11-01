@@ -3,6 +3,8 @@ import { expect, it } from "vitest";
 import { createPoll } from "../../src/events/poll.js";
 import { findGroupForMember } from "../../src/people/group.js";
 import { findOrCreatePerson } from "../../src/people/person.js";
+import { castVote, createPollThread } from "../../src/plans/plan.js";
+import { findThreadForMember } from "../../src/plans/thread.js";
 import { SWITCH_PATH } from "../../src/web/routes/auth.js";
 import { pollInputFromForm } from "../../src/web/routes/events.js";
 import { GROUPS_PATH } from "../../src/web/routes/groups.js";
@@ -40,6 +42,7 @@ it("someone with nothing yet is told where events come from", async () => {
   const text = (await home(b)).text;
   expect(text).toContain("<h1>Your events</h1>");
   expect(text).toContain("Nothing planned yet");
+  expect(text).not.toContain("Finding a time");
 });
 
 it("lists polls first, then what's coming soonest first, then the past folded away", async () => {
@@ -117,4 +120,68 @@ it("an event you were added to directly is yours, at your tier, until you are re
   await switchTo(b, "bob@example.org");
   text = (await home(b)).text;
   expect(text).not.toContain(">Open</a>");
+});
+
+it("one list of what is being decided: threads waiting for you, polls, then the rest (rc28)", async () => {
+  const b = await browser({ now: () => NOW });
+  await addAccount(b, "ann@example.org");
+  const group = await make(b, GROUPS_PATH, { name: "Table" });
+  const [ann, bob] = await Promise.all(
+    ["ann@example.org", "bob@example.org"].map((e) =>
+      findOrCreatePerson(b.storage, e, { now: NOW }),
+    ),
+  );
+  const times = [
+    { startLocal: "2101-11-21", endLocal: "2101-11-22" },
+    { startLocal: "2101-11-14", endLocal: "2101-11-15" },
+  ];
+  const fields = { description: null, location: null, allDay: true, tzid: null };
+  const thread = (title: string, creatorId: string, people: string[]) =>
+    createPollThread(b.storage, {
+      creatorId,
+      group: null,
+      fields: { ...fields, title },
+      candidates: times,
+      people,
+      now: NOW,
+    });
+  // Ann's own poll waits for Bob; Bob's waits for Ann; one more is already decided.
+  await thread("Hers", ann?.id ?? "", [bob?.id ?? ""]);
+  await thread("His", bob?.id ?? "", [ann?.id ?? ""]);
+  const done = await thread("Settled", bob?.id ?? "", [ann?.id ?? ""]);
+  const asAnn = await findThreadForMember(b.storage, done.threadId, ann?.id ?? "");
+  if (asAnn === null) throw new Error("member");
+  await castVote(b.storage, asAnn, { planId: done.planIds[0] ?? "", answer: "yes", now: NOW });
+  await createPoll(b.storage, {
+    creatorId: ann?.id ?? "",
+    group: await findGroupForMember(b.storage, group.split("/").at(-1) ?? "", ann?.id ?? ""),
+    ...pollInputFromForm({
+      title: "Old poll",
+      tzid: "Europe/Prague",
+      start_0: "2101-11-10T19:00",
+      end_0: "2101-11-10T22:00",
+      start_1: "2101-11-11T19:00",
+      end_1: "2101-11-11T22:00",
+    }),
+    now: NOW,
+  });
+
+  const text = (await home(b)).text;
+  const finding = text.slice(
+    text.indexOf("<h2>Finding a time</h2>"),
+    text.indexOf("</ul>", text.indexOf("<h2>Finding a time</h2>")),
+  );
+  const order = ["His", "2 waiting for your vote", "Old poll", "Hers", "2 on the table"];
+  const positions = order.map((s) => finding.indexOf(s));
+  expect(
+    positions.every((p) => p >= 0),
+    JSON.stringify(positions),
+  ).toBe(true);
+  expect([...positions].sort((x, y) => x - y)).toEqual(positions);
+  expect(finding).not.toContain("Settled"); // decided: on the plans page, not here
+  expect(finding.split("His").length).toBe(2); // once
+  expect(text).not.toContain("Nothing planned yet");
+  expect(text).not.toContain("<h2>Plans</h2>");
+  expect(text).toContain('<a href="/plans">Your plans</a>');
+  expect(text).toContain('<a href="/plans/new">+ Start planning</a>');
 });

@@ -11,7 +11,7 @@ import { type AuthDeps, registerAuthRoutes, SIGN_IN_PATH } from "./routes/auth.j
 import { EVENTS_PATH, POLLS_PATH, registerEventRoutes, yourEvents } from "./routes/events.js";
 import { GROUPS_PATH, registerGroupRoutes } from "./routes/groups.js";
 import { CONNECT_PATH, type OAuthRouteDeps, registerOAuthRoutes } from "./routes/oauth.js";
-import { registerPlanRoutes, yourPlans } from "./routes/plans.js";
+import { PLANS_PATH, registerPlanRoutes } from "./routes/plans.js";
 import { registerRespondRoutes } from "./routes/respond.js";
 import { type AppEnv, page, sessionMiddleware } from "./session.js";
 
@@ -109,9 +109,8 @@ export function createApp(options: AppOptions = {}): Hono<AppEnv> {
 <p class="muted">Milestone: MVP-1 — People</p>
 ${connect}`
           : html`${await nameNudge(auth, signedIn.personId)}${await yourEvents(auth.storage, signedIn.personId, auth.now())}
-<p><a href="${EVENTS_PATH}/new">+ New event</a> · <a href="${POLLS_PATH}/new">+ Find a time (poll)</a></p>
-${await yourPlans(auth.storage, signedIn.personId)}
-<p><a href="${GROUPS_PATH}">Your groups</a></p>
+<p><a href="${EVENTS_PATH}/new">+ New event</a> · <a href="${POLLS_PATH}/new">+ Find a time (poll)</a> · <a href="${PLANS_PATH}/new">+ Start planning</a></p>
+<p><a href="${PLANS_PATH}">Your plans</a> · <a href="${GROUPS_PATH}">Your groups</a></p>
 ${connect}`,
       ),
     );
