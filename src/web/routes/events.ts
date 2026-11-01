@@ -41,7 +41,6 @@ import {
   type Answer,
   answerSchema,
   confirmCandidate,
-  createPoll,
   MAX_CANDIDATES,
   PollInputError,
   type PollResults,
@@ -80,6 +79,8 @@ import {
   visibilitySchema,
 } from "../../people/invite.js";
 import { appearanceIn, normalizeEmail } from "../../people/person.js";
+import { createPollThread } from "../../plans/plan.js";
+import { ThreadInputError } from "../../plans/thread.js";
 import { retainDaysSchema } from "../../privacy/retention.js";
 import {
   formatRRule,
@@ -98,6 +99,8 @@ import {
   verifyFormCsrf,
 } from "../session.js";
 import { appearanceSection, saveAppearance } from "./account.js";
+// A cycle (plans.ts links back to events), safe: both are read only inside handlers.
+import { PLANS_PATH } from "./plans.js";
 import { sendResponseLink } from "./respond.js";
 
 // Event pages (MVP-2 slice 2B). Every read goes through findEventForParticipant (no
@@ -403,6 +406,7 @@ function toFields(v: FormValues): EventFieldsInput {
 function errorMessage(error: unknown): string {
   if (error instanceof ZodError) return error.issues[0]?.message ?? "Please check the form.";
   if (error instanceof PollInputError) return error.message;
+  if (error instanceof ThreadInputError) return error.message;
   if (error instanceof UnreachableAddressError) return error.message;
   return "Please check the form.";
 }
@@ -556,7 +560,13 @@ function badPeople(bad: readonly string[]): string {
  * Who it's for, by email: each with what they may change, what they see and — on an
  * event, not a poll — what they're asked. Plain fields, so it works without JavaScript.
  */
-function peopleFieldset(rows: readonly PersonRow[], asking: boolean, lead: string): Html {
+function peopleFieldset(
+  rows: readonly PersonRow[],
+  asking: boolean,
+  lead: string,
+  /** False for a poll: everyone in it sees what it says (rc26), so there are no terms to pick. */
+  terms = true,
+): Html {
   const shown = Math.min(PEOPLE_ROWS, Math.max(3, rows.length + 2));
   const option = (value: string, label: string, chosen: string) =>
     html`<option value="${value}" ${value === chosen ? html`selected` : ""}>${label}</option>`;
@@ -564,6 +574,8 @@ function peopleFieldset(rows: readonly PersonRow[], asking: boolean, lead: strin
 <p class="muted">${lead}</p>
 ${Array.from({ length: shown }, (_, i) => {
   const r = rows[i] ?? { email: "", editTier: "view", visibility: "FULL", ask: "" };
+  if (!terms)
+    return html`<p><input name="email_${i}" type="email" value="${r.email}" placeholder="their email" aria-label="Email ${i + 1}" style="width:100%" /></p>`;
   return html`<p><input name="email_${i}" type="email" value="${r.email}" placeholder="their email" aria-label="Email ${i + 1}" style="width:100%" />
   <select name="tier_${i}" aria-label="Can change it (${i + 1})">${option("view", "can't change it", r.editTier)}${option("propose", "can propose changes", r.editTier)}${option("edit", "can edit it", r.editTier)}</select>
   <select name="vis_${i}" aria-label="Sees (${i + 1})">${option("FULL", "sees everything", r.visibility)}${option("DETAILS", "sees title, time and place", r.visibility)}${option("BUSY", "sees only that the time is taken", r.visibility)}</select>
@@ -590,6 +602,10 @@ async function invitees(
 const LEAD_ALONE = "Who is it for? They can answer from an emailed link, with no account.";
 const leadFor = (m: GroupMembership) =>
   `Everyone in ${m.group.name} takes part, on their usual terms. Add anyone else here.`;
+const POLL_ALONE =
+  "Who are you finding a time with? They vote from an emailed link, with no account.";
+const pollLeadFor = (m: GroupMembership) =>
+  `Everyone in ${m.group.name} who sees what the group plans votes; anyone who sees only busy time gets the result. Add anyone else here.`;
 
 const EMPTY: FormValues = {
   title: "",
@@ -849,7 +865,7 @@ function pollForm(
   <label>Ends <input type="datetime-local" name="end_${i}" value="${slot.end}" /></label></p>`,
   )}
   </div>
-  <p><label>Notes <span class="muted">(only people who see full details see these)</span><br /><textarea name="description" rows="3" style="width:100%">${v.description}</textarea></label></p>
+  <p><label>Notes <span class="muted">(everyone in the poll sees these)</span><br /><textarea name="description" rows="3" style="width:100%">${v.description}</textarea></label></p>
   ${people}
   <p><button type="submit">Start the poll</button></p>
 </form>
@@ -1344,10 +1360,10 @@ ${eventForm(`${EVENTS_PATH}/${access.event.id}`, me.csrfToken, v, html`<input ty
       membership === null
         ? html`<p><a href="/">← Your events</a></p>
 <h1>Find a time</h1>
-${pollForm(POLLS_PATH, csrf, values, error, peopleFieldset(rows, false, LEAD_ALONE))}`
+${pollForm(POLLS_PATH, csrf, values, error, peopleFieldset(rows, false, POLL_ALONE, false))}`
         : html`<p><a href="/groups/${membership.group.id}">← ${membership.group.name}</a></p>
 <h1>Find a time with ${membership.group.name}</h1>
-${pollForm(`/groups/${membership.group.id}/polls`, csrf, values, error, peopleFieldset(rows, false, leadFor(membership)))}`,
+${pollForm(`/groups/${membership.group.id}/polls`, csrf, values, error, peopleFieldset(rows, false, pollLeadFor(membership), false))}`,
     );
 
   const createPollFrom = async (c: Context<AppEnv>, groupId: string | null) => {
@@ -1370,15 +1386,16 @@ ${pollForm(`/groups/${membership.group.id}/polls`, csrf, values, error, peopleFi
         senderId: me.personId,
         groupId: membership?.group.id ?? null,
       });
-      const event = await createPoll(deps.storage, {
+      // A poll is a thread of one-event plans (rc26); event-polls made before run on.
+      const { threadId } = await createPollThread(deps.storage, {
         creatorId: me.personId,
         group: membership,
         fields: input.fields,
         candidates: input.candidates,
-        people,
+        people: people.map((p) => p.personId),
         now: deps.now(),
       });
-      return c.redirect(`${EVENTS_PATH}/${event.id}`, 303);
+      return c.redirect(`${PLANS_PATH}/${threadId}`, 303);
     } catch (error) {
       return again(errorMessage(error));
     }
