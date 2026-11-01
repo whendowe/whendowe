@@ -2,6 +2,7 @@
 import { z } from "zod";
 import type { StoragePort } from "../db/port.js";
 import { uuidv7 } from "../ids.js";
+import { isSuppressed } from "../privacy/suppression.js";
 import type { GroupMembership } from "./group.js";
 import { findOrCreatePerson, normalizeEmail, type Shown, shownAs } from "./person.js";
 import { hashToken, issueToken } from "./tokens.js";
@@ -32,7 +33,10 @@ export type CreateInviteResult =
       readonly email: string;
       readonly expiresAt: string;
     }
-  | { readonly ok: false; readonly reason: "not_organizer" | "already_member" | "rate_limited" };
+  | {
+      readonly ok: false;
+      readonly reason: "not_organizer" | "already_member" | "rate_limited" | "unreachable";
+    };
 
 function shift(iso: string, ms: number): string {
   const t = new Date(iso).getTime();
@@ -60,6 +64,9 @@ export async function createInvite(
   if (membership.role !== "organizer") return { ok: false, reason: "not_organizer" };
   const email = normalizeEmail(input.email);
   const groupId = membership.group.id;
+  // An opt-out from the inviter, the group or everyone (rc24): refused, without saying which.
+  if (await isSuppressed(storage, email, { senderId: input.invitedBy, groupId }))
+    return { ok: false, reason: "unreachable" };
 
   const existing = await storage.query({
     sql: `SELECT 1 AS present FROM group_member m JOIN person p ON p.id = m.person_id

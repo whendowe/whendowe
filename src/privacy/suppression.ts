@@ -189,3 +189,54 @@ export async function deleteEverything(
   ]);
   return true;
 }
+
+export interface OptOutView {
+  readonly scope: "all" | "group" | "person";
+  readonly scopeId: string;
+  readonly createdAt: string;
+  /** The group's name, for a group opt-out. A person is never named (see the account page). */
+  readonly groupName: string | null;
+}
+
+const optOutRowSchema = z.object({
+  scope: z.enum(["all", "group", "person"]),
+  scope_id: z.string(),
+  created_at: z.string(),
+  group_name: z.string().nullable(),
+});
+
+/** The opt-outs on an address, for its own account page: everyone first. */
+export async function optOutsOf(storage: StoragePort, email: string): Promise<OptOutView[]> {
+  const rows = await storage.query({
+    sql: `SELECT s.scope, s.scope_id, s.created_at, g.name AS group_name
+          FROM mail_suppression s
+          LEFT JOIN person_group g ON s.scope = 'group' AND g.id = s.scope_id
+          WHERE s.address_hash = ?
+          ORDER BY s.scope = 'all' DESC, s.created_at, s.scope_id`,
+    params: [await addressHash(email)],
+  });
+  return rows.map((row) => {
+    const r = optOutRowSchema.parse(row);
+    return {
+      scope: r.scope,
+      scopeId: r.scope_id,
+      createdAt: r.created_at,
+      groupName: r.group_name,
+    };
+  });
+}
+
+/** Undo one opt-out on this address: only ever its own, since the caller passes its email. */
+export async function undoOptOut(
+  storage: StoragePort,
+  email: string,
+  scope: string,
+  scopeId: string,
+): Promise<void> {
+  await storage.batch([
+    {
+      sql: "DELETE FROM mail_suppression WHERE address_hash = ? AND scope = ? AND scope_id = ?",
+      params: [await addressHash(email), scope, scopeId],
+    },
+  ]);
+}

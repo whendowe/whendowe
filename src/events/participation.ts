@@ -9,8 +9,15 @@ import {
   type Visibility,
   visibilitySchema,
 } from "../people/invite.js";
-import { findOrCreatePerson, type Shown, shownAs, shownRowSchema } from "../people/person.js";
+import {
+  findOrCreatePerson,
+  normalizeEmail,
+  type Shown,
+  shownAs,
+  shownRowSchema,
+} from "../people/person.js";
 import { collect } from "../privacy/purge.js";
+import { isSuppressed } from "../privacy/suppression.js";
 import type { EventAccess } from "./event.js";
 
 // Who takes part in an event, and on what terms (DESIGN §10 rc7). Two independent
@@ -195,7 +202,18 @@ export const TAKES_PEOPLE: ReadonlySet<string> = new Set(["draft", "proposed", "
 
 export type AddResult =
   | { readonly kind: "added"; readonly personId: string; readonly email: string }
-  | { readonly kind: "forbidden" | "closed" | "already" | "rate_limited" };
+  | { readonly kind: "forbidden" | "closed" | "already" | "rate_limited" | "unreachable" };
+
+/**
+ * Addresses that opted out of the person adding them, of the group, or of everyone (DESIGN
+ * §10 rc24). The message says which addresses, never why.
+ */
+export class UnreachableAddressError extends Error {
+  constructor(readonly emails: readonly string[]) {
+    super(`Couldn't add ${emails.join(", ")}.`);
+    this.name = "UnreachableAddressError";
+  }
+}
 
 /**
  * Add a person by email to an event, at the given tiers. An address with no person yet
@@ -216,6 +234,9 @@ export async function addParticipant(
 ): Promise<AddResult> {
   if (access.participation.editTier !== "edit") return { kind: "forbidden" };
   if (!TAKES_PEOPLE.has(access.event.status)) return { kind: "closed" };
+  const from = { senderId: access.participation.personId, groupId: access.event.groupId };
+  if (await isSuppressed(storage, normalizeEmail(input.email), from))
+    return { kind: "unreachable" };
   const newId = input.newId ?? (() => uuidv7());
   const person = await findOrCreatePerson(storage, input.email, { now: input.now, newId });
   const eventId = access.event.id;
@@ -434,12 +455,24 @@ export async function resolveInvitees(
     readonly editTier: EditTier;
     readonly visibility: Visibility;
   }[],
-  options: { readonly now: string },
+  options: {
+    readonly now: string;
+    /** Who is adding them, and through which group: an opt-out from either refuses (rc24). */
+    readonly from: { readonly senderId: string; readonly groupId: string | null };
+  },
 ): Promise<(GroupDefault & { readonly email: string })[]> {
   if (rows.length > MAX_INVITEES) throw new Error(`At most ${MAX_INVITEES} people at once.`);
+  // All checked before anyone is created: a refused form creates no one.
+  const refused: string[] = [];
+  for (const row of rows) {
+    const email = normalizeEmail(row.email);
+    if (!refused.includes(email) && (await isSuppressed(storage, email, options.from)))
+      refused.push(email);
+  }
+  if (refused.length > 0) throw new UnreachableAddressError(refused);
   const byPerson = new Map<string, GroupDefault & { readonly email: string }>();
   for (const row of rows) {
-    const person = await findOrCreatePerson(storage, row.email, options);
+    const person = await findOrCreatePerson(storage, row.email, { now: options.now });
     byPerson.set(person.id, {
       personId: person.id,
       email: person.email,

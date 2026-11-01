@@ -206,7 +206,7 @@ export function runParticipantsContract(makePort: () => Promise<StoragePort>): v
           { email: "pp-cat-named@example.org", editTier: "view", visibility: "DETAILS" },
           { email: mara.email, editTier: "view", visibility: "BUSY" },
         ],
-        { now: T0 },
+        { now: T0, from: { senderId: mara.id, groupId: null } },
       );
       expect(people).toHaveLength(3); // Cat once, on her last terms
       const event = await createEvent(port, {
@@ -251,7 +251,10 @@ export function runParticipantsContract(makePort: () => Promise<StoragePort>): v
           group: null,
           fields: { ...DINNER, title },
           now: T0,
-          people: await resolveInvitees(port, rows, { now: T0 }),
+          people: await resolveInvitees(port, rows, {
+            now: T0,
+            from: { senderId: mara.id, groupId: null },
+          }),
         });
       const withDan = await byEmail("with Dan", [
         { email: "pp-dan-shared@example.org", editTier: "view", visibility: "FULL" },

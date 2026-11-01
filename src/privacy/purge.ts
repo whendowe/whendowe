@@ -59,6 +59,11 @@ export function purgeGroupStatements(groupId: string, now: string): SqlStatement
     { sql: "UPDATE canonical_event SET group_id = NULL WHERE group_id = ?", params: [groupId] },
     { sql: "DELETE FROM group_invite WHERE group_id = ?", params: [groupId] },
     { sql: "DELETE FROM group_member WHERE group_id = ?", params: [groupId] },
+    // An opt-out from this group has nothing left to stop (rc24).
+    {
+      sql: "DELETE FROM mail_suppression WHERE scope = 'group' AND scope_id = ?",
+      params: [groupId],
+    },
     { sql: "DELETE FROM person_group WHERE id = ?", params: [groupId] },
     ledger("group", groupId, now),
   ];

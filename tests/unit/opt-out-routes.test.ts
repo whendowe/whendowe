@@ -8,6 +8,7 @@ import { createApp } from "../../src/web/app.js";
 import { ACCOUNT_PATH } from "../../src/web/layout.js";
 import { CONFIRM_PATH, SIGN_IN_PATH } from "../../src/web/routes/auth.js";
 import { GROUPS_PATH } from "../../src/web/routes/groups.js";
+import { PLANS_PATH } from "../../src/web/routes/plans.js";
 import { loadMigrationSql } from "../conftest.js";
 
 // The opt-out link end to end (DESIGN §10 rc24): every email someone else caused carries
@@ -22,7 +23,12 @@ async function harness() {
   const app = createApp({
     auth: {
       storage,
-      mail: { send: (m) => (sent.push(m), Promise.resolve()) },
+      mail: {
+        send: (m) => {
+          sent.push(m);
+          return Promise.resolve();
+        },
+      },
       publicBaseUrl: "https://whendowe.example",
       secureCookies: false,
       now: () => new Date().toISOString(),
@@ -208,4 +214,132 @@ it("never names the sender by their account name, which could join two of their 
   const page = await (await h.app.request(`${OPT_OUT_PATH}?t=${optOutToken(mail)}`)).text();
   expect(page).toContain("Stop emails from the person who sent this");
   expect(page).not.toContain("Lena");
+});
+
+// --- where addresses are added (R5b) --------------------------------------------------
+
+const PICNIC = {
+  title: "Picnic",
+  start: "2101-10-20T12:00",
+  end: "2101-10-20T15:00",
+  tzid: "Europe/Prague",
+};
+
+it("an opted-out address can't be added anywhere, and nothing is created for it", async () => {
+  const h = await harness();
+  const { dm, invite } = await invited(h, "ana@example.org");
+  const t = optOutToken(h.sent.at(-1));
+  await h.app.request(OPT_OUT_PATH, post({ t, do: "person" }));
+
+  const again = await invite();
+  expect(again.status).toBe(422);
+  expect(await again.text()).toMatch(/Couldn(&#39;|')t add ana@example\.org\./);
+
+  const events = async () =>
+    (await h.storage.query({ sql: "SELECT id FROM canonical_event", params: [] })).length;
+  const before = await events();
+  const made = await h.app.request(
+    "/events",
+    post(
+      { csrf: dm.csrf, ...PICNIC, email_0: "Ana@Example.org", tier_0: "view", vis_0: "FULL" },
+      dm.cookie,
+    ),
+  );
+  expect(made.status).toBe(400);
+  expect(await made.text()).toMatch(/Couldn(&#39;|')t add ana@example\.org\./);
+  expect(await events()).toBe(before);
+
+  const plan = await h.app.request(
+    PLANS_PATH,
+    post(
+      { csrf: dm.csrf, name: "Summer", tzid: "Europe/Prague", email: "ana@example.org" },
+      dm.cookie,
+    ),
+  );
+  expect(plan.status).toBe(400);
+  expect(await plan.text()).toMatch(/Couldn(&#39;|')t add ana@example\.org\./);
+
+  // Added to an existing event, one at a time.
+  const own = await h.app.request("/events", post({ csrf: dm.csrf, ...PICNIC }, dm.cookie));
+  const event = own.headers.get("location") ?? "";
+  const add = await h.app.request(
+    `${event}/people`,
+    post(
+      { csrf: dm.csrf, email: "ana@example.org", editTier: "view", visibility: "FULL" },
+      dm.cookie,
+    ),
+  );
+  expect(add.status).toBe(422);
+  const taking = await h.storage.query({
+    sql: `SELECT 1 FROM event_participation ep JOIN person p ON p.id = ep.person_id
+          WHERE p.email = 'ana@example.org'`,
+    params: [],
+  });
+  expect(taking).toHaveLength(0);
+
+  // Someone else still can: the opt-out was from dm.
+  const eva = await signIn(h, "eva@example.org", "eva");
+  const evas = await h.app.request(
+    "/events",
+    post(
+      { csrf: eva.csrf, ...PICNIC, email_0: "ana@example.org", tier_0: "view", vis_0: "FULL" },
+      eva.cookie,
+    ),
+  );
+  expect(evas.status).toBe(303);
+});
+
+it("your account lists what you stopped, and you can undo it", async () => {
+  const h = await harness();
+  const { invite } = await invited(h, "ana@example.org");
+  const t = optOutToken(h.sent.at(-1));
+  await h.app.request(OPT_OUT_PATH, post({ t, do: "group" }));
+  expect((await invite()).status).toBe(422);
+  // Signing in is never stopped.
+  const ana = await signIn(h, "ana@example.org", "ana");
+  const page = await (
+    await h.app.request(ACCOUNT_PATH, { headers: { cookie: ana.cookie } })
+  ).text();
+  expect(page).toContain("Email through “Thursday Table”");
+  const scopeId = /name="scope_id" value="([^"]*)"/.exec(page)?.[1] ?? "";
+  // Only your own: a forged form can't undo someone else's, it has no address to name.
+  const forged = await h.app.request(
+    "/account/email-again",
+    post({ csrf: "nope", scope: "group", scope_id: scopeId }, ana.cookie),
+  );
+  expect(forged.status).toBe(403);
+  const undo = await h.app.request(
+    "/account/email-again",
+    post({ csrf: ana.csrf, scope: "group", scope_id: scopeId }, ana.cookie),
+  );
+  expect(undo.status).toBe(303);
+  expect(
+    await (await h.app.request(ACCOUNT_PATH, { headers: { cookie: ana.cookie } })).text(),
+  ).not.toContain("Email you stopped");
+  expect((await invite()).status).toBe(200);
+});
+
+it("deleting your account can also stop anyone emailing the address", async () => {
+  for (const checked of [true, false]) {
+    const h = await harness();
+    const kim = await signIn(h, "kim@example.org", "kim");
+    const ask = await h.app.request(
+      "/account/delete",
+      post(
+        { csrf: kim.csrf, confirm: "kim@example.org", ...(checked ? { suppress: "1" } : {}) },
+        kim.cookie,
+      ),
+    );
+    expect(ask.status).toBe(200);
+    const link = new URL(
+      /https:\/\/\S+\/account\/deletion\?t=\S+/.exec(h.sent.at(-1)?.text ?? "")?.[0] ??
+        "https://x/",
+    );
+    await h.app.request(
+      "/account/deletion",
+      post({ t: link.searchParams.get("t") ?? "", do: "now" }),
+    );
+    const { invite } = await invited(h, "kim@example.org");
+    expect((await invite()).status).toBe(checked ? 422 : 200);
+  }
 });

@@ -332,6 +332,8 @@ export async function eraseAccount(
       params: [p],
     },
     { sql: "DELETE FROM calendar_connection WHERE owner_id = ?", params: [p] },
+    // Opt-outs from this person: nobody is left for them to stop (rc24).
+    { sql: "DELETE FROM mail_suppression WHERE scope = 'person' AND scope_id = ?", params: [p] },
     { sql: "DELETE FROM person WHERE id = ?", params: [p] },
     {
       sql: "INSERT INTO erasure_ledger (kind, id, erased_at) VALUES ('person', ?, ?) ON CONFLICT DO NOTHING",
@@ -380,15 +382,20 @@ export async function requestDeletion(
   storage: StoragePort,
   personId: string,
   now: string,
+  options: {
+    /** Also stop anyone emailing the address once it's erased (rc24); unchecked by default. */
+    readonly suppress?: boolean;
+  } = {},
 ): Promise<{ readonly token: string; readonly eraseAfter: string }> {
   const { token, hash } = await issueToken();
   const eraseAfter = new Date(new Date(now).getTime() + DELETION_WAIT_MS).toISOString();
   await storage.batch([
     {
-      sql: `INSERT INTO account_deletion (person_id, requested_at, erase_after, token_hash)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT (person_id) DO UPDATE SET token_hash = excluded.token_hash`,
-      params: [personId, now, eraseAfter, hash],
+      sql: `INSERT INTO account_deletion (person_id, requested_at, erase_after, token_hash, suppress)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT (person_id) DO UPDATE SET token_hash = excluded.token_hash,
+                                                  suppress = excluded.suppress`,
+      params: [personId, now, eraseAfter, hash, options.suppress === true ? 1 : 0],
     },
     {
       sql: "UPDATE session SET revoked_at = ? WHERE person_id = ? AND revoked_at IS NULL",
@@ -465,6 +472,22 @@ async function eraseWithGrants(
     params: [personId],
   });
   if (exists.length === 0) return false;
+  // Asked for on the deletion page: the address is opted out before it goes, since the
+  // address is what the opt-out is kept by (hashed; rc24).
+  const asked = await storage.query({
+    sql: `SELECT p.email FROM account_deletion d JOIN person p ON p.id = d.person_id
+          WHERE d.person_id = ? AND d.suppress = 1`,
+    params: [personId],
+  });
+  if (asked[0] !== undefined) {
+    await storage.batch([
+      {
+        sql: `INSERT INTO mail_suppression (address_hash, scope, scope_id, created_at)
+              VALUES (?, 'all', '', ?) ON CONFLICT DO NOTHING`,
+        params: [await hashToken(z.string().parse(asked[0].email)), input.now],
+      },
+    ]);
+  }
   if (input.revokeCalendars !== undefined)
     await input.revokeCalendars(await connectionsOf(storage, personId));
   await eraseAccount(storage, personId, { now: input.now });

@@ -3,11 +3,12 @@ import { describe, expect, it } from "vitest";
 import type { StoragePort } from "../../src/db/port.js";
 import { createEvent } from "../../src/events/event.js";
 import type { MailMessage } from "../../src/mail/port.js";
-import { createGroup, findGroupForMember } from "../../src/people/group.js";
+import { createGroup, findGroupForMember, leaveGroup } from "../../src/people/group.js";
 import { createInvite } from "../../src/people/invite.js";
 import { issueLoginToken } from "../../src/people/login.js";
 import { findOrCreatePerson } from "../../src/people/person.js";
 import { createSession } from "../../src/people/session.js";
+import { eraseAccount } from "../../src/privacy/erasure.js";
 import { retentionPass } from "../../src/privacy/purge.js";
 import {
   addressHash,
@@ -27,7 +28,11 @@ const BASE = "https://whendowe.example";
 
 function recorder() {
   const sent: MailMessage[] = [];
-  return { sent, inner: { send: (m: MailMessage) => (sent.push(m), Promise.resolve()) } };
+  const send = (m: MailMessage) => {
+    sent.push(m);
+    return Promise.resolve();
+  };
+  return { sent, inner: { send } };
 }
 
 const tokenIn = (m: MailMessage | undefined) =>
@@ -208,6 +213,28 @@ export function runOptOutContract(makePort: () => Promise<StoragePort>): void {
         cause: { kind: "from", senderId: dm.id, groupId: null, why: "w" },
       });
       expect((await peekOptOut(port, tokenIn(sent.sent[0]), T0))?.neverSignedIn).toBe(false);
+    });
+
+    it("an opt-out from a person goes when they do, and one from a group with the group", async () => {
+      const port = await makePort();
+      const { dm, group, membership } = await organizer(port, "f");
+      const to = "ana-f@example.org";
+      await suppress(port, to, { kind: "person", id: dm.id }, T0);
+      await suppress(port, to, { kind: "group", id: group.id }, T0);
+      await suppress(port, to, { kind: "all" }, T0);
+      const scopes = async () =>
+        (
+          await port.query({
+            sql: "SELECT scope FROM mail_suppression WHERE address_hash = ? ORDER BY scope",
+            params: [await addressHash(to)],
+          })
+        ).map((r) => r.scope);
+      expect(await scopes()).toEqual(["all", "group", "person"]);
+      // dm leaves (the group goes with its last member), then is erased.
+      await leaveGroup(port, membership, dm.id, T0);
+      expect(await scopes()).toEqual(["all", "person"]);
+      await eraseAccount(port, dm.id, { now: T0 });
+      expect(await scopes()).toEqual(["all"]);
     });
 
     it("expired links go in the retention pass", async () => {

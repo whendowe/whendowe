@@ -134,6 +134,13 @@
       "when": 1793541185045,
       "tag": "0018_opt_out",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "6",
+      "when": 1793544199584,
+      "tag": "0019_deletion_suppress",
+      "breakpoints": true
     }
   ]
 }

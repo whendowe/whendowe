@@ -27,10 +27,20 @@ import {
   deleteEverything,
   OPT_OUT_PATH,
   type OptOutLink,
+  type OptOutView,
+  optOutsOf,
   peekOptOut,
   suppress,
+  undoOptOut,
 } from "../../privacy/suppression.js";
-import { ACCOUNT_PATH, appearanceForm, deletionDay, html, KEEP_ACCOUNT_PATH } from "../layout.js";
+import {
+  ACCOUNT_PATH,
+  appearanceForm,
+  deletionDay,
+  type Html,
+  html,
+  KEEP_ACCOUNT_PATH,
+} from "../layout.js";
 import {
   type AppEnv,
   page,
@@ -65,6 +75,7 @@ export { ACCOUNT_PATH };
 export const EXPORT_PATH = `${ACCOUNT_PATH}/export`;
 export const DELETE_ACCOUNT_PATH = `${ACCOUNT_PATH}/delete`;
 export const DELETION_LINK_PATH = `${ACCOUNT_PATH}/deletion`;
+export const EMAIL_AGAIN_PATH = `${ACCOUNT_PATH}/email-again`;
 export { KEEP_ACCOUNT_PATH };
 
 export interface AccountOptions {
@@ -94,7 +105,38 @@ function linkGonePage(c: Context<AppEnv>) {
   );
 }
 
-function accountForm(csrf: string, handle: string, error: string | null) {
+/**
+ * The opt-outs on your own address, each with an undo (rc24). A person you stopped is not
+ * named: the only name we could give is one from a single group or event, which this page,
+ * about the whole account, would join to the rest.
+ */
+function optOutSection(csrf: string, optOuts: readonly OptOutView[]): Html | string {
+  if (optOuts.length === 0) return "";
+  const what = (o: OptOutView) =>
+    o.scope === "all"
+      ? "Email from anyone on WhenDoWe"
+      : o.scope === "group"
+        ? `Email through “${o.groupName ?? "a group"}”`
+        : `Email from one person, stopped on ${o.createdAt.slice(0, 10)}`;
+  return html`<h2>Email you stopped</h2>
+<p class="muted">Sign-in links you ask for always arrive.</p>
+<ul>${optOuts.map(
+    (
+      o,
+    ) => html`<li>${what(o)} <form method="post" action="${EMAIL_AGAIN_PATH}" style="display:inline">
+  <input type="hidden" name="csrf" value="${csrf}" />
+  <input type="hidden" name="scope" value="${o.scope}" />
+  <input type="hidden" name="scope_id" value="${o.scopeId}" />
+  <button type="submit">Email me again</button></form></li>`,
+  )}</ul>`;
+}
+
+function accountForm(
+  csrf: string,
+  handle: string,
+  error: string | null,
+  optOuts: readonly OptOutView[],
+) {
   return html`<h1>Your name</h1>
 <p class="muted">This is the name people see in your groups, events and plans. Nobody sees your email address unless you choose to show it, one group, event or plan at a time.</p>
 ${error === null ? "" : html`<p class="error">${error}</p>`}
@@ -105,7 +147,8 @@ ${error === null ? "" : html`<p class="error">${error}</p>`}
 </form>
 <h2>Your data</h2>
 <p><a href="${EXPORT_PATH}">Download everything about you</a> <span class="muted">(one file: your groups, events, plans and what you said in them)</span></p>
-<p><a href="${DELETE_ACCOUNT_PATH}">Delete your account</a></p>`;
+<p><a href="${DELETE_ACCOUNT_PATH}">Delete your account</a></p>
+${optOutSection(csrf, optOuts)}`;
 }
 
 function optOutGonePage(c: Context<AppEnv>) {
@@ -209,6 +252,8 @@ ${loses.length === 0 ? "" : html`<p class="error">${loses.join(". ")}. To keep t
 <form method="post" action="${DELETE_ACCOUNT_PATH}">
   <input type="hidden" name="csrf" value="${me.csrfToken}" />
   <p><label>To confirm, type your email address<br /><input name="confirm" type="email" autocomplete="off" required /></label></p>
+  <p><label><input type="checkbox" name="suppress" value="1" /> Also stop anyone emailing this address</label><br />
+  <span class="muted">Without it, someone could add the address again later, as a new person.</span></p>
   <p><button type="submit">Delete my account</button> <a href="${ACCOUNT_PATH}">Keep it</a></p>
 </form>`,
       ),
@@ -231,7 +276,9 @@ ${loses.length === 0 ? "" : html`<p class="error">${loses.join(". ")}. To keep t
         400,
       );
     }
-    const asked = await requestDeletion(deps.storage, me.personId, deps.now());
+    const asked = await requestDeletion(deps.storage, me.personId, deps.now(), {
+      suppress: form.suppress === "1",
+    });
     const day = deletionDay(asked.eraseAfter);
     // From the configured origin, never the Host header (auth.ts explains why).
     const link = new URL(DELETION_LINK_PATH, deps.publicBaseUrl);
@@ -410,11 +457,38 @@ ${button("delete", "Delete everything about this address")}`
     return c.html(optOutGonePage(c), 400);
   });
 
+  // "Email me again" (rc24): undo one opt-out on your own address, never anyone else's.
+  app.post(EMAIL_AGAIN_PATH, async (c) => {
+    const me = requireSignedIn(c);
+    if (me instanceof Response) return me;
+    const form = await c.req.parseBody();
+    if (!(await verifyFormCsrf(me, form))) return rejectedPage(c, form);
+    const scope = z.enum(["all", "group", "person"]).safeParse(form.scope);
+    const scopeId = z
+      .string()
+      .max(64)
+      .safeParse(form.scope_id ?? "");
+    if (!scope.success || !scopeId.success) return c.redirect(ACCOUNT_PATH, 303);
+    await undoOptOut(deps.storage, me.email, scope.data, scopeId.data);
+    return c.redirect(ACCOUNT_PATH, 303);
+  });
+
   app.get(ACCOUNT_PATH, async (c) => {
     const me = requireSignedIn(c);
     if (me instanceof Response) return me;
     const person = await findPersonById(deps.storage, me.personId);
-    return c.html(page(c, "Your name", accountForm(me.csrfToken, person?.displayName ?? "", null)));
+    return c.html(
+      page(
+        c,
+        "Your name",
+        accountForm(
+          me.csrfToken,
+          person?.displayName ?? "",
+          null,
+          await optOutsOf(deps.storage, me.email),
+        ),
+      ),
+    );
   });
 
   app.post(ACCOUNT_PATH, async (c) => {
@@ -426,7 +500,16 @@ ${button("delete", "Delete everything about this address")}`
     const parsed = handleSchema.safeParse(raw);
     if (!parsed.success) {
       return c.html(
-        page(c, "Your name", accountForm(me.csrfToken, raw.slice(0, 40), reason(parsed.error))),
+        page(
+          c,
+          "Your name",
+          accountForm(
+            me.csrfToken,
+            raw.slice(0, 40),
+            reason(parsed.error),
+            await optOutsOf(deps.storage, me.email),
+          ),
+        ),
         400,
       );
     }

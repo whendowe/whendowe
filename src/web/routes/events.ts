@@ -35,6 +35,7 @@ import {
   removeParticipant,
   resolveInvitees,
   TAKES_PEOPLE,
+  UnreachableAddressError,
 } from "../../events/participation.js";
 import {
   type Answer,
@@ -402,6 +403,7 @@ function toFields(v: FormValues): EventFieldsInput {
 function errorMessage(error: unknown): string {
   if (error instanceof ZodError) return error.issues[0]?.message ?? "Please check the form.";
   if (error instanceof PollInputError) return error.message;
+  if (error instanceof UnreachableAddressError) return error.message;
   return "Please check the form.";
 }
 
@@ -571,8 +573,12 @@ ${Array.from({ length: shown }, (_, i) => {
 }
 
 /** The rows' people, created if new, and what each was asked. Call once the form is otherwise valid. */
-async function invitees(deps: EventRouteDeps, rows: readonly PersonRow[]) {
-  const people = await resolveInvitees(deps.storage, rows, { now: deps.now() });
+async function invitees(
+  deps: EventRouteDeps,
+  rows: readonly PersonRow[],
+  from: { readonly senderId: string; readonly groupId: string | null },
+) {
+  const people = await resolveInvitees(deps.storage, rows, { now: deps.now(), from });
   const asked = new Map<string, Request>();
   for (const row of rows) {
     const person = people.find((p) => p.email === normalizeEmail(row.email));
@@ -1160,7 +1166,10 @@ ${eventForm(`/groups/${membership.group.id}/events`, csrf, form.values, "", erro
       const fields = toFields(values);
       // Fully valid BEFORE anyone is created for an address: a refused form creates no one.
       eventFieldsSchema.parse(fields);
-      const { people, asked } = await invitees(deps, rows);
+      const { people, asked } = await invitees(deps, rows, {
+        senderId: me.personId,
+        groupId: membership?.group.id ?? null,
+      });
       const event = await createEvent(deps.storage, {
         creatorId: me.personId,
         group: membership,
@@ -1357,7 +1366,10 @@ ${pollForm(`/groups/${membership.group.id}/polls`, csrf, values, error, peopleFi
     try {
       const input = toPollInput(values);
       validateCandidates(input.fields, input.candidates); // as above: valid before anyone is created
-      const { people } = await invitees(deps, rows);
+      const { people } = await invitees(deps, rows, {
+        senderId: me.personId,
+        groupId: membership?.group.id ?? null,
+      });
       const event = await createPoll(deps.storage, {
         creatorId: me.personId,
         group: membership,
@@ -1762,6 +1774,11 @@ ${pollForm(`/groups/${membership.group.id}/polls`, csrf, values, error, peopleFi
             "Too many people added to this event today. Please try again tomorrow.",
           ),
           429,
+        );
+      case "unreachable":
+        return c.html(
+          await eventPage(c, deps, access, me.csrfToken, `Couldn't add ${email}.`),
+          422,
         );
       case "added":
         break;

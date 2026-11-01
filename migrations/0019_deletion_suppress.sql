@@ -1,0 +1,1 @@
+ALTER TABLE `account_deletion` ADD `suppress` integer DEFAULT 0 NOT NULL;

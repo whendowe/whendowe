@@ -3,7 +3,7 @@ import type { Context, Hono } from "hono";
 import { Temporal } from "temporal-polyfill";
 import { ZodError } from "zod";
 import type { StoragePort } from "../../db/port.js";
-import { resolveInvitees } from "../../events/participation.js";
+import { resolveInvitees, UnreachableAddressError } from "../../events/participation.js";
 import { type Answer, answerSchema } from "../../events/poll.js";
 import { findGroupForMember, listGroupsFor, listMembers } from "../../people/group.js";
 import { normalizeEmail } from "../../people/person.js";
@@ -152,6 +152,7 @@ function strs(form: Record<string, unknown>, key: string): string[] {
 function problem(err: unknown): string | null {
   if (err instanceof ZodError) return err.issues[0]?.message ?? "Check the form.";
   if (err instanceof PlanInputError || err instanceof ThreadInputError) return err.message;
+  if (err instanceof UnreachableAddressError) return err.message;
   return null;
 }
 
@@ -1012,7 +1013,10 @@ export function registerPlanRoutes(app: Hono<AppEnv>, deps: PlanRouteDeps): void
       const people = await resolveInvitees(
         deps.storage,
         values.emails.map((email) => ({ email, editTier: "view", visibility: "FULL" })),
-        { now: deps.now() },
+        {
+          now: deps.now(),
+          from: { senderId: me.personId, groupId: groupId === "" ? null : groupId },
+        },
       );
       memberIds.push(...people.map((p) => p.personId));
       const thread = await createThread(deps.storage, {

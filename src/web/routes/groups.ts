@@ -303,7 +303,10 @@ ${
       );
     }
 
-    const reply = (status: 200 | 400 | 409 | 429 | 502 | 503, notice: ReturnType<typeof html>) =>
+    const reply = (
+      status: 200 | 400 | 409 | 422 | 429 | 502 | 503,
+      notice: ReturnType<typeof html>,
+    ) =>
       c.html(
         page(
           c,
@@ -337,6 +340,8 @@ ${inviteForm(membership, me.csrfToken, notice)}`,
     if (!invite.ok) {
       if (invite.reason === "already_member")
         return reply(409, html`<p class="error">${email} is already in this group.</p>`);
+      if (invite.reason === "unreachable")
+        return reply(422, html`<p class="error">Couldn't add ${email}.</p>`);
       if (invite.reason === "rate_limited")
         return reply(
           429,

@@ -683,6 +683,8 @@ export const accountDeletion = sqliteTable(
     requestedAt: text("requested_at").notNull(),
     eraseAfter: text("erase_after").notNull(),
     tokenHash: text("token_hash").notNull().unique(),
+    // rc24: 1 = also stop anyone emailing the address, once it is erased (asked on the page).
+    suppress: integer("suppress").notNull().default(0),
   },
   (t) => [index("account_deletion_due_idx").on(t.eraseAfter)],
 );
