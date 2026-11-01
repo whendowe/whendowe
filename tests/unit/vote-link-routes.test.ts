@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { expect, it } from "vitest";
-import { findOrCreatePerson } from "../../src/people/person.js";
+import { MailCapReachedError } from "../../src/mail/capped.js";
+import { findOrCreatePerson, guestName } from "../../src/people/person.js";
 import {
   acceptPlan,
   addDraftEvent,
@@ -10,8 +11,9 @@ import {
 } from "../../src/plans/plan.js";
 import { findThreadForMember, leaveThread } from "../../src/plans/thread.js";
 import { issueVoteLinks } from "../../src/plans/vote-link.js";
+import { PLANS_PATH } from "../../src/web/routes/plans.js";
 import { VOTE_PATH } from "../../src/web/routes/respond.js";
-import { type Browser, browser, post } from "../property/one-browser.js";
+import { addAccount, type Browser, browser, home, post } from "../property/one-browser.js";
 
 // The vote link's page (DESIGN §10 rc26): no account, no session, the GET writes
 // nothing, and every POST re-checks the link and the thread.
@@ -155,4 +157,112 @@ it("decided meanwhile, or left: the link says so", async () => {
   await leaveThread(b.storage, await f.as(f.rest[1]?.id ?? ""), NOW);
   expect((await b.request(f.link(1))).status).toBe(404);
   expect((await vote(b, f.token(1), { [`plan_${early}`]: "yes" })).status).toBe(404);
+});
+
+// --- the organizer emails them (P6c part 2) ------------------------------------------
+
+async function signedInPoll(b: Browser, names: readonly string[]) {
+  await addAccount(b, "mara@example.org");
+  const f = await pollWith(b, names);
+  // pollWith issued links for the tests above; here the organizer sends the first ones.
+  await b.storage.batch([
+    { sql: "DELETE FROM plan_vote_token WHERE thread_id = ?", params: [f.threadId] },
+  ]);
+  return { ...f, thread: `${PLANS_PATH}/${f.threadId}` };
+}
+
+async function sendLinks(b: Browser, thread: string) {
+  return b.request(`${thread}/links`, post({ csrf: (await home(b)).csrf }));
+}
+
+it("the organizer emails each member their own link, in the thread's name for them", async () => {
+  const b = await browser({ now: () => NOW });
+  const f = await signedInPoll(b, ["david", "ana"]);
+  expect(await (await b.request(f.thread)).text()).toContain("Email vote links");
+  const res = await sendLinks(b, f.thread);
+  expect(res.status).toBe(200);
+  const body = await res.text();
+  expect(body).toContain("Sent to 2 people.");
+  expect(body).not.toMatch(/Couldn(&#39;|')t send/);
+  const mails = b.sent.filter((m) => m.subject === 'When can you make "Picnic"?');
+  expect(mails.map((m) => m.to).sort()).toEqual(["ana@example.org", "david@example.org"]);
+  const david = mails.find((m) => m.to === "david@example.org");
+  expect(david?.cause).toMatchObject({ kind: "from", senderId: f.mara.id, groupId: null });
+  // Named as the thread shows her, never by her address.
+  const mara = guestName(f.threadId, f.mara.id);
+  expect(david?.text).toContain(`${mara} is finding a time for "Picnic"`);
+  expect(david?.cause).toMatchObject({ why: `${mara} added this address to a plan on WhenDoWe` });
+  expect(david?.text).toContain("Vote here — no account, nothing to install:\nhttps://");
+  expect(JSON.stringify(david)).not.toContain("mara@example.org");
+  expect(david?.text).toContain("works for 14 days");
+  const url = /https:\/\/whendowe\.example(\/vote\?t=\S+)/.exec(david?.text ?? "")?.[1] ?? "";
+  const page = await b.request(url);
+  expect(page.status).toBe(200);
+  expect(await page.text()).toContain("Which of these work for you?");
+
+  const again = await sendLinks(b, f.thread);
+  expect(await again.text()).toContain("Sent to 0 people. 2 already got a link in the last hour.");
+});
+
+it("only the organizer, with CSRF, while something is on the table", async () => {
+  const b = await browser({ now: () => NOW });
+  const f = await signedInPoll(b, ["david", "ana"]);
+  expect((await b.request(`${f.thread}/links`, post({ csrf: "nope" }))).status).toBe(403);
+  await acceptPlan(b.storage, await f.as(f.mara.id), { planId: f.planIds[0] ?? "", now: NOW });
+  expect(await (await b.request(f.thread)).text()).not.toContain("Email vote links");
+  const closed = await sendLinks(b, f.thread);
+  expect(closed.status).toBe(409);
+  expect(await closed.text()).toContain("Nothing is on the table to vote on.");
+
+  const c = await browser({ now: () => NOW });
+  const g = await pollWith(c, ["david", "ana"]);
+  await addAccount(c, "david@example.org");
+  const thread = `${PLANS_PATH}/${g.threadId}`;
+  expect(await (await c.request(thread)).text()).not.toContain("Email vote links");
+  const res = await sendLinks(c, thread);
+  expect(res.status).toBe(403);
+  expect(await res.text()).toContain("Only the organizer sends vote links.");
+  expect(c.sent.some((m) => m.subject.startsWith("When can you make"))).toBe(false);
+});
+
+it("an undelivered link is withdrawn, and the cap stops the rest from being tried", async () => {
+  let failing = true;
+  const b = await browser({
+    now: () => NOW,
+    mailFails: (m) => {
+      if (!m.subject.startsWith("When can you make")) return null;
+      return failing && m.to === "ana@example.org" ? new Error("bounced") : null;
+    },
+  });
+  const f = await signedInPoll(b, ["ana", "bob", "cid"]);
+  const res = await sendLinks(b, f.thread);
+  expect(res.status).toBe(503);
+  expect(await res.text()).toMatch(
+    /Sent to 2 people\. Couldn(&#39;|')t send to 1 — please try again later\./,
+  );
+  // Ana never got hers, so a retry isn't throttled for her; the others' links stand.
+  failing = false;
+  expect(await (await sendLinks(b, f.thread)).text()).toContain(
+    "Sent to 1 person. 2 already got a link in the last hour.",
+  );
+
+  let tried = 0;
+  const c = await browser({
+    now: () => NOW,
+    mailFails: (m) => {
+      if (!m.subject.startsWith("When can you make")) return null;
+      tried += 1;
+      return tried === 1 ? new MailCapReachedError({ daily: 1, monthly: 1 }) : null;
+    },
+  });
+  const g = await signedInPoll(c, ["ana", "bob"]);
+  const capped = await sendLinks(c, g.thread);
+  expect(capped.status).toBe(503);
+  expect(await capped.text()).toMatch(/Sent to 0 people\. Couldn(&#39;|')t send to 2/);
+  const left = await c.storage.query({
+    sql: "SELECT count(*) AS n FROM plan_vote_token WHERE thread_id = ?",
+    params: [g.threadId],
+  });
+  expect(left[0]?.n).toBe(0);
+  expect(tried).toBe(1); // after the cap, nobody else is tried
 });

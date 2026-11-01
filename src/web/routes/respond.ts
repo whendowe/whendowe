@@ -21,7 +21,7 @@ import {
 import type { MailPort } from "../../mail/port.js";
 import { castVote, listPlans, type Plan } from "../../plans/plan.js";
 import { memberName, type ThreadAccess } from "../../plans/thread.js";
-import { resolveVoteLink } from "../../plans/vote-link.js";
+import { type IssuedVoteLink, resolveVoteLink, VOTE_LINK_TTL_MS } from "../../plans/vote-link.js";
 import { spanText, whenText } from "../../plans/weeks.js";
 import { type Html, html, renderPage } from "../layout.js";
 import type { AppEnv } from "../session.js";
@@ -441,6 +441,45 @@ export async function sendResponseLink(
       url.toString(),
       "",
       `This link is just for you and works for ${days} days; you can change your answer with it any time.`,
+    ].join("\n"),
+  });
+}
+
+/**
+ * One vote-link email (rc26). The thread's name is user-written: the same accepted
+ * phishing surface as an event title. Everyone in a thread sees its name, so it goes
+ * in. `from` is the organizer as the thread shows them — never their account name.
+ */
+export async function sendVoteLink(
+  mail: MailPort,
+  input: {
+    readonly link: IssuedVoteLink;
+    readonly access: ThreadAccess;
+    readonly from: string;
+    readonly publicBaseUrl: string;
+  },
+): Promise<void> {
+  const { link, access, from } = input;
+  const url = new URL(VOTE_PATH, input.publicBaseUrl);
+  url.searchParams.set("t", link.token);
+  const name = access.thread.name;
+  const days = VOTE_LINK_TTL_MS / (24 * 60 * 60 * 1000);
+  await mail.send({
+    to: link.email,
+    subject: `When can you make "${name}"?`,
+    cause: {
+      kind: "from",
+      senderId: access.personId,
+      groupId: access.thread.groupId,
+      why: `${from} added this address to a plan on WhenDoWe`,
+    },
+    text: [
+      `${from} is finding a time for "${name}" and would like to know which times work for you.`,
+      "",
+      "Vote here — no account, nothing to install:",
+      url.toString(),
+      "",
+      `This link is just for you and works for ${days} days; you can change your vote with it any time.`,
     ].join("\n"),
   });
 }

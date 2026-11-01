@@ -5,6 +5,8 @@ import { ZodError } from "zod";
 import type { StoragePort } from "../../db/port.js";
 import { resolveInvitees, UnreachableAddressError } from "../../events/participation.js";
 import { type Answer, answerSchema } from "../../events/poll.js";
+import { MailCapReachedError } from "../../mail/capped.js";
+import type { MailPort } from "../../mail/port.js";
 import { findGroupForMember, listGroupsFor, listMembers } from "../../people/group.js";
 import { normalizeEmail } from "../../people/person.js";
 import type { PlanEventLike } from "../../plans/diff.js";
@@ -42,6 +44,7 @@ import {
   type ThreadAccess,
   ThreadInputError,
 } from "../../plans/thread.js";
+import { issueVoteLinks, revokeUndeliveredVoteLink } from "../../plans/vote-link.js";
 import {
   addDays,
   type Block,
@@ -72,6 +75,7 @@ import {
 } from "../session.js";
 import { appearanceSection, saveAppearance } from "./account.js";
 import { EVENTS_PATH } from "./events.js";
+import { sendVoteLink } from "./respond.js";
 
 // Plan pages (DESIGN §10 rc19, slices P2–P3): a thread, a plan, and your draft. Every read
 // goes through findThreadForMember (no IDOR) and every write takes its access. Every
@@ -86,6 +90,8 @@ export interface PlanRouteDeps {
   readonly now: () => string;
   /** Links in the paste-me message are built from this, never the Host header. */
   readonly publicBaseUrl: string;
+  /** Vote links (rc26): sent only when the organizer asks. */
+  readonly mail: MailPort;
 }
 
 const threadPath = (t: string) => `${PLANS_PATH}/${t}`;
@@ -353,7 +359,7 @@ ${opts.rest ? html`<input type="hidden" name="rest" value="1" />` : ""}
 <button type="submit"${opts.primary ? html` class="primary"` : ""}>${label}</button></form>`;
 }
 
-function threadPage(v: View, day: string | null): Html {
+function threadPage(v: View, day: string | null, notice: string | null = null): Html {
   const t = v.access.thread;
   const waiting = v.plans.filter(
     (p) => p.status === "on_table" && !p.votes.some((x) => x.personId === v.access.personId),
@@ -406,7 +412,12 @@ ${
       v.draft === null
         ? startForm(v, "Propose a plan", { primary: true })
         : html`<a class="btn primary" href="${draftPath(t.id)}">Back to your draft</a>`
+    }${
+      onTable.length > 0 && t.organizerId === v.access.personId && v.access.members.length > 1
+        ? html`<form method="post" action="${threadPath(t.id)}/links"><input type="hidden" name="csrf" value="${v.csrf}" /><button type="submit">Email vote links</button></form>`
+        : ""
     }</div>
+${notice === null ? "" : html`<p class="notice">${notice}</p>`}
 ${groups.map(([title, ps]) =>
   ps.length === 0 ? "" : html`<h3 class="group-h">${title}</h3>${ps.map((p) => planRow(v, p))}`,
 )}
@@ -1052,11 +1063,13 @@ export function registerPlanRoutes(app: Hono<AppEnv>, deps: PlanRouteDeps): void
     }
   });
 
-  app.get(`${PLANS_PATH}/:thread`, async (c) => {
-    const me = requireSignedIn(c);
-    if (me instanceof Response) return me;
-    const access = await gate(c, deps, me);
-    if (access instanceof Response) return access;
+  const renderThread = async (
+    c: Context<AppEnv>,
+    access: ThreadAccess,
+    me: SignedIn,
+    notice: string | null = null,
+    status: 200 | 403 | 409 | 503 = 200,
+  ) => {
     const v = await load(deps, access, me);
     const day = c.req.query("day") ?? "";
     const id = access.thread.id;
@@ -1071,10 +1084,60 @@ export function registerPlanRoutes(app: Hono<AppEnv>, deps: PlanRouteDeps): void
       page(
         c,
         access.thread.name,
-        html`${threadPage(v, DAY.test(day) ? day : null)}${appearance}
+        html`${threadPage(v, DAY.test(day) ? day : null, notice)}${appearance}
 <p class="muted"><a href="${threadPath(id)}/leave">Leave this plan</a></p>`,
       ),
+      status,
     );
+  };
+
+  app.get(`${PLANS_PATH}/:thread`, async (c) => {
+    const me = requireSignedIn(c);
+    if (me instanceof Response) return me;
+    const access = await gate(c, deps, me);
+    if (access instanceof Response) return access;
+    return renderThread(c, access, me);
+  });
+
+  // Vote links by email (rc26): the organizer asks; each member gets their own.
+  app.post(`${PLANS_PATH}/:thread/links`, async (c) => {
+    const r = await posting(c);
+    if (r instanceof Response) return r;
+    const issued = await issueVoteLinks(deps.storage, r.access, { now: deps.now() });
+    if (issued.kind === "forbidden")
+      return renderThread(c, r.access, r.me, "Only the organizer sends vote links.", 403);
+    if (issued.kind === "closed")
+      return renderThread(c, r.access, r.me, "Nothing is on the table to vote on.", 409);
+    const me = r.access.members.find((m) => m.personId === r.access.personId);
+    const from = me === undefined ? "Someone" : memberName(me);
+    let sent = 0;
+    let failed = 0;
+    let capped = false;
+    for (const link of issued.links) {
+      if (!capped) {
+        try {
+          await sendVoteLink(deps.mail, {
+            link,
+            access: r.access,
+            from,
+            publicBaseUrl: deps.publicBaseUrl,
+          });
+          sent += 1;
+          continue;
+        } catch (error) {
+          if (error instanceof MailCapReachedError) capped = true;
+        }
+      }
+      // Not delivered: withdraw it, so a retry isn't throttled for someone who never got it.
+      await revokeUndeliveredVoteLink(deps.storage, link);
+      failed += 1;
+    }
+    const parts = [
+      `Sent to ${sent} ${sent === 1 ? "person" : "people"}.`,
+      issued.throttled > 0 ? `${issued.throttled} already got a link in the last hour.` : "",
+      failed > 0 ? `Couldn't send to ${failed} — please try again later.` : "",
+    ].filter((p) => p !== "");
+    return renderThread(c, r.access, r.me, parts.join(" "), failed > 0 ? 503 : 200);
   });
 
   // Leaving (DESIGN §10 rc21). GET says what will happen; POST does it.

@@ -24,7 +24,13 @@ export interface Browser {
 
 const writing = (s: SqlStatement) => !/^\s*SELECT\b/i.test(s.sql);
 
-export async function browser(options: { now?: () => string } = {}): Promise<Browser> {
+export async function browser(
+  options: {
+    now?: () => string;
+    /** A send that fails: the error to throw for it, or null to deliver. */
+    mailFails?: (m: MailMessage) => Error | null;
+  } = {},
+): Promise<Browser> {
   const client = createClient({ url: ":memory:" });
   for (const sql of await loadMigrationSql()) await client.executeMultiple(sql);
   const inner = sqliteStoragePort(client);
@@ -45,6 +51,8 @@ export async function browser(options: { now?: () => string } = {}): Promise<Bro
       storage,
       mail: {
         send: (m) => {
+          const error = options.mailFails?.(m) ?? null;
+          if (error !== null) return Promise.reject(error);
           sent.push(m);
           return Promise.resolve();
         },
