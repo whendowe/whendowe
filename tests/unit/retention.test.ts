@@ -47,7 +47,10 @@ describe("the last day an event touches", () => {
   it("a series too long to walk is bounded above, never below", () => {
     // 1000 weekly: the real last is 999 weeks on; the bound may be later, never earlier.
     const last = lastDay({ ...one, rrule: "FREQ=WEEKLY;COUNT=1000" });
-    expect((last?.toString() ?? "") >= "2121-01-01").toBe(true);
+    expect((last?.toString() ?? "") >= "2121-01-12").toBe(true);
+    // Every second week: the real last is 999 × 14 days on, so INTERVAL counts.
+    const fortnightly = lastDay({ ...one, rrule: "FREQ=WEEKLY;INTERVAL=2;COUNT=1000" });
+    expect((fortnightly?.toString() ?? "") >= "2140-03-06").toBe(true);
   });
 
   it("an endless series never ends, until it is cancelled", () => {
