@@ -36,7 +36,7 @@ async function harness() {
       now: () => new Date().toISOString(),
     },
   });
-  return { app, sent, mailFailure };
+  return { app, sent, mailFailure, storage };
 }
 type H = Awaited<ReturnType<typeof harness>>;
 interface Who {
@@ -1476,4 +1476,109 @@ it("if the email can't go, the deletion still stands and the page says so (§10 
   expect(page).toContain("We couldn't email you just now");
   const during = await signIn(h, "david@example.org");
   expect(await text(h, "/", during)).toContain("This account will be deleted on");
+});
+
+// --- retention (DESIGN §10 rc23) ----------------------------------------------------
+
+async function retainOf(h: H, table: "canonical_event" | "person_group", path: string) {
+  const id = path.split("/").at(-1) ?? "";
+  const rows = await h.storage.query({
+    sql:
+      table === "canonical_event"
+        ? "SELECT retain_days AS d, revision, updated_at FROM canonical_event WHERE id = ?"
+        : "SELECT retain_days AS d FROM person_group WHERE id = ?",
+    params: [id],
+  });
+  return rows[0];
+}
+
+it("a group's organizers choose its period; it applies to events made afterwards", async () => {
+  const h = await harness();
+  const { dm, group } = await setup(h);
+  const before = await createVia(h, dm, group);
+  expect(await text(h, group, dm)).toContain("kept for <strong>1 year</strong>");
+  const res = await h.app.request(
+    `${group}/retention`,
+    post({ csrf: dm.csrf, retain_days: "90" }, dm.cookie),
+  );
+  expect(res.status).toBe(303);
+  const page = await text(h, group, dm);
+  expect(page).toContain("kept for <strong>3 months</strong>");
+  expect(page).toContain("events already made keep theirs");
+  // The form opens on the period in force, so saving it unchanged changes nothing.
+  expect(page).toContain('<option value="90" selected>3 months</option>');
+  expect(page).not.toContain('<option value="365" selected>');
+  const after = await createVia(h, dm, group);
+  expect((await retainOf(h, "canonical_event", after))?.d).toBe(90);
+  // The earlier event keeps its own: its organizer might not have been able to edit it.
+  expect((await retainOf(h, "canonical_event", before))?.d).toBe(365);
+});
+
+it("a member sees the group's period but can't change it", async () => {
+  const h = await harness();
+  const { dm, group } = await setup(h);
+  const player = await join(h, dm, group, "player@example.org", "edit", "FULL");
+  const page = await text(h, group, player);
+  expect(page).toContain("kept for <strong>1 year</strong>");
+  expect(page).not.toContain("/retention");
+  const res = await h.app.request(
+    `${group}/retention`,
+    post({ csrf: player.csrf, retain_days: "30" }, player.cookie),
+  );
+  expect(res.status).toBe(403);
+  expect((await retainOf(h, "person_group", group))?.d).toBe(365);
+});
+
+it("an event's editors change its period without editing it; others can't", async () => {
+  const h = await harness();
+  const { dm, group } = await setup(h);
+  const viewer = await join(h, dm, group, "viewer@example.org", "view", "FULL");
+  const proposer = await join(h, dm, group, "proposer@example.org", "propose", "FULL");
+  const event = await createVia(h, dm, group);
+  const was = await retainOf(h, "canonical_event", event);
+  const res = await h.app.request(
+    `${event}/retention`,
+    post({ csrf: dm.csrf, retain_days: "730" }, dm.cookie),
+  );
+  expect(res.status).toBe(303);
+  const now = await retainOf(h, "canonical_event", event);
+  expect(now?.d).toBe(730);
+  // Not a change to the event: same revision, same updated_at, no history line.
+  expect(now?.revision).toBe(was?.revision);
+  expect(now?.updated_at).toBe(was?.updated_at);
+  expect(await text(h, event, dm)).not.toContain("dm changed");
+  expect(await text(h, event, dm)).toContain("kept for <strong>2 years</strong>");
+  for (const who of [viewer, proposer]) {
+    const page = await text(h, event, who);
+    expect(page).toContain("kept for <strong>2 years</strong>");
+    expect(page).not.toContain("/retention");
+    const refused = await h.app.request(
+      `${event}/retention`,
+      post({ csrf: who.csrf, retain_days: "30" }, who.cookie),
+    );
+    expect(refused.status).toBe(403);
+  }
+  expect((await retainOf(h, "canonical_event", event))?.d).toBe(730);
+});
+
+it("retention routes take only a listed period, with CSRF, from someone in it", async () => {
+  const h = await harness();
+  const { dm, group } = await setup(h);
+  const event = await createVia(h, dm, group);
+  const outsider = await signIn(h, "outsider@example.org");
+  for (const path of [`${group}/retention`, `${event}/retention`]) {
+    for (const days of ["0", "31", "3650", "1e3", "forever", ""]) {
+      const res = await h.app.request(path, post({ csrf: dm.csrf, retain_days: days }, dm.cookie));
+      expect(res.status).toBe(400);
+    }
+    const forged = await h.app.request(path, post({ csrf: "nope", retain_days: "30" }, dm.cookie));
+    expect(forged.status).toBe(403);
+    const outside = await h.app.request(
+      path,
+      post({ csrf: outsider.csrf, retain_days: "30" }, outsider.cookie),
+    );
+    expect(outside.status).toBe(404);
+  }
+  expect((await retainOf(h, "person_group", group))?.d).toBe(365);
+  expect((await retainOf(h, "canonical_event", event))?.d).toBe(365);
 });

@@ -186,3 +186,32 @@ export async function leaveGroup(
   const gone = await collect(storage, { groups: [groupId] }, now);
   return { deleted: gone.groups.length > 0 };
 }
+
+/** How long events made from this group are kept after they end (DESIGN §10 rc23). */
+export async function groupRetention(storage: StoragePort, groupId: string): Promise<number> {
+  const rows = await storage.query({
+    sql: "SELECT retain_days FROM person_group WHERE id = ?",
+    params: [groupId],
+  });
+  return z.object({ retain_days: z.number() }).parse(rows[0]).retain_days;
+}
+
+/**
+ * Its organizers set the group's period; it applies to events made from it afterwards
+ * (rc23) — the earlier ones keep theirs, since an organizer may not be able to edit them.
+ * False, and nothing written, for anyone else.
+ */
+export async function setGroupRetention(
+  storage: StoragePort,
+  membership: GroupMembership,
+  days: number,
+): Promise<boolean> {
+  if (membership.role !== "organizer") return false;
+  await storage.batch([
+    {
+      sql: "UPDATE person_group SET retain_days = ? WHERE id = ?",
+      params: [days, membership.group.id],
+    },
+  ]);
+  return true;
+}

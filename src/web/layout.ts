@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+import { RETAIN_CHOICES, retainLabel } from "../privacy/retention.js";
 import { META_CONTENT_SECURITY_POLICY } from "./csp.js";
 import { escapeHtml } from "./escape.js";
 
@@ -152,6 +153,37 @@ export function appearanceForm(v: AppearanceView): Html {
   <span class="muted">Leave it empty to use the name on <a href="${ACCOUNT_PATH}">your account</a>.</span></p>
   <p><label><input type="checkbox" name="show_email" value="1"${v.showEmail ? html` checked` : ""} /> Show my email address to the people in this ${v.here}</label></p>
   <p><button type="submit">Save</button></p>
+</form></details>`;
+}
+
+/** How long something is kept, and — for whoever may change it — the form (DESIGN §10 rc23). */
+export interface RetentionView {
+  readonly days: number;
+  /** "Events made in this group are" / "This event is". */
+  readonly subject: string;
+  /** "they end" / "it ends". */
+  readonly ends: string;
+  /** Null: this viewer may not change it. */
+  readonly form: {
+    readonly action: string;
+    readonly csrf: string;
+    readonly note: string | null;
+  } | null;
+}
+
+export function retentionSection(v: RetentionView): Html {
+  const kept = html`${v.subject} kept for <strong>${retainLabel(v.days)}</strong> after ${v.ends}, then deleted`;
+  if (v.form === null) return html`<p class="muted wd-retention">${kept}.</p>`;
+  return html`<details class="wd-retention"><summary>${kept}</summary>
+<form method="post" action="${v.form.action}">
+  <input type="hidden" name="csrf" value="${v.form.csrf}" />
+  <p><label>Keep for
+    <select name="retain_days">${RETAIN_CHOICES.map(
+      (c) =>
+        html`<option value="${c.days}"${c.days === v.days ? html` selected` : ""}>${c.label}</option>`,
+    )}</select></label>
+  <button type="submit">Save</button></p>
+  ${v.form.note === null ? "" : html`<p class="muted">${v.form.note}</p>`}
 </form></details>`;
 }
 

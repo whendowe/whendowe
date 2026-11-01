@@ -825,3 +825,32 @@ export async function deleteEvent(
   const done = await purge(storage, "event", access.event.id, now);
   return { kind: done.kind === "purged" ? "deleted" : "mirrored" };
 }
+
+/** How long this event is kept after it ends (DESIGN §10 rc21 *Retention*). */
+export async function eventRetention(storage: StoragePort, access: EventAccess): Promise<number> {
+  const rows = await storage.query({
+    sql: "SELECT retain_days FROM canonical_event WHERE id = ?",
+    params: [access.event.id],
+  });
+  return z.object({ retain_days: z.number() }).parse(rows[0]).retain_days;
+}
+
+/**
+ * Its editors set an event's period (rc23). Not a change to the event: no revision, no
+ * history line, no sync — and `updated_at` stays, since retention reads it as the day an
+ * endless series was cancelled. False, and nothing written, below the edit tier.
+ */
+export async function setEventRetention(
+  storage: StoragePort,
+  access: EventAccess,
+  days: number,
+): Promise<boolean> {
+  if (access.participation.editTier !== "edit") return false;
+  await storage.batch([
+    {
+      sql: "UPDATE canonical_event SET retain_days = ? WHERE id = ?",
+      params: [days, access.event.id],
+    },
+  ]);
+  return true;
+}

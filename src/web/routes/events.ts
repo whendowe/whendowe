@@ -12,12 +12,14 @@ import {
   type EventFieldsInput,
   editEvent,
   eventFieldsSchema,
+  eventRetention,
   findEventForParticipant,
   type HistoryEntry,
   isOver,
   listEventsFor,
   listHistory,
   setCancelled,
+  setEventRetention,
   type TransitionResult,
   withdrawProposal,
 } from "../../events/event.js";
@@ -77,13 +79,14 @@ import {
   visibilitySchema,
 } from "../../people/invite.js";
 import { appearanceIn, normalizeEmail } from "../../people/person.js";
+import { retainDaysSchema } from "../../privacy/retention.js";
 import {
   formatRRule,
   parseRRule,
   type RRuleSubset,
   upcomingOccurrences,
 } from "../../recurrence.js";
-import { type Html, html, who, ZONE_GUESS } from "../layout.js";
+import { type Html, html, retentionSection, who, ZONE_GUESS } from "../layout.js";
 import { pickerAssets } from "../picker.js";
 import {
   type AppEnv,
@@ -1089,6 +1092,15 @@ ${await proposalsSection(deps, access, csrf)}
 ${people.length === 0 ? "" : peopleSection(access, people, csrf)}
 ${see("participants") ? await appearanceSection(deps.storage, { kind: "event", id: event.id }, { personId: participation.personId, csrfToken: csrf }, `${EVENTS_PATH}/${event.id}/me`, "event") : ""}
 ${await responsesSection(deps, access, csrf)}
+${retentionSection({
+  days: await eventRetention(deps.storage, access),
+  subject: "This event is",
+  ends: "it ends",
+  form:
+    participation.editTier === "edit"
+      ? { action: `${EVENTS_PATH}/${event.id}/retention`, csrf, note: null }
+      : null,
+})}
 <h2>History</h2>
 <ul>${history.map((h) => html`<li>${h.entry}</li>`)}</ul>
 <p class="muted"><a href="${EVENTS_PATH}/${event.id}/leave">Leave this event</a>${
@@ -1605,6 +1617,26 @@ ${pollForm(`/groups/${membership.group.id}/polls`, csrf, values, error, peopleFi
   });
 
   // "You appear here as…" (§10 rc21): participation is the access check.
+  // Retention (DESIGN §10 rc23): editors only. Not an edit — no revision, history or sync.
+  app.post(`${EVENTS_PATH}/:id/retention`, async (c) => {
+    const me = requireSignedIn(c);
+    if (me instanceof Response) return me;
+    const form = await c.req.parseBody();
+    if (!(await verifyFormCsrf(me, form))) return rejectedPage(c, form);
+    const access = await findEventForParticipant(deps.storage, c.req.param("id"), me.personId);
+    if (access === null || access.participation.visibility === "HIDDEN")
+      return eventNotVisible(c, deps, c.req.param("id"));
+    const days = retainDaysSchema.safeParse(form.retain_days);
+    if (!days.success)
+      return c.html(page(c, "Not saved", html`<h1>Choose one of the periods</h1>`), 400);
+    if (!(await setEventRetention(deps.storage, access, days.data)))
+      return c.html(
+        page(c, "Not allowed", html`<h1>Only the event's editors can change this</h1>`),
+        403,
+      );
+    return c.redirect(`${EVENTS_PATH}/${access.event.id}`, 303);
+  });
+
   app.post(`${EVENTS_PATH}/:id/me`, async (c) => {
     const me = requireSignedIn(c);
     if (me instanceof Response) return me;

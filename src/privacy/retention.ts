@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { Temporal } from "temporal-polyfill";
+import { z } from "zod";
 import { expandOccurrences, MAX_OCCURRENCES, parseRRule } from "../recurrence.js";
 
 // Retention (DESIGN §10 rc21 *Retention*, GDPR Art. 5(1)(e)): which rows are due. Pure —
@@ -12,6 +13,26 @@ import { expandOccurrences, MAX_OCCURRENCES, parseRRule } from "../recurrence.js
 
 /** The default: twelve months. */
 export const DEFAULT_RETAIN_DAYS = 365;
+
+/** The periods a group or event may choose (DESIGN §10 rc23): a short list, nothing for ever. */
+export const RETAIN_CHOICES = [
+  { days: 30, label: "1 month" },
+  { days: 90, label: "3 months" },
+  { days: 180, label: "6 months" },
+  { days: 365, label: "1 year" },
+  { days: 730, label: "2 years" },
+] as const;
+
+/** A form's choice: one of RETAIN_CHOICES, or the form is refused. */
+export const retainDaysSchema = z.coerce
+  .number()
+  .int()
+  .refine((days) => RETAIN_CHOICES.some((c) => c.days === days), "Choose one of the periods.");
+
+/** "1 year"; a value from before the list existed reads as days. */
+export function retainLabel(days: number): string {
+  return RETAIN_CHOICES.find((c) => c.days === days)?.label ?? `${days} days`;
+}
 
 /** Expired rows, and how long the erasure ledger is kept: the backup window plus margin. */
 export const LEDGER_KEEP_DAYS = 35;

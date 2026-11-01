@@ -8,9 +8,11 @@ import {
   createGroup,
   findGroupForMember,
   type GroupMembership,
+  groupRetention,
   leaveGroup,
   listGroupsFor,
   listMembers,
+  setGroupRetention,
 } from "../../people/group.js";
 import {
   acceptInvite,
@@ -21,7 +23,8 @@ import {
   visibilitySchema,
 } from "../../people/invite.js";
 import { appearanceIn, normalizeEmail } from "../../people/person.js";
-import { html, who } from "../layout.js";
+import { retainDaysSchema } from "../../privacy/retention.js";
+import { html, retentionSection, who } from "../layout.js";
 import {
   type AppEnv,
   notVisible,
@@ -196,6 +199,19 @@ ${events.length === 0 ? html`<p class="muted">Nothing planned yet.</p>` : html`<
         )}</ul>
 ${await appearanceSection(deps.storage, { kind: "group", id: membership.group.id }, me, `${GROUPS_PATH}/${membership.group.id}/me`, "group")}
 ${membership.role === "organizer" ? inviteForm(membership, me.csrfToken, null) : ""}
+${retentionSection({
+  days: await groupRetention(deps.storage, membership.group.id),
+  subject: "Events made in this group are",
+  ends: "they end",
+  form:
+    membership.role === "organizer"
+      ? {
+          action: `${GROUPS_PATH}/${membership.group.id}/retention`,
+          csrf: me.csrfToken,
+          note: "A change applies to events made from now on; events already made keep theirs.",
+        }
+      : null,
+})}
 <p class="muted"><a href="${GROUPS_PATH}/${membership.group.id}/leave">Leave this group</a></p>`,
       ),
     );
@@ -250,6 +266,25 @@ ${
     if (membership === null) return c.notFound();
     const id = membership.group.id;
     return saveAppearance(c, deps.storage, { kind: "group", id }, `${GROUPS_PATH}/${id}`);
+  });
+
+  // Retention (DESIGN §10 rc23): organizers only; the domain refuses anyone else too.
+  app.post(`${GROUPS_PATH}/:id/retention`, async (c) => {
+    const me = requireSignedIn(c);
+    if (me instanceof Response) return me;
+    const form = await c.req.parseBody();
+    if (!(await verifyFormCsrf(me, form))) return rejectedPage(c, form);
+    const membership = await findGroupForMember(deps.storage, c.req.param("id"), me.personId);
+    if (membership === null) return c.notFound();
+    const days = retainDaysSchema.safeParse(form.retain_days);
+    if (!days.success)
+      return c.html(page(c, "Not saved", html`<h1>Choose one of the periods</h1>`), 400);
+    if (!(await setGroupRetention(deps.storage, membership, days.data)))
+      return c.html(
+        page(c, "Not allowed", html`<h1>Only the group's organizers can change this</h1>`),
+        403,
+      );
+    return c.redirect(`${GROUPS_PATH}/${membership.group.id}`, 303);
   });
 
   app.post(`${GROUPS_PATH}/:id/invites`, async (c) => {
