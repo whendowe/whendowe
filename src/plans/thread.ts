@@ -268,6 +268,8 @@ export async function leaveThread(
       params: [me, t],
     },
     { sql: "DELETE FROM plan_note WHERE thread_id = ? AND author_id = ?", params: [t, me] },
+    // A vote link outlives nothing it can no longer open (rc26).
+    { sql: "DELETE FROM plan_vote_token WHERE thread_id = ? AND person_id = ?", params: [t, me] },
     {
       sql: `UPDATE plan_thread SET organizer_id =
               (SELECT person_id FROM plan_thread_member WHERE thread_id = ? AND person_id <> ?

@@ -19,6 +19,10 @@ import {
   setAttendance,
 } from "../../events/response.js";
 import type { MailPort } from "../../mail/port.js";
+import { castVote, listPlans, type Plan } from "../../plans/plan.js";
+import { memberName, type ThreadAccess } from "../../plans/thread.js";
+import { resolveVoteLink } from "../../plans/vote-link.js";
+import { spanText, whenText } from "../../plans/weeks.js";
 import { type Html, html, renderPage } from "../layout.js";
 import type { AppEnv } from "../session.js";
 import { BUSY_LABEL, describeRRule, formatWhen } from "./events.js";
@@ -35,6 +39,8 @@ import { BUSY_LABEL, describeRRule, formatWhen } from "./events.js";
 // send no-referrer and no-store, like the sign-in pages.
 
 export const RESPOND_PATH = "/respond";
+/** A thread's vote link (rc26): the same rules, for plans. */
+export const VOTE_PATH = "/vote";
 
 export interface RespondRouteDeps {
   readonly storage: StoragePort;
@@ -163,6 +169,63 @@ ${form}
   );
 }
 
+// --- A thread's vote link (DESIGN §10 rc26) ---------------------------------------------
+
+/** One plan on the table, as the link's person votes on it: a card, then the choices. */
+function votePlan(access: ThreadAccess, p: Plan): Html {
+  const [e, ...more] = p.events;
+  const mine = p.votes.find((v) => v.personId === access.personId)?.answer ?? null;
+  const author = access.members.find((m) => m.personId === p.authorId);
+  const n = (a: Answer) => p.votes.filter((v) => v.answer === a).length;
+  const what =
+    e !== undefined && more.length === 0
+      ? html`<strong>${whenText(e)}</strong>${e.location === null ? "" : html`<br />📍 ${e.location}`}${
+          e.description === null ? "" : html`<br /><span class="muted">${e.description}</span>`
+        }`
+      : html`<strong>${p.name}</strong> · ${p.events.length} events, ${spanText(p.events)}`;
+  return html`<li style="margin-bottom:.8em">${what}<br /><span class="muted">${author === undefined ? "" : `from ${memberName(author)} · `}${n("yes")} yes · ${n("ifneedbe")} if need be · ${n("no")} no</span><br />
+${answerSchema.options.map(
+  (a) =>
+    html`<label style="margin-right:.8em"><input type="radio" name="plan_${p.id}" value="${a}" ${mine === a ? html`checked` : ""} /> ${ANSWER_LABEL[a]}</label>`,
+)}</li>`;
+}
+
+async function votePage(
+  storage: StoragePort,
+  access: ThreadAccess,
+  token: string,
+  notice: Html | string,
+): Promise<string> {
+  const plans = await listPlans(storage, access);
+  const onTable = plans.filter((p) => p.status === "on_table");
+  const body =
+    onTable.length === 0
+      ? html`<p><strong>There's nothing to vote on any more.</strong> Whatever was agreed is in the calendars of everyone in it.</p>`
+      : html`<form method="post" action="${VOTE_PATH}">
+  <input type="hidden" name="t" value="${token}" />
+  <h2>Which of these work for you?</h2>
+  <ul style="list-style:none;padding-left:0">${onTable.map((p) => votePlan(access, p))}</ul>
+  <p><button type="submit">Send my answer</button></p>
+</form>`;
+  return linkPage(
+    "Your vote",
+    html`${notice}<h1>${access.thread.name}</h1>
+${body}
+<p class="muted">This link is just for you — please don't forward it. No account needed.</p>`,
+  );
+}
+
+/** plan_<id> fields → answers; anything else is ignored. */
+function readVotes(form: Record<string, unknown>): Map<string, Answer> {
+  const votes = new Map<string, Answer>();
+  for (const [key, value] of Object.entries(form)) {
+    const id = /^plan_([0-9a-f-]{1,64})$/.exec(key)?.[1];
+    const answer = answerSchema.safeParse(value);
+    if (id !== undefined && answer.success) votes.set(id, answer.data);
+  }
+  return votes;
+}
+
 function readToken(value: unknown): string | null {
   const parsed = tokenSchema.safeParse(value);
   return parsed.success ? parsed.data : null;
@@ -247,6 +310,61 @@ export function registerRespondRoutes(app: Hono<AppEnv>, deps: RespondRouteDeps)
     // Post/redirect/get, so a refresh can't re-send a note. The Location carries the
     // same link the person was emailed; it is never logged (§13).
     const back = new URL(RESPOND_PATH, "http://placeholder");
+    back.searchParams.set("t", token);
+    back.searchParams.set("saved", "1");
+    return c.redirect(`${back.pathname}${back.search}`, 303);
+  });
+
+  app.get(VOTE_PATH, async (c) => {
+    sensitive(c);
+    const token = readToken(c.req.query("t"));
+    const access = token === null ? null : await resolveVoteLink(deps.storage, token, deps.now());
+    if (token === null || access === null) return c.html(deadLink(), 404);
+    const notice =
+      c.req.query("saved") === "1"
+        ? html`<p><strong>Thanks — your vote is saved.</strong> You can change it any time with this link.</p>`
+        : "";
+    return c.html(await votePage(deps.storage, access, token, notice));
+  });
+
+  app.post(VOTE_PATH, async (c) => {
+    sensitive(c);
+    const form = await c.req.parseBody();
+    const token = readToken(form.t);
+    const now = deps.now();
+    // Resolved again on the POST: membership is re-checked at the moment of acting.
+    const access = token === null ? null : await resolveVoteLink(deps.storage, token, now);
+    if (token === null || access === null) return c.html(deadLink(), 404);
+    const votes = readVotes(form);
+    if (votes.size === 0)
+      return c.html(
+        await votePage(
+          deps.storage,
+          access,
+          token,
+          html`<p class="error">Pick an answer first.</p>`,
+        ),
+        400,
+      );
+    let closed = false;
+    let agreed = false;
+    for (const [planId, answer] of votes) {
+      const result = await castVote(deps.storage, access, { planId, answer, now });
+      if (result.kind === "accepted") agreed = true;
+      if (result.kind === "closed" || result.kind === "invalid") closed = true;
+    }
+    // A yes here that agreed a time replaced the rest of its question: not a refusal.
+    if (closed && !agreed)
+      return c.html(
+        await votePage(
+          deps.storage,
+          access,
+          token,
+          html`<p class="error">Something you answered was decided meanwhile. Your other answers are saved.</p>`,
+        ),
+        409,
+      );
+    const back = new URL(VOTE_PATH, "http://placeholder");
     back.searchParams.set("t", token);
     back.searchParams.set("saved", "1");
     return c.redirect(`${back.pathname}${back.search}`, 303);

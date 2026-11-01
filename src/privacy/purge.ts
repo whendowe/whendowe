@@ -316,7 +316,7 @@ async function pastPlans(storage: StoragePort, now: string): Promise<string[]> {
 
 /**
  * Rows whose time is up, within a day: sign-in links (every address ever typed into the
- * form), sessions, answer links and invites a day after they expire or were revoked —
+ * form), sessions, answer and vote links and invites a day after they expire or were revoked —
  * the day keeps the per-address and per-group rate windows whole — mail_send rows from
  * before this month (the cap counts this month only), opt-out links once they expire
  * (they hold the address; rc24), notes on days past their
@@ -344,6 +344,10 @@ async function expired(storage: StoragePort, now: string): Promise<number> {
       stmt: { sql: "DELETE FROM response_token WHERE expires_at < ?", params: [dayAgo] },
     },
     {
+      flag: "vote",
+      stmt: { sql: "DELETE FROM plan_vote_token WHERE expires_at < ?", params: [dayAgo] },
+    },
+    {
       flag: "invite",
       stmt: { sql: "DELETE FROM group_invite WHERE expires_at < ?", params: [dayAgo] },
     },
@@ -369,12 +373,14 @@ async function expired(storage: StoragePort, now: string): Promise<number> {
             EXISTS (SELECT 1 FROM login_token WHERE expires_at < ?) AS login,
             EXISTS (SELECT 1 FROM session WHERE expires_at < ? OR revoked_at < ?) AS session,
             EXISTS (SELECT 1 FROM response_token WHERE expires_at < ?) AS answer,
+            EXISTS (SELECT 1 FROM plan_vote_token WHERE expires_at < ?) AS vote,
             EXISTS (SELECT 1 FROM group_invite WHERE expires_at < ?) AS invite,
             EXISTS (SELECT 1 FROM mail_send WHERE month < ?) AS mail,
             EXISTS (SELECT 1 FROM opt_out_token WHERE expires_at < ?) AS optout,
             EXISTS (SELECT 1 FROM plan_note WHERE last_day < date(?, ?)) AS note,
             EXISTS (SELECT 1 FROM erasure_ledger WHERE erased_at < ?) AS ledger`,
     params: [
+      dayAgo,
       dayAgo,
       dayAgo,
       dayAgo,

@@ -72,6 +72,7 @@ async function containersOf(storage: StoragePort, p: string) {
     ["SELECT id FROM plan_thread WHERE organizer_id = ?", [p]],
     ["SELECT DISTINCT thread_id AS id FROM plan WHERE author_id = ? OR decided_by = ?", [p, p]],
     ["SELECT DISTINCT thread_id AS id FROM plan_note WHERE author_id = ?", [p]],
+    ["SELECT thread_id AS id FROM plan_vote_token WHERE person_id = ?", [p]],
     [
       "SELECT DISTINCT pl.thread_id AS id FROM plan_vote v JOIN plan pl ON pl.id = v.plan_id WHERE v.person_id = ?",
       [p],
@@ -203,6 +204,7 @@ function threadStatements(th: string, p: string, t: string, now: string): SqlSta
       params: [p, th],
     },
     { sql: "DELETE FROM plan_note WHERE thread_id = ? AND author_id = ?", params: [th, p] },
+    { sql: "DELETE FROM plan_vote_token WHERE thread_id = ? AND person_id = ?", params: [th, p] },
     {
       sql: `UPDATE plan_thread SET organizer_id =
               (SELECT person_id FROM plan_thread_member WHERE thread_id = ? AND person_id <> ?
