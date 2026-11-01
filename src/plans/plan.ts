@@ -950,6 +950,96 @@ export async function withdrawPlan(
   return { kind: rows.length === 0 ? "closed" : "withdrawn" };
 }
 
+export type SuggestResult =
+  | { readonly kind: "suggested"; readonly planId: string }
+  /** That exact time is already on the table in this question. */
+  | { readonly kind: "same" }
+  | { readonly kind: "closed" };
+
+/**
+ * "Suggest another time" (DESIGN §10 rc26): a one-event plan on the table answers with
+ * a new one-event plan in the same question — the same event at another time, sent with
+ * the suggester's yes. Every insert is guarded on the base still being on the table, so a
+ * suggestion can't land in a question that was decided meanwhile.
+ */
+export async function suggestTime(
+  storage: StoragePort,
+  access: ThreadAccess,
+  input: {
+    readonly planId: string;
+    readonly startLocal: string;
+    /** Exclusive when all day. */
+    readonly endLocal: string;
+    readonly now: string;
+    readonly newId?: () => string;
+  },
+): Promise<SuggestResult> {
+  const plans = await listPlans(storage, access);
+  const base = plans.find((p) => p.id === input.planId);
+  const [e, ...more] = base?.events ?? [];
+  if (base === undefined || base.status !== "on_table" || e === undefined || more.length > 0)
+    return { kind: "closed" };
+  const t = validatePlanEvent(access, {
+    title: e.title,
+    allDay: e.allDay,
+    startLocal: input.startLocal,
+    endLocal: input.endLocal,
+    who: e.who,
+  });
+  const same = plans.some(
+    (p) =>
+      p.status === "on_table" &&
+      p.questionId === base.questionId &&
+      p.events.some(
+        (x) => x.allDay === t.allDay && x.startLocal === t.startLocal && x.endLocal === t.endLocal,
+      ),
+  );
+  if (same) return { kind: "same" };
+  const newId = input.newId ?? (() => uuidv7());
+  const id = newId();
+  await storage.batch([
+    {
+      sql: `INSERT INTO plan (id, thread_id, author_id, name, answers_id, question_id, status, sent_at, created_at, updated_at)
+            SELECT ?, ?, ?, ?, b.id, b.question_id, 'on_table', ?, ?, ? FROM plan b
+            WHERE b.id = ? AND b.thread_id = ? AND b.status = 'on_table'`,
+      params: [
+        id,
+        access.thread.id,
+        access.personId,
+        base.name,
+        input.now,
+        input.now,
+        input.now,
+        base.id,
+        access.thread.id,
+      ],
+    },
+    {
+      sql: `INSERT INTO plan_event (plan_id, sid, title, all_day, start_local, end_local, who, location, description)
+            SELECT ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM plan WHERE id = ?)`,
+      params: [
+        id,
+        newId(),
+        t.title,
+        t.allDay ? 1 : 0,
+        t.startLocal,
+        t.endLocal,
+        JSON.stringify(t.who),
+        e.location,
+        e.description,
+        id,
+      ],
+    },
+    {
+      sql: `INSERT INTO plan_vote (plan_id, person_id, answer, responded_at)
+            SELECT ?, ?, 'yes', ? WHERE EXISTS (SELECT 1 FROM plan WHERE id = ?)`,
+      params: [id, access.personId, input.now, id],
+    },
+  ]);
+  const made = await storage.query({ sql: "SELECT 1 AS ok FROM plan WHERE id = ?", params: [id] });
+  return made.length === 0 ? { kind: "closed" } : { kind: "suggested", planId: id };
+}
+
 // --- polls (rc26) ---------------------------------------------------------------------
 
 /**

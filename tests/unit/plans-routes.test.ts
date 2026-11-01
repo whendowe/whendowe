@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { expect, it } from "vitest";
+import { findOrCreatePerson } from "../../src/people/person.js";
+import { createPollThread } from "../../src/plans/plan.js";
 import { PLANS_PATH } from "../../src/web/routes/plans.js";
 import {
   addAccount,
@@ -108,6 +110,8 @@ it("two co-parents agree two weeks, with no JavaScript", async () => {
   await switchTo(b, "mara@example.org");
   expect((await home(b)).text).toContain("1 waiting for your vote");
   const asMara = await page(b, planA);
+  // Two weeks are answered with changes, not another time.
+  expect(asMara).not.toContain("Suggest another time");
   expect(asMara).toContain("Suggest changes…");
   expect(asMara).toContain("Accepted when both say yes");
 
@@ -242,4 +246,111 @@ it("leaving a plan thread: the last one out deletes it (§10 rc21)", async () =>
   expect(await page(b, `${t}/leave`)).toContain("Someone else will organize it");
   expect(location(await act(b, `${t}/leave`))).toBe(PLANS_PATH);
   expect((await b.request(t)).status).toBe(404);
+});
+
+it("suggesting another time for a one-event plan: next to it, with your yes (§10 rc26)", async () => {
+  const b = await browser({ now: () => "2101-11-01T09:00:00.000Z" });
+  await addAccount(b, "mara@example.org");
+  await nameActive(b, "mara@example.org");
+  await addAccount(b, "adam@example.org");
+  await nameActive(b, "adam@example.org");
+  const t = await thread(b, "Coffee");
+  await act(b, `${t}/drafts`);
+  await act(b, `${t}/draft/events`, {
+    title: "Coffee",
+    kind: "time",
+    day: "2101-11-07",
+    start: "10:00",
+    length: "60",
+  });
+  const sent = await act(b, `${t}/draft/details`, { name: "", message: "", after: "send" });
+  const planA = location(sent).replace("?sent=1", "");
+  const asAdam = await page(b, planA);
+  expect(asAdam).toContain("Suggest another time");
+  expect(asAdam).toContain(
+    'Starts <input type="datetime-local" name="start" required value="2101-11-07T10:00:00"',
+  );
+  // A drawn event has no place or notes, and says nothing about them.
+  expect(asAdam).not.toContain('class="small">at ');
+  expect(asAdam).not.toContain('class="small notes"');
+  expect((await act(b, `${t}/p/no-such-plan/suggest`, { start: "x", end: "y" })).status).toBe(404);
+
+  await switchTo(b, "mara@example.org");
+  const forged = await b.request(
+    `${planA}/suggest`,
+    post({ csrf: "nope", start: "2101-11-08T10:00", end: "2101-11-08T11:00" }),
+  );
+  expect(forged.status).toBe(403);
+  const backwards = await act(b, `${planA}/suggest`, {
+    start: "2101-11-08T11:00",
+    end: "2101-11-08T10:00",
+  });
+  expect(backwards.status).toBe(400);
+  const res = await act(b, `${planA}/suggest`, {
+    start: "2101-11-08T10:00",
+    end: "2101-11-08T11:00",
+  });
+  expect(location(res)).toMatch(/\/p\/[0-9a-f-]+\?sent=1$/);
+  const planB = location(res).replace("?sent=1", "");
+  expect(planB).not.toBe(planA);
+  expect(await page(b, location(res))).toContain("Sent, with your yes.");
+  const twice = await act(b, `${planA}/suggest`, {
+    start: "2101-11-08T10:00",
+    end: "2101-11-08T11:00",
+  });
+  expect(twice.status).toBe(409);
+  expect(await twice.text()).toContain("That time is already on the table.");
+
+  // Adam's yes agrees Mara's time, and the question is closed to more.
+  await switchTo(b, "adam@example.org");
+  await act(b, `${planB}/vote`, { answer: "yes" });
+  expect(await page(b, planB)).toContain("Both said yes to it");
+  const late = await act(b, `${planA}/suggest`, {
+    start: "2101-11-09T10:00",
+    end: "2101-11-09T11:00",
+  });
+  expect(late.status).toBe(409);
+  expect(await late.text()).toContain("This plan is no longer on the table.");
+});
+
+it("a poll's time shows its place and notes, escaped (§10 rc26)", async () => {
+  const now = "2101-11-01T09:00:00.000Z";
+  const b = await browser({ now: () => now });
+  await addAccount(b, "mara@example.org");
+  await addAccount(b, "adam@example.org");
+  const [mara, adam] = await Promise.all(
+    ["mara@example.org", "adam@example.org"].map((e) => findOrCreatePerson(b.storage, e, { now })),
+  );
+  const { threadId, planIds } = await createPollThread(b.storage, {
+    creatorId: mara?.id ?? "",
+    group: null,
+    fields: {
+      title: "Picnic",
+      location: "<b>The park</b>",
+      description: "Bring a cake\n<i>and plates</i>",
+      allDay: true,
+      tzid: null,
+    },
+    candidates: [
+      { startLocal: "2101-11-21", endLocal: "2101-11-22" },
+      { startLocal: "2101-11-14", endLocal: "2101-11-15" },
+    ],
+    people: [adam?.id ?? ""],
+    now,
+  });
+  const text = await page(b, `${PLANS_PATH}/${threadId}/p/${planIds[0]}`);
+  expect(text).toContain("at &lt;b&gt;The park&lt;/b&gt;");
+  expect(text).toContain('<p class="small notes">Bring a cake\n&lt;i&gt;and plates&lt;/i&gt;</p>');
+  // All day: the form shows the last day, not the exclusive end.
+  expect(text).toContain('From <input type="date" name="start" required value="2101-11-14"');
+  expect(text).toContain(
+    'To (the last day) <input type="date" name="end" required value="2101-11-14"',
+  );
+  // …and reads it back as one: the 28th alone, stored as ending on the 29th.
+  const res = await b.request(
+    `${PLANS_PATH}/${threadId}/p/${planIds[0]}/suggest`,
+    post({ csrf: (await home(b)).csrf, start: "2101-11-28", end: "2101-11-28" }),
+  );
+  expect(res.status).toBe(303);
+  expect(await page(b, location(res))).toContain("Mon 28 Nov");
 });

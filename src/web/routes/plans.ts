@@ -27,6 +27,7 @@ import {
   sendDraft,
   setDraftDetails,
   startDraft,
+  suggestTime,
   updateDraftEvent,
   withdrawPlan,
 } from "../../plans/plan.js";
@@ -502,10 +503,25 @@ function oneEventCard(v: View, plan: Plan, base: Plan | null): Html | null {
   if (e === undefined || more.length > 0 || (base !== null && base.events.length > 1)) return null;
   const was = base?.events[0];
   return html`<div class="card"><span class="sw" style="--x:${colour(v, e)}"></span><span class="when">${whenText(e)}</span><span><strong>${e.title}</strong> · for ${whoText(e.who, v.nameOf)}</span>${
+    e.location === null ? "" : html`<span class="small">at ${e.location}</span>`
+  }${
     was !== undefined && was.sid === e.sid && whenText(was) !== whenText(e)
       ? html`<span class="muted small">was ${whenText(was)}</span>`
       : ""
-  }</div>`;
+  }${e.description === null ? "" : html`<p class="small notes">${e.description}</p>`}</div>`;
+}
+
+/** Another time for a one-event plan on the table (rc26): its own times, prefilled. */
+function suggestForm(v: View, p: Plan): Html | string {
+  const [e, ...more] = p.events;
+  if (e === undefined || more.length > 0) return "";
+  const kind = e.allDay ? "date" : "datetime-local";
+  const end = e.allDay ? addDays(e.endLocal, -1) : e.endLocal;
+  return html`<details class="suggest"><summary>Suggest another time</summary>
+<form method="post" action="${planPath(v.access.thread.id, p.id)}/suggest"><input type="hidden" name="csrf" value="${v.csrf}" />
+<p><label>${e.allDay ? "From" : "Starts"} <input type="${kind}" name="start" required value="${e.startLocal}" /></label>
+<label>${e.allDay ? "To (the last day)" : "Ends"} <input type="${kind}" name="end" required value="${end}" /></label></p>
+<p><button type="submit">Suggest it</button> <span class="small muted">It goes on the table next to this one, with your yes.</span></p></form></details>`;
 }
 
 function planSheet(
@@ -559,6 +575,7 @@ function planSheet(
     html`<button type="submit" name="answer" value="${a}" aria-pressed="${mine === a ? "true" : "false"}">${label}</button>`;
   return html`${sent}${about}
 <form method="post" action="${here}/vote" class="seg" role="group" aria-label="Your vote">${csrf}${voteButton("yes", "Yes")}${voteButton("ifneedbe", "If need be")}${voteButton("no", "No")}</form>
+${suggestForm(v, p)}
 <div class="spread"><div class="row">${organizer ? html`<a class="btn primary" href="${here}?confirm=1">Accept…</a>` : ""}${startForm(
     v,
     p.authorId === v.access.personId ? "Change it…" : "Suggest changes…",
@@ -1186,6 +1203,42 @@ ${
       );
     }
     return c.redirect(planPath(r.access.thread.id, planId), 303);
+  });
+
+  app.post(`${PLANS_PATH}/:thread/p/:plan/suggest`, async (c) => {
+    const r = await posting(c);
+    if (r instanceof Response) return r;
+    const planId = c.req.param("plan");
+    const again = async (why: string, status: 400 | 409) => {
+      const v = await load(deps, r.access, r.me);
+      const p = v.plans.find((x) => x.id === planId);
+      if (p === undefined) return notFound(c);
+      return c.html(page(c, p.name, planPage(v, p, planQuery(c), deps, why)), status);
+    };
+    const start = str(r.form, "start");
+    const end = str(r.form, "end");
+    // Whole days are inclusive on the form, exclusive when stored.
+    const endLocal = DAY.test(start) && DAY.test(end) ? addDays(end, 1) : end;
+    try {
+      const result = await suggestTime(deps.storage, r.access, {
+        planId,
+        startLocal: start,
+        endLocal,
+        now: deps.now(),
+      });
+      if (result.kind === "suggested")
+        return c.redirect(`${planPath(r.access.thread.id, result.planId)}?sent=1`, 303);
+      return again(
+        result.kind === "same"
+          ? "That time is already on the table."
+          : "This plan is no longer on the table.",
+        409,
+      );
+    } catch (err) {
+      const message = problem(err);
+      if (message === null) throw err;
+      return again(message, 400);
+    }
   });
 
   app.post(`${PLANS_PATH}/:thread/p/:plan/accept`, async (c) => {

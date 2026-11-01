@@ -168,6 +168,7 @@ export const PLAN_STYLE = html`<style>
   .pl .list li { padding: 5px 10px; border-radius: 8px; background: var(--tile); }
   .pl .card { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; background: var(--card); display: grid; gap: 4px; }
   .pl .card .when { font-weight: 700; font-size: 1.05rem; }
+  .pl .card .notes { white-space: pre-line; margin: 0; }
 </style>`;
 
 // The week-row editor script (slice P4). Progressive enhancement, never a replacement:

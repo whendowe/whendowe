@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, expect, it } from "vitest";
+import { ZodError } from "zod";
 import type { StoragePort } from "../../src/db/port.js";
 import { findEventForParticipant } from "../../src/events/event.js";
 import { PollInputError } from "../../src/events/poll.js";
@@ -7,11 +8,15 @@ import { createGroup, findGroupForMember, leaveGroup } from "../../src/people/gr
 import { findOrCreatePerson } from "../../src/people/person.js";
 import {
   acceptPlan,
+  addDraftEvent,
   castVote,
   createPollThread,
   findDraft,
   listPlans,
+  sendDraft,
   startDraft,
+  suggestTime,
+  withdrawPlan,
 } from "../../src/plans/plan.js";
 import { findThreadForMember, ThreadInputError } from "../../src/plans/thread.js";
 
@@ -244,6 +249,181 @@ export function runPollPlansContract(makePort: () => Promise<StoragePort>): void
       }
       expect(await findGroupForMember(port, f.group.id, f.david.id)).toBeNull();
       expect((await gate(port, threadId, f.mara.id)).thread.groupId).toBeNull();
+    });
+
+    it("another time joins the same question, with the suggester's yes, and can be accepted", async () => {
+      const port = await makePort();
+      const mara = await person(port, "mara", "f");
+      const david = await person(port, "david", "f");
+      const ana = await person(port, "ana", "f");
+      const { threadId, planIds } = await createPollThread(port, {
+        creatorId: mara.id,
+        group: null,
+        fields: FIELDS,
+        candidates: TIMES,
+        people: [david.id, ana.id],
+        now: T0,
+      });
+      const base = planIds[0] ?? "";
+      const asDavid = await gate(port, threadId, david.id);
+      const sunday = { startLocal: "2101-11-22", endLocal: "2101-11-23" };
+      const result = await suggestTime(port, asDavid, { planId: base, ...sunday, now: T1 });
+      if (result.kind !== "suggested") throw new Error(result.kind);
+      const plans = await listPlans(port, asDavid);
+      const mine = plans.find((p) => p.id === result.planId);
+      expect(mine).toMatchObject({
+        authorId: david.id,
+        status: "on_table",
+        answersId: base,
+        questionId: plans.find((p) => p.id === base)?.questionId,
+        votes: [{ personId: david.id, answer: "yes" }],
+      });
+      expect(mine?.events).toMatchObject([
+        { ...sunday, title: "Birthday party", location: "The park", description: "Bring a cake" },
+      ]);
+      // A time already on the table is not offered twice.
+      expect(
+        await suggestTime(port, asDavid, {
+          planId: base,
+          startLocal: "2101-11-14",
+          endLocal: "2101-11-15",
+          now: T1,
+        }),
+      ).toEqual({ kind: "same" });
+
+      const asMara = await gate(port, threadId, mara.id);
+      expect((await acceptPlan(port, asMara, { planId: result.planId, now: T2 })).kind).toBe(
+        "accepted",
+      );
+      const after = await listPlans(port, asMara);
+      expect(
+        after
+          .filter((p) => p.status === "replaced")
+          .map((p) => p.id)
+          .sort(),
+      ).toEqual([...planIds].sort());
+      // Decided: nothing more joins it.
+      expect(await suggestTime(port, asDavid, { planId: base, ...sunday, now: T2 })).toEqual({
+        kind: "closed",
+      });
+    });
+
+    it("only a one-event plan on the table takes another time; a withdrawn one doesn't block it", async () => {
+      const port = await makePort();
+      const mara = await person(port, "mara", "i");
+      const david = await person(port, "david", "i");
+      const ana = await person(port, "ana", "i");
+      const { threadId, planIds } = await createPollThread(port, {
+        creatorId: mara.id,
+        group: null,
+        fields: FIELDS,
+        candidates: TIMES,
+        people: [david.id, ana.id],
+        now: T0,
+      });
+      const base = planIds[0] ?? "";
+      const asDavid = await gate(port, threadId, david.id);
+      const at = (startLocal: string, endLocal: string, planId = base) =>
+        suggestTime(port, asDavid, { planId, startLocal, endLocal, now: T1 });
+      expect(await at("2101-11-22", "2101-11-23", "no-such-plan")).toEqual({ kind: "closed" });
+
+      // A plan with two events is answered with changes, not another time.
+      await startDraft(port, asDavid, { fromId: null, rest: false, replace: false, now: T1 });
+      for (const [startLocal, endLocal] of [
+        ["2101-12-01", "2101-12-02"],
+        ["2101-12-08", "2101-12-09"],
+      ] as const)
+        await addDraftEvent(port, asDavid, {
+          title: "Two",
+          allDay: true,
+          startLocal,
+          endLocal,
+          who: [],
+          now: T1,
+        });
+      const two = await sendDraft(port, asDavid, { now: T1 });
+      if (two.kind !== "sent") throw new Error(two.kind);
+      expect(await at("2101-12-15", "2101-12-16", two.planId)).toEqual({ kind: "closed" });
+
+      // Same start, longer: another time. Withdrawn, the same time can be offered again.
+      const longer = await at("2101-11-14", "2101-11-16");
+      if (longer.kind !== "suggested") throw new Error(longer.kind);
+      await withdrawPlan(port, asDavid, { planId: longer.planId, now: T2 });
+      expect((await at("2101-11-14", "2101-11-16")).kind).toBe("suggested");
+    });
+
+    it("a time suggested as the question is decided doesn't land in it", async () => {
+      const port = await makePort();
+      const mara = await person(port, "mara", "h");
+      const david = await person(port, "david", "h");
+      const ana = await person(port, "ana", "h");
+      const { threadId, planIds } = await createPollThread(port, {
+        creatorId: mara.id,
+        group: null,
+        fields: FIELDS,
+        candidates: TIMES,
+        people: [david.id, ana.id],
+        now: T0,
+      });
+      const asMara = await gate(port, threadId, mara.id);
+      // Mara accepts between David's read and his write.
+      const racing: StoragePort = {
+        query: (s) => port.query(s),
+        batch: async (s) => {
+          await acceptPlan(port, asMara, { planId: planIds[1] ?? "", now: T1 });
+          return port.batch(s);
+        },
+      };
+      const asDavid = await gate(port, threadId, david.id);
+      expect(
+        await suggestTime(racing, asDavid, {
+          planId: planIds[0] ?? "",
+          startLocal: "2101-11-22",
+          endLocal: "2101-11-23",
+          now: T1,
+        }),
+      ).toEqual({ kind: "closed" });
+      const after = await listPlans(port, asMara);
+      expect(after.filter((p) => p.authorId === david.id)).toEqual([]);
+      expect(after.filter((p) => p.status === "on_table")).toEqual([]);
+    });
+
+    it("between two, a suggested time is agreed by the other's yes", async () => {
+      const port = await makePort();
+      const mara = await person(port, "mara", "g");
+      const david = await person(port, "david", "g");
+      const { threadId, planIds } = await createPollThread(port, {
+        creatorId: mara.id,
+        group: null,
+        fields: { ...FIELDS, allDay: false, tzid: "Europe/Prague" },
+        candidates: [
+          { startLocal: "2101-11-21T15:00", endLocal: "2101-11-21T18:00" },
+          { startLocal: "2101-11-14T15:00", endLocal: "2101-11-14T18:00" },
+        ],
+        people: [david.id],
+        now: T0,
+      });
+      const asDavid = await gate(port, threadId, david.id);
+      const result = await suggestTime(port, asDavid, {
+        planId: planIds[0] ?? "",
+        startLocal: "2101-11-28T15:00",
+        endLocal: "2101-11-28T18:00",
+        now: T1,
+      });
+      if (result.kind !== "suggested") throw new Error(result.kind);
+      // An end before its start is refused as an event's would be.
+      await expect(
+        suggestTime(port, asDavid, {
+          planId: planIds[0] ?? "",
+          startLocal: "2101-11-29T18:00",
+          endLocal: "2101-11-29T15:00",
+          now: T2,
+        }),
+      ).rejects.toBeInstanceOf(ZodError);
+      const asMara = await gate(port, threadId, mara.id);
+      expect(
+        (await castVote(port, asMara, { planId: result.planId, answer: "yes", now: T2 })).kind,
+      ).toBe("accepted");
     });
   });
 }
