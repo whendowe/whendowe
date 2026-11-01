@@ -1020,6 +1020,7 @@ export function registerPlanRoutes(app: Hono<AppEnv>, deps: PlanRouteDeps): void
       );
       memberIds.push(...people.map((p) => p.personId));
       const thread = await createThread(deps.storage, {
+        groupId: groupId === "" ? null : groupId,
         name: values.name,
         tzid: values.tzid === "" ? "UTC" : values.tzid,
         creatorId: me.personId,

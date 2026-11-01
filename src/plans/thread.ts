@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { z } from "zod";
-import type { StoragePort } from "../db/port.js";
+import type { SqlStatement, StoragePort } from "../db/port.js";
 import { uuidv7 } from "../ids.js";
 import { type Shown, shownAs, shownRowSchema } from "../people/person.js";
 import { collect } from "../privacy/purge.js";
@@ -19,6 +19,8 @@ export interface Thread {
   /** The zone of every timed event in the thread. */
   readonly tzid: string;
   readonly createdAt: string;
+  /** The group it was started from, if any (rc27). */
+  readonly groupId: string | null;
 }
 
 export interface ThreadMember {
@@ -89,10 +91,30 @@ export async function createThread(
     readonly tzid: string;
     readonly creatorId: string;
     readonly memberIds: readonly string[];
+    /** The group it is started from, if any (rc27): the caller has proven membership. */
+    readonly groupId?: string | null;
     readonly now: string;
     readonly newId?: () => string;
   },
 ): Promise<Thread> {
+  const { thread, statements } = threadStatements(input);
+  await storage.batch(statements);
+  return thread;
+}
+
+/**
+ * createThread's validation and rows, for a caller that writes more in the same batch
+ * (a poll's times, rc26): a thread without what it was made for must never exist.
+ */
+export function threadStatements(input: {
+  readonly name: string;
+  readonly tzid: string;
+  readonly creatorId: string;
+  readonly memberIds: readonly string[];
+  readonly groupId?: string | null;
+  readonly now: string;
+  readonly newId?: () => string;
+}): { readonly thread: Thread; readonly statements: SqlStatement[] } {
   const name = normalizeThreadName(input.name);
   if (!isTimeZone(input.tzid)) throw new ThreadInputError("Choose a valid time zone.");
   const others = [...new Set(input.memberIds)].filter((id) => id !== input.creatorId);
@@ -100,17 +122,25 @@ export async function createThread(
   if (others.length + 1 > MAX_MEMBERS)
     throw new ThreadInputError(`At most ${MAX_MEMBERS} people plan together.`);
   const id = (input.newId ?? (() => uuidv7()))();
-  await storage.batch([
+  const statements: SqlStatement[] = [
     {
-      sql: "INSERT INTO plan_thread (id, name, organizer_id, tzid, created_at) VALUES (?, ?, ?, ?, ?)",
-      params: [id, name, input.creatorId, input.tzid, input.now],
+      sql: "INSERT INTO plan_thread (id, name, organizer_id, tzid, created_at, group_id) VALUES (?, ?, ?, ?, ?, ?)",
+      params: [id, name, input.creatorId, input.tzid, input.now, input.groupId ?? null],
     },
     ...[input.creatorId, ...others].map((personId) => ({
       sql: "INSERT INTO plan_thread_member (thread_id, person_id, created_at) VALUES (?, ?, ?)",
       params: [id, personId, input.now],
     })),
-  ]);
-  return { id, name, organizerId: input.creatorId, tzid: input.tzid, createdAt: input.now };
+  ];
+  const thread = {
+    id,
+    name,
+    organizerId: input.creatorId,
+    tzid: input.tzid,
+    createdAt: input.now,
+    groupId: input.groupId ?? null,
+  };
+  return { thread, statements };
 }
 
 const threadRowSchema = z.object({
@@ -119,6 +149,7 @@ const threadRowSchema = z.object({
   organizer_id: z.string(),
   tzid: z.string(),
   created_at: z.string(),
+  group_id: z.string().nullable(),
 });
 
 const memberRowSchema = shownRowSchema.extend({
@@ -133,6 +164,7 @@ function toThread(row: unknown): Thread {
     organizerId: r.organizer_id,
     tzid: r.tzid,
     createdAt: r.created_at,
+    groupId: r.group_id,
   };
 }
 
@@ -143,7 +175,7 @@ export async function findThreadForMember(
   personId: string,
 ): Promise<ThreadAccess | null> {
   const rows = await storage.query({
-    sql: `SELECT t.id, t.name, t.organizer_id, t.tzid, t.created_at
+    sql: `SELECT t.id, t.name, t.organizer_id, t.tzid, t.created_at, t.group_id
           FROM plan_thread t JOIN plan_thread_member m ON m.thread_id = t.id
           WHERE t.id = ? AND m.person_id = ?`,
     params: [threadId, personId],
@@ -182,7 +214,7 @@ export async function listThreadsFor(
   personId: string,
 ): Promise<ThreadSummary[]> {
   const rows = await storage.query({
-    sql: `SELECT t.id, t.name, t.organizer_id, t.tzid, t.created_at,
+    sql: `SELECT t.id, t.name, t.organizer_id, t.tzid, t.created_at, t.group_id,
             (SELECT count(*) FROM plan_thread_member c WHERE c.thread_id = t.id) AS member_count,
             (SELECT count(*) FROM plan p WHERE p.thread_id = t.id AND p.status = 'on_table'
                AND NOT EXISTS (SELECT 1 FROM plan_vote v WHERE v.plan_id = p.id AND v.person_id = ?)) AS waiting,

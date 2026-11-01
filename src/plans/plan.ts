@@ -2,11 +2,25 @@
 import { z } from "zod";
 import { diff } from "../changelog.js";
 import type { SqlStatement, StoragePort } from "../db/port.js";
-import { eventFieldsSchema, flatten } from "../events/event.js";
-import { type Answer, answerSchema } from "../events/poll.js";
+import { type EventFieldsInput, eventFieldsSchema, flatten } from "../events/event.js";
+import { groupDefaults } from "../events/participation.js";
+import {
+  type Answer,
+  answerSchema,
+  type CandidateTimeInput,
+  PollInputError,
+  validateCandidates,
+} from "../events/poll.js";
 import { uuidv7 } from "../ids.js";
+import type { GroupMembership } from "../people/group.js";
 import { type PlanEventLike, sameTime } from "./diff.js";
-import { deciders, decidesByConsensus, memberName, type ThreadAccess } from "./thread.js";
+import {
+  deciders,
+  decidesByConsensus,
+  memberName,
+  type ThreadAccess,
+  threadStatements,
+} from "./thread.js";
 
 // Plans (DESIGN §10 rc19, slice P1): several events proposed, compared and accepted as
 // one. Every operation takes the ThreadAccess that findThreadForMember returned, so no
@@ -19,7 +33,13 @@ import { deciders, decidesByConsensus, memberName, type ThreadAccess } from "./t
 const statusSchema = z.enum(["draft", "on_table", "accepted", "replaced", "withdrawn"]);
 export type PlanStatus = z.infer<typeof statusSchema>;
 
-export interface PlanEvent extends PlanEventLike {
+/** A poll's place and notes, copied to each time it offers (rc26); null on drawn plans. */
+export interface PlanEventDetails {
+  readonly location: string | null;
+  readonly description: string | null;
+}
+
+export interface PlanEvent extends PlanEventLike, PlanEventDetails {
   /** The scheduled event this became when its plan was accepted; null before. */
   readonly canonicalEventId: string | null;
 }
@@ -221,6 +241,8 @@ const eventRowSchema = z.object({
   start_local: z.string(),
   end_local: z.string(),
   who: z.string(),
+  location: z.string().nullable(),
+  description: z.string().nullable(),
   canonical_event_id: z.string().nullable(),
 });
 
@@ -245,6 +267,8 @@ function toPlanEvent(row: z.infer<typeof eventRowSchema>): PlanEvent {
     startLocal: row.start_local,
     endLocal: row.end_local,
     who: whoSchema.parse(JSON.parse(row.who)),
+    location: row.location,
+    description: row.description,
     canonicalEventId: row.canonical_event_id,
   };
 }
@@ -267,7 +291,7 @@ export async function listPlans(storage: StoragePort, access: ThreadAccess): Pro
   const events = (
     await storage.query({
       sql: `SELECT e.plan_id, e.sid, e.title, e.all_day, e.start_local, e.end_local, e.who,
-              e.canonical_event_id
+              e.location, e.description, e.canonical_event_id
             FROM plan_event e JOIN plan p ON p.id = e.plan_id WHERE ${scope}`,
       params,
     })
@@ -408,10 +432,11 @@ export function validatePlanEvent(
 
 const DRAFT = "(SELECT id FROM plan WHERE thread_id = ? AND author_id = ? AND status = 'draft')";
 
-function insertEvent(planId: string, e: PlanEventLike): SqlStatement {
+/** A copy keeps a poll's place and notes (rc26); an event drawn afresh has none. */
+function insertEvent(planId: string, e: PlanEventLike & Partial<PlanEventDetails>): SqlStatement {
   return {
-    sql: `INSERT INTO plan_event (plan_id, sid, title, all_day, start_local, end_local, who)
-          VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    sql: `INSERT INTO plan_event (plan_id, sid, title, all_day, start_local, end_local, who, location, description)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     params: [
       planId,
       e.sid,
@@ -420,6 +445,8 @@ function insertEvent(planId: string, e: PlanEventLike): SqlStatement {
       e.startLocal,
       e.endLocal,
       JSON.stringify(e.who),
+      e.location ?? null,
+      e.description ?? null,
     ],
   };
 }
@@ -821,8 +848,8 @@ async function accept(
     const tzid = e.allDay ? null : access.thread.tzid;
     const fields = {
       title: e.title,
-      description: null,
-      location: null,
+      description: e.description,
+      location: e.location,
       allDay: e.allDay,
       startLocal: e.startLocal,
       endLocal: e.endLocal,
@@ -831,21 +858,27 @@ async function accept(
     };
     statements.push(
       {
+        // The thread's group, if any, is the event's provenance and gives its period (rc27).
         sql: `INSERT INTO canonical_event
                 (id, revision, origin, owner_id, group_id, title, description, location, all_day,
-                 start_local, end_local, tzid, rrule, status, created_at, updated_at)
-              SELECT ?, 1, 'user_edit', ?, NULL, ?, NULL, NULL, ?, ?, ?, ?, NULL, 'scheduled', ?, ?
+                 start_local, end_local, tzid, rrule, status, created_at, updated_at, retain_days)
+              SELECT ?, 1, 'user_edit', ?, g.id, ?, ?, ?, ?, ?, ?, ?, NULL, 'scheduled', ?, ?,
+                     coalesce(g.retain_days, 365)
+              FROM (SELECT 1) LEFT JOIN person_group g ON g.id = ?
               WHERE ${guard}`,
         params: [
           eventId,
           owner,
           e.title,
+          e.description,
+          e.location,
           e.allDay ? 1 : 0,
           e.startLocal,
           e.endLocal,
           tzid,
           input.now,
           input.now,
+          access.thread.groupId,
           ...g,
         ],
       },
@@ -857,6 +890,25 @@ async function accept(
                 'FULL', 'none', ?
               FROM plan_thread_member m WHERE m.thread_id = ? AND ${guard}`,
         params: [eventId, editors, input.now, access.thread.id, ...g],
+      },
+      // The group's members who see only busy time weren't asked; they get the result,
+      // at their usual terms — those in it when the thread started, never later (rc27).
+      {
+        sql: `INSERT INTO event_participation
+                (canonical_event_id, person_id, edit_tier, visibility, response_kind, created_at)
+              SELECT ?, gm.person_id, gm.default_edit_tier, gm.default_visibility, 'none', ?
+              FROM group_member gm
+              WHERE gm.group_id = ? AND gm.default_visibility = 'BUSY' AND gm.joined_at <= ?
+                AND gm.person_id NOT IN (SELECT person_id FROM plan_thread_member WHERE thread_id = ?)
+                AND ${guard}`,
+        params: [
+          eventId,
+          input.now,
+          access.thread.groupId,
+          access.thread.createdAt,
+          access.thread.id,
+          ...g,
+        ],
       },
       {
         sql: `INSERT INTO change_log (canonical_event_id, revision, actor, source, diff, created_at)
@@ -896,4 +948,93 @@ export async function withdrawPlan(
     params: [input.now, input.now, input.planId, access.thread.id, access.personId],
   });
   return { kind: rows.length === 0 ? "closed" : "withdrawn" };
+}
+
+// --- polls (rc26) ---------------------------------------------------------------------
+
+/**
+ * "Find a time" (DESIGN §10 rc26 *Polls are one-event plans*): a thread named for the
+ * poll, one plan per offered time — all on the table in one question, sent by the creator
+ * with a yes to each — in ONE batch, so a poll without its times never exists.
+ *
+ * Its members are the creator, the people named by address, and a group's members whose
+ * usual terms there show at least title, time and place: a thread shows all of that to
+ * everyone in it. Members who see only busy time get the accepted event, not a vote.
+ */
+export async function createPollThread(
+  storage: StoragePort,
+  input: {
+    readonly creatorId: string;
+    readonly group: GroupMembership | null;
+    readonly fields: Omit<EventFieldsInput, "startLocal" | "endLocal">;
+    readonly candidates: readonly CandidateTimeInput[];
+    /** People named by address (resolveInvitees): members, whatever terms were typed. */
+    readonly people?: readonly string[];
+    readonly now: string;
+    readonly newId?: () => string;
+  },
+): Promise<{ readonly threadId: string; readonly planIds: readonly string[] }> {
+  const newId = input.newId ?? (() => uuidv7());
+  const times = validateCandidates(input.fields, input.candidates);
+  const first = times[0];
+  if (first === undefined) throw new PollInputError("Offer at least one time.");
+  const f = eventFieldsSchema.parse({
+    ...input.fields,
+    startLocal: first.startLocal,
+    endLocal: first.endLocal,
+  });
+  const fromGroup =
+    input.group === null
+      ? []
+      : (await groupDefaults(storage, input.group))
+          .filter((d) => d.visibility === "FULL" || d.visibility === "DETAILS")
+          .map((d) => d.personId);
+  const { thread, statements } = threadStatements({
+    name: f.title,
+    tzid: f.tzid ?? "UTC",
+    creatorId: input.creatorId,
+    memberIds: [...fromGroup, ...(input.people ?? [])],
+    groupId: input.group?.group.id ?? null,
+    now: input.now,
+    newId,
+  });
+  // Ids sorted, then given out in time order: letters follow sent_at then id, and every
+  // time is sent at the same moment.
+  const ids = times.map(() => newId()).sort();
+  const questionId = ids[0] ?? "";
+  times.forEach((t, i) => {
+    const planId = ids[i] ?? "";
+    statements.push(
+      {
+        sql: `INSERT INTO plan (id, thread_id, author_id, name, question_id, status, sent_at, created_at, updated_at)
+              VALUES (?, ?, ?, ?, ?, 'on_table', ?, ?, ?)`,
+        params: [
+          planId,
+          thread.id,
+          input.creatorId,
+          f.title,
+          questionId,
+          input.now,
+          input.now,
+          input.now,
+        ],
+      },
+      insertEvent(planId, {
+        sid: newId(),
+        title: f.title,
+        allDay: t.allDay,
+        startLocal: t.startLocal,
+        endLocal: t.endLocal,
+        who: [],
+        location: f.location,
+        description: f.description,
+      }),
+      {
+        sql: "INSERT INTO plan_vote (plan_id, person_id, answer, responded_at) VALUES (?, ?, 'yes', ?)",
+        params: [planId, input.creatorId, input.now],
+      },
+    );
+  });
+  await storage.batch(statements);
+  return { threadId: thread.id, planIds: ids };
 }

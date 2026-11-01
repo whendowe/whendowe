@@ -520,6 +520,9 @@ export const planThread = sqliteTable("plan_thread", {
     .references(() => person.id, { onDelete: "cascade" }),
   tzid: text("tzid").notNull(),
   createdAt: text("created_at").notNull(),
+  // rc27: the group it was started from, if any — accepting gives that group's BUSY
+  // members the result, and the events take it as their provenance.
+  groupId: text("group_id").references(() => personGroup.id, { onDelete: "set null" }),
 });
 
 export const planThreadMember = sqliteTable(
@@ -592,6 +595,9 @@ export const planEvent = sqliteTable(
     startLocal: text("start_local").notNull(),
     endLocal: text("end_local").notNull(),
     who: text("who").notNull().default("[]"),
+    // rc26: a poll's place and notes, copied to each time it offers. Escaped on render.
+    location: text("location"),
+    description: text("description"),
     canonicalEventId: text("canonical_event_id").references(() => canonicalEvent.id, {
       onDelete: "set null",
     }),
@@ -718,4 +724,22 @@ export const optOutToken = sqliteTable(
     expiresAt: text("expires_at").notNull(),
   },
   (t) => [index("opt_out_token_email_idx").on(t.email)],
+);
+
+// rc26: the account-less vote link for a thread — one person × one thread, re-answerable
+// for 14 days; issuing again replaces it (§13 token links). Only the hash is stored.
+export const planVoteToken = sqliteTable(
+  "plan_vote_token",
+  {
+    tokenHash: text("token_hash").primaryKey(),
+    threadId: text("thread_id")
+      .notNull()
+      .references(() => planThread.id, { onDelete: "cascade" }),
+    personId: text("person_id")
+      .notNull()
+      .references(() => person.id, { onDelete: "cascade" }),
+    expiresAt: text("expires_at").notNull(),
+    createdAt: text("created_at").notNull(),
+  },
+  (t) => [unique("plan_vote_token_thread_person_uq").on(t.threadId, t.personId)],
 );
