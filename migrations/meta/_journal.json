@@ -127,6 +127,13 @@
       "when": 1793482539149,
       "tag": "0017_retention",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "6",
+      "when": 1793541185045,
+      "tag": "0018_opt_out",
+      "breakpoints": true
     }
   ]
 }

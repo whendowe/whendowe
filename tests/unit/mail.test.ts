@@ -19,6 +19,7 @@ const MESSAGE: MailMessage = {
   to: "player@example.com",
   subject: "Your sign-in link",
   text: "https://whendowe.org/auth/confirm?t=SECRET-TOKEN-VALUE",
+  cause: { kind: "self" },
 };
 const FROM = { address: "login@notify.whendowe.org", name: "WhenDoWe" };
 const NOW = "2101-06-01T12:00:00.000Z";

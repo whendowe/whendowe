@@ -57,7 +57,7 @@ async function access(port: StoragePort, eventId: string, personId: string): Pro
 }
 
 /** Every row of every table, as text, but the ledger: where else might they be? */
-async function everywhere(port: StoragePort): Promise<string> {
+export async function everywhere(port: StoragePort): Promise<string> {
   const tables = (
     await port.query({
       sql: "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%' AND name <> 'erasure_ledger'",

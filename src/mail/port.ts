@@ -13,7 +13,24 @@ export interface MailMessage {
    * anonymous share as well as the whole (DESIGN §13 rc21).
    */
   readonly anonymous?: boolean;
+  /**
+   * What caused it (DESIGN §10 rc24): the address's own request (a sign-in link, the
+   * deletion email), which no opt-out stops; or someone else, perhaps through a group,
+   * which an opt-out may stop and which carries the opt-out link. Required, so no send
+   * can leave it out.
+   */
+  readonly cause: MailCause;
 }
+
+export type MailCause =
+  | { readonly kind: "self" }
+  | {
+      readonly kind: "from";
+      readonly senderId: string;
+      readonly groupId: string | null;
+      /** "dm invited you to “Thursday Table”": the footer's "You got this because …". */
+      readonly why: string;
+    };
 
 export interface MailPort {
   send(message: MailMessage): Promise<void>;

@@ -362,6 +362,12 @@ ${inviteForm(membership, me.csrfToken, notice)}`,
       await deps.mail.send({
         to: invite.email,
         subject: `${from} invited you to "${membership.group.name}" on WhenDoWe`,
+        cause: {
+          kind: "from",
+          senderId: me.personId,
+          groupId: membership.group.id,
+          why: `${from} invited this address to the group "${membership.group.name}"`,
+        },
         text: [
           `${from} invited you to the group "${membership.group.name}" on WhenDoWe.`,
           "",

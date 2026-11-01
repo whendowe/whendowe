@@ -178,6 +178,9 @@ export const person = sqliteTable("person", {
   // one event, group or thread's history. Its address is '<id>@erased.invalid' (RFC 6761:
   // can never receive mail or sign in).
   erasedAt: text("erased_at"),
+  // rc24: the first session. Null = never signed in, so the opt-out page may offer to delete
+  // everything about the address without signing in (§10 *People who never signed up*).
+  signedInAt: text("signed_in_at"),
 });
 
 export const loginToken = sqliteTable(
@@ -682,4 +685,35 @@ export const accountDeletion = sqliteTable(
     tokenHash: text("token_hash").notNull().unique(),
   },
   (t) => [index("account_deletion_due_idx").on(t.eraseAfter)],
+);
+
+// rc24: opt-outs (§10 *People who never signed up*). No address is stored: the SHA-256 of
+// the normalised address, scoped to everyone, one group, or one person who sends.
+export const mailSuppression = sqliteTable(
+  "mail_suppression",
+  {
+    addressHash: text("address_hash").notNull(),
+    scope: text("scope").notNull(),
+    scopeId: text("scope_id").notNull().default(""),
+    createdAt: text("created_at").notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.addressHash, t.scope, t.scopeId] }),
+    check("mail_suppression_scope_chk", sql`${t.scope} IN ('all', 'group', 'person')`),
+  ],
+);
+
+// rc24: the opt-out link in every email someone else caused, one per send, for 90 days.
+// Keyed by address: an invite or answer link may go to an address no person has yet.
+export const optOutToken = sqliteTable(
+  "opt_out_token",
+  {
+    tokenHash: text("token_hash").primaryKey(),
+    email: text("email").notNull(),
+    senderId: text("sender_id").references(() => person.id, { onDelete: "cascade" }),
+    groupId: text("group_id").references(() => personGroup.id, { onDelete: "set null" }),
+    createdAt: text("created_at").notNull(),
+    expiresAt: text("expires_at").notNull(),
+  },
+  (t) => [index("opt_out_token_email_idx").on(t.email)],
 );

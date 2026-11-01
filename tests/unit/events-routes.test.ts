@@ -566,6 +566,12 @@ it("an organizer emails vote links: everyone but themself, and no title in a BUS
   const grandma = mails.find((m) => m.to === "grandma@example.org");
   expect(ann?.subject).toContain("Session 13");
   expect(`${grandma?.subject} ${grandma?.text}`).not.toContain("Session 13");
+  // It came through the group, so its opt-out link can stop the group's mail (rc24).
+  const t =
+    new URL(
+      /https:\/\/\S+\/opt-out\?t=\S+/.exec(grandma?.text ?? "")?.[0] ?? "https://x/",
+    ).searchParams.get("t") ?? "";
+  expect(await text(h, `/opt-out?t=${t}`)).toContain("Stop emails through “Thursday Table”");
 });
 
 it("a player votes from the link with no account: GET changes nothing, POST saves, nobody is signed in", async () => {

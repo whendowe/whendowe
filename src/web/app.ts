@@ -3,6 +3,7 @@ import { Hono } from "hono";
 import { revokeGoogleGrant } from "../oauth/token-exchange.js";
 import { findPersonById } from "../people/person.js";
 import type { RevokeCalendars } from "../privacy/erasure.js";
+import { suppressingMailPort } from "../privacy/suppression.js";
 import { securityHeaders } from "./csp.js";
 import { ACCOUNT_PATH, html } from "./layout.js";
 import { registerAccountRoutes } from "./routes/account.js";
@@ -50,7 +51,18 @@ export function calendarRevoker(oauth: OAuthRouteDeps | undefined): RevokeCalend
 
 export function createApp(options: AppOptions = {}): Hono<AppEnv> {
   const app = new Hono<AppEnv>();
-  const { auth, oauth } = options;
+  const { oauth } = options;
+  // Every send passes the opt-out seam (rc24): here, once, so no route can bypass it.
+  const auth =
+    options.auth === undefined
+      ? undefined
+      : {
+          ...options.auth,
+          mail: suppressingMailPort(options.auth.mail, options.auth.storage, {
+            publicBaseUrl: options.auth.publicBaseUrl,
+            now: options.auth.now,
+          }),
+        };
   // First, so every response — errors and redirects included — carries them (§13 rc21).
   app.use(securityHeaders());
 

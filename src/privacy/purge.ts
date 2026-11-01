@@ -313,7 +313,8 @@ async function pastPlans(storage: StoragePort, now: string): Promise<string[]> {
  * Rows whose time is up, within a day: sign-in links (every address ever typed into the
  * form), sessions, answer links and invites a day after they expire or were revoked —
  * the day keeps the per-address and per-group rate windows whole — mail_send rows from
- * before this month (the cap counts this month only), notes on days past their
+ * before this month (the cap counts this month only), opt-out links once they expire
+ * (they hold the address; rc24), notes on days past their
  * retention, and the erasure ledger after the backup window. One read says which have
  * anything to delete; only those statements run.
  */
@@ -343,6 +344,10 @@ async function expired(storage: StoragePort, now: string): Promise<number> {
     },
     { flag: "mail", stmt: { sql: "DELETE FROM mail_send WHERE month < ?", params: [month] } },
     {
+      flag: "optout",
+      stmt: { sql: "DELETE FROM opt_out_token WHERE expires_at < ?", params: [now] },
+    },
+    {
       flag: "note",
       stmt: {
         sql: "DELETE FROM plan_note WHERE last_day < date(?, ?)",
@@ -361,6 +366,7 @@ async function expired(storage: StoragePort, now: string): Promise<number> {
             EXISTS (SELECT 1 FROM response_token WHERE expires_at < ?) AS answer,
             EXISTS (SELECT 1 FROM group_invite WHERE expires_at < ?) AS invite,
             EXISTS (SELECT 1 FROM mail_send WHERE month < ?) AS mail,
+            EXISTS (SELECT 1 FROM opt_out_token WHERE expires_at < ?) AS optout,
             EXISTS (SELECT 1 FROM plan_note WHERE last_day < date(?, ?)) AS note,
             EXISTS (SELECT 1 FROM erasure_ledger WHERE erased_at < ?) AS ledger`,
     params: [
@@ -370,6 +376,7 @@ async function expired(storage: StoragePort, now: string): Promise<number> {
       dayAgo,
       dayAgo,
       month,
+      now,
       now,
       `-${DEFAULT_RETAIN_DAYS + 1} days`,
       ledgerBefore,

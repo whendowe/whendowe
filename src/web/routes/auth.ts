@@ -194,6 +194,8 @@ export function registerAuthRoutes(
         subject: "Your WhenDoWe sign-in link",
         // Anyone can ask for one, signed in or not: it draws on the anonymous share.
         anonymous: true,
+        // Asked for on our own form: no opt-out stops it (rc24).
+        cause: { kind: "self" },
         text: [
           "Sign in to WhenDoWe:",
           "",

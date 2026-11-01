@@ -44,6 +44,11 @@ export async function createSession(
             VALUES (?, ?, ?, ?, ?)`,
       params: [sessionId, hash, personId, options.now, expiresAt],
     },
+    // The first session marks the person as having signed in (rc24).
+    {
+      sql: "UPDATE person SET signed_in_at = ? WHERE id = ? AND signed_in_at IS NULL",
+      params: [options.now, personId],
+    },
   ]);
   return { token, sessionId, expiresAt };
 }

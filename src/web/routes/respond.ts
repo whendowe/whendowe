@@ -309,6 +309,13 @@ export async function sendResponseLink(
   await mail.send({
     to: link.email,
     subject,
+    // The sender is whoever asked; never the title here, which a BUSY inbox mustn't see.
+    cause: {
+      kind: "from",
+      senderId: access.participation.personId,
+      groupId: access.event.groupId,
+      why: `${from} added this address to an event on WhenDoWe`,
+    },
     text: [
       ask,
       "",

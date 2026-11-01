@@ -23,6 +23,13 @@ import {
   requestDeletion,
 } from "../../privacy/erasure.js";
 import { exportPerson } from "../../privacy/export.js";
+import {
+  deleteEverything,
+  OPT_OUT_PATH,
+  type OptOutLink,
+  peekOptOut,
+  suppress,
+} from "../../privacy/suppression.js";
 import { ACCOUNT_PATH, appearanceForm, deletionDay, html, KEEP_ACCOUNT_PATH } from "../layout.js";
 import {
   type AppEnv,
@@ -46,6 +53,10 @@ import type { AuthDeps } from "./auth.js";
 //   POST /account/keep     keep it, signed in during the wait
 //   GET  /account/deletion the emailed link: keep it, or delete it now (GET renders)
 //   POST /account/deletion …and acts
+//   GET  /opt-out          the link in every email someone else caused (rc24): stop
+//                          their mail, a group's, or everyone's; delete everything if
+//                          the address never signed in
+//   POST /opt-out          …and acts
 //
 // And the POST every group, event and thread page uses for "you appear here as…"
 // (saveAppearance below), so the three behave the same.
@@ -95,6 +106,46 @@ ${error === null ? "" : html`<p class="error">${error}</p>`}
 <h2>Your data</h2>
 <p><a href="${EXPORT_PATH}">Download everything about you</a> <span class="muted">(one file: your groups, events, plans and what you said in them)</span></p>
 <p><a href="${DELETE_ACCOUNT_PATH}">Delete your account</a></p>`;
+}
+
+function optOutGonePage(c: Context<AppEnv>) {
+  return page(
+    c,
+    "Link no longer works",
+    html`<h1>This link has expired</h1>
+<p>Each email has its own link, and it works for 90 days. If these emails keep coming, the newest one has a link that works.</p>`,
+  );
+}
+
+/** Who sent it and through which group, named as that group sees them; null if gone. */
+async function optOutNames(storage: StoragePort, link: OptOutLink) {
+  const group =
+    link.groupId === null
+      ? null
+      : (z
+          .object({ name: z.string() })
+          .optional()
+          .parse(
+            (
+              await storage.query({
+                sql: "SELECT name FROM person_group WHERE id = ?",
+                params: [link.groupId],
+              })
+            )[0],
+          )?.name ?? null);
+  let sender: string | null = null;
+  if (link.senderId !== null) {
+    const inGroup =
+      link.groupId === null
+        ? null
+        : await appearanceIn(storage, { kind: "group", id: link.groupId }, link.senderId);
+    const person = await findPersonById(storage, link.senderId);
+    sender =
+      inGroup?.shown.name ??
+      person?.displayName ??
+      (person === null ? null : "the person who sent it");
+  }
+  return { group, sender };
 }
 
 /** The first ZodError message, for a form; anything else is a bug and propagates. */
@@ -192,6 +243,7 @@ ${loses.length === 0 ? "" : html`<p class="error">${loses.join(". ")}. To keep t
       await deps.mail.send({
         to: me.email,
         subject: `Your WhenDoWe account will be deleted on ${day}`,
+        cause: { kind: "self" },
         text: [
           `You asked to delete your WhenDoWe account, ${me.email}. It will be deleted on ${day}.`,
           "",
@@ -285,6 +337,79 @@ ${button("now", "Delete it now")}`,
         html`<h1>Your account is deleted</h1><p>Thank you for using WhenDoWe.</p><p><a href="/">Home</a></p>`,
       ),
     );
+  });
+
+  // The opt-out link (rc24). No session: the link is the authority, re-checked on POST.
+  app.get(OPT_OUT_PATH, async (c) => {
+    sensitive(c);
+    const token = tokenSchema.safeParse(c.req.query("t"));
+    const link = token.success ? await peekOptOut(deps.storage, token.data, deps.now()) : null;
+    if (!token.success || link === null) return c.html(optOutGonePage(c), 400);
+    const names = await optOutNames(deps.storage, link);
+    const button = (action: string, label: string) =>
+      html`<form method="post" action="${OPT_OUT_PATH}">
+  <input type="hidden" name="t" value="${token.data}" />
+  <input type="hidden" name="do" value="${action}" />
+  <p><button type="submit">${label}</button></p>
+</form>`;
+    return c.html(
+      page(
+        c,
+        "Stop these emails",
+        html`<h1>Stop emails to ${link.email}</h1>
+<p class="muted">Sign-in links you ask for yourself still arrive: none of these stop you signing in.</p>
+${names.sender === null ? "" : button("person", `Stop emails from ${names.sender}`)}
+${names.group === null ? "" : button("group", `Stop emails through “${names.group}”`)}
+${button("all", "Stop emails from anyone on WhenDoWe")}
+${
+  link.neverSignedIn
+    ? html`<h2>Or delete everything</h2>
+<p>This address has never signed in. Deleting removes it from every group, event and plan it was added to, at once, and stops all email to it. This can't be undone.</p>
+${button("delete", "Delete everything about this address")}`
+    : html`<p class="muted">This address has an account: to delete it, sign in and choose <a href="${DELETE_ACCOUNT_PATH}">Delete your account</a>.</p>`
+}`,
+      ),
+    );
+  });
+
+  app.post(OPT_OUT_PATH, async (c) => {
+    sensitive(c);
+    const form = await c.req.parseBody();
+    const token = tokenSchema.safeParse(form.t);
+    const now = deps.now();
+    const link = token.success ? await peekOptOut(deps.storage, token.data, now) : null;
+    if (link === null) return c.html(optOutGonePage(c), 400);
+    const done = (what: string) => c.html(page(c, "Done", html`<h1>Done</h1><p>${what}</p>`));
+    // The scope comes from the link, never the form: a link stops only what it came with.
+    if (form.do === "person" && link.senderId !== null) {
+      await suppress(deps.storage, link.email, { kind: "person", id: link.senderId }, now);
+      return done("You won't get email from that person any more.");
+    }
+    if (form.do === "group" && link.groupId !== null) {
+      await suppress(deps.storage, link.email, { kind: "group", id: link.groupId }, now);
+      return done("You won't get email through that group any more.");
+    }
+    if (form.do === "all") {
+      await suppress(deps.storage, link.email, { kind: "all" }, now);
+      return done(
+        "You won't get email from anyone on WhenDoWe. Sign-in links you ask for still arrive.",
+      );
+    }
+    if (form.do === "delete") {
+      if (!(await deleteEverything(deps.storage, link.email, now)))
+        return c.html(
+          page(
+            c,
+            "Not deleted",
+            html`<h1>Nothing was deleted</h1><p>This address has an account now. To delete it, sign in and choose <a href="${DELETE_ACCOUNT_PATH}">Delete your account</a>.</p>`,
+          ),
+          409,
+        );
+      return done(
+        "Everything about this address is deleted, and no more email will be sent to it.",
+      );
+    }
+    return c.html(optOutGonePage(c), 400);
   });
 
   app.get(ACCOUNT_PATH, async (c) => {
