@@ -19,10 +19,11 @@ import {
   setAttendance,
 } from "../../events/response.js";
 import type { MailPort } from "../../mail/port.js";
-import { castVote, listPlans, type Plan } from "../../plans/plan.js";
+import { addVoteNote, listNotes, type PlanNote } from "../../plans/note.js";
+import { castVote, listPlans, type Plan, PlanInputError } from "../../plans/plan.js";
 import { memberName, type ThreadAccess } from "../../plans/thread.js";
 import { type IssuedVoteLink, resolveVoteLink, VOTE_LINK_TTL_MS } from "../../plans/vote-link.js";
-import { spanText, whenText } from "../../plans/weeks.js";
+import { dayLabel, spanText, whenText } from "../../plans/weeks.js";
 import { type Html, html, renderPage } from "../layout.js";
 import type { AppEnv } from "../session.js";
 import { BUSY_LABEL, describeRRule, formatWhen } from "./events.js";
@@ -171,6 +172,22 @@ ${form}
 
 // --- A thread's vote link (DESIGN §10 rc26) ---------------------------------------------
 
+/** Notes on days (rc28), attributed by the author's name in the thread; bodies escaped. */
+export function noteList(
+  notes: readonly PlanNote[],
+  nameOf: (id: string) => string,
+): Html | string {
+  if (notes.length === 0) return "";
+  const days = (n: PlanNote) =>
+    n.firstDay === n.lastDay
+      ? dayLabel(n.firstDay)
+      : `${dayLabel(n.firstDay)} – ${dayLabel(n.lastDay)}`;
+  return html`<ul class="notes">${notes.map(
+    (n) =>
+      html`<li><strong>${nameOf(n.authorId)}</strong> <span class="muted">on ${days(n)}:</span> <span style="white-space:pre-line">${n.body}</span></li>`,
+  )}</ul>`;
+}
+
 /** One plan on the table, as the link's person votes on it: a card, then the choices. */
 function votePlan(access: ThreadAccess, p: Plan): Html {
   const [e, ...more] = p.events;
@@ -198,6 +215,8 @@ async function votePage(
 ): Promise<string> {
   const plans = await listPlans(storage, access);
   const onTable = plans.filter((p) => p.status === "on_table");
+  const names = new Map(access.members.map((m) => [m.personId, memberName(m)]));
+  const notes = noteList(await listNotes(storage, access), (id) => names.get(id) ?? "someone");
   const body =
     onTable.length === 0
       ? html`<p><strong>There's nothing to vote on any more.</strong> Whatever was agreed is in the calendars of everyone in it.</p>`
@@ -205,12 +224,15 @@ async function votePage(
   <input type="hidden" name="t" value="${token}" />
   <h2>Which of these work for you?</h2>
   <ul style="list-style:none;padding-left:0">${onTable.map((p) => votePlan(access, p))}</ul>
+  <p><label>Anything to add? <span class="muted">(optional — everyone in it sees it, e.g. "Thursday's bad next week")</span><br />
+  <textarea name="note" rows="2" maxlength="500" style="width:100%"></textarea></label></p>
   <p><button type="submit">Send my answer</button></p>
 </form>`;
   return linkPage(
     "Your vote",
     html`${notice}<h1>${access.thread.name}</h1>
 ${body}
+${notes === "" ? "" : html`<h2>Notes</h2>${notes}`}
 <p class="muted">This link is just for you — please don't forward it. No account needed.</p>`,
   );
 }
@@ -336,18 +358,25 @@ export function registerRespondRoutes(app: Hono<AppEnv>, deps: RespondRouteDeps)
     const access = token === null ? null : await resolveVoteLink(deps.storage, token, now);
     if (token === null || access === null) return c.html(deadLink(), 404);
     const votes = readVotes(form);
-    if (votes.size === 0)
-      return c.html(
-        await votePage(
-          deps.storage,
-          access,
-          token,
-          html`<p class="error">Pick an answer first.</p>`,
-        ),
-        400,
+    const note = typeof form.note === "string" ? form.note : "";
+    const refuse = async (message: string, status: 400 | 409) =>
+      c.html(
+        await votePage(deps.storage, access, token, html`<p class="error">${message}</p>`),
+        status,
       );
+    if (votes.size === 0 && note.trim() === "") return refuse("Pick an answer first.", 400);
     let closed = false;
     let agreed = false;
+    // The note first: a yes below may agree a time and leave nothing on the table.
+    if (note.trim() !== "") {
+      try {
+        if ((await addVoteNote(deps.storage, access, { body: note, now })).kind === "closed")
+          closed = true;
+      } catch (err) {
+        if (err instanceof PlanInputError) return refuse(err.message, 400);
+        throw err;
+      }
+    }
     for (const [planId, answer] of votes) {
       const result = await castVote(deps.storage, access, { planId, answer, now });
       if (result.kind === "accepted") agreed = true;
@@ -355,13 +384,8 @@ export function registerRespondRoutes(app: Hono<AppEnv>, deps: RespondRouteDeps)
     }
     // A yes here that agreed a time replaced the rest of its question: not a refusal.
     if (closed && !agreed)
-      return c.html(
-        await votePage(
-          deps.storage,
-          access,
-          token,
-          html`<p class="error">Something you answered was decided meanwhile. Your other answers are saved.</p>`,
-        ),
+      return refuse(
+        "Something you answered was decided meanwhile. Your other answers are saved.",
         409,
       );
     const back = new URL(VOTE_PATH, "http://placeholder");

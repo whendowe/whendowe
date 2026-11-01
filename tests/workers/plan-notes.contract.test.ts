@@ -1,0 +1,7 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+import { env } from "cloudflare:test";
+import { d1StoragePort } from "../../src/db/d1.js";
+import { runPlanNotesContract } from "../contract/plan-notes.suite.js";
+
+// Notes with votes against a real D1 binding in workerd.
+runPlanNotesContract(async () => d1StoragePort(env.DB));

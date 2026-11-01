@@ -128,7 +128,10 @@ it("US-14: the D&D table finds a date and says who's coming — players never si
       ),
     ];
     expect(plans).toHaveLength(3);
-    const answers = Object.fromEntries(ballot.map((a, i) => [`plan_${plans[i]}`, a]));
+    const answers: Record<string, string> = Object.fromEntries(
+      ballot.map((a, i) => [`plan_${plans[i]}`, a]),
+    );
+    if (email === "cid@example.org") answers.note = "Thursday's bad next week, actually";
     const answered = await asPlayer(
       "/vote",
       form({ t: link.searchParams.get("t") ?? "", ...answers }),
@@ -144,6 +147,10 @@ it("US-14: the D&D table finds a date and says who's coming — players never si
   // but the DM's own, in the header (DESIGN §10 rc21).
   expect(tally).toMatch(/Guest \d{4} yes/);
   expect(tally).not.toContain("cid@example.org");
+  // Cid's note is on the thread, attributed by the same guest name (rc28).
+  expect(await dmGet(thread)).toMatch(
+    /<strong>Guest \d{4}<\/strong> <span class="muted">on [^<]+:<\/span> <span[^>]*>Thursday&#39;s bad next week, actually<\/span>/,
+  );
 
   // --- The DM accepts Saturday ----------------------------------------------------------
   expect((await dm(`${saturday}/accept`)).status).toBe(303);

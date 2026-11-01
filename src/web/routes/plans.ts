@@ -10,6 +10,7 @@ import type { MailPort } from "../../mail/port.js";
 import { findGroupForMember, listGroupsFor, listMembers } from "../../people/group.js";
 import { normalizeEmail } from "../../people/person.js";
 import type { PlanEventLike } from "../../plans/diff.js";
+import { addVoteNote, listNotes, noteTouches, type PlanNote } from "../../plans/note.js";
 import {
   type AgreedEvent,
   acceptPlan,
@@ -54,6 +55,7 @@ import {
   dayKeys,
   dayLabel,
   type Line,
+  lastDay,
   type Model,
   type Part,
   type Ribbon,
@@ -75,7 +77,7 @@ import {
 } from "../session.js";
 import { appearanceSection, saveAppearance } from "./account.js";
 import { EVENTS_PATH } from "./events.js";
-import { sendVoteLink } from "./respond.js";
+import { noteList, sendVoteLink } from "./respond.js";
 
 // Plan pages (DESIGN §10 rc19, slices P2–P3): a thread, a plan, and your draft. Every read
 // goes through findThreadForMember (no IDOR) and every write takes its access. Every
@@ -109,6 +111,8 @@ interface View {
   readonly nameOf: (id: string) => string;
   readonly today: string;
   readonly csrf: string;
+  /** Notes on days (rc28): public ones, and the viewer's own. */
+  readonly notes: readonly PlanNote[];
 }
 
 async function load(deps: PlanRouteDeps, access: ThreadAccess, me: SignedIn): Promise<View> {
@@ -127,6 +131,7 @@ async function load(deps: PlanRouteDeps, access: ThreadAccess, me: SignedIn): Pr
       .toPlainDate()
       .toString(),
     csrf: me.csrfToken,
+    notes: await listNotes(deps.storage, access),
   };
 }
 
@@ -447,6 +452,7 @@ ${
             )}</ul>`
       }</section>`
 }
+${v.notes.length === 0 ? "" : html`<h3 class="group-h">Notes</h3>${noteList(v.notes, v.nameOf)}`}
 ${history(v)}`,
   );
 }
@@ -586,6 +592,9 @@ function planSheet(
     html`<button type="submit" name="answer" value="${a}" aria-pressed="${mine === a ? "true" : "false"}">${label}</button>`;
   return html`${sent}${about}
 <form method="post" action="${here}/vote" class="seg" role="group" aria-label="Your vote">${csrf}${voteButton("yes", "Yes")}${voteButton("ifneedbe", "If need be")}${voteButton("no", "No")}</form>
+<details class="suggest"><summary>Add a note</summary><form method="post" action="${threadPath(t.id)}/notes">${csrf}<input type="hidden" name="back" value="${p.id}" />
+<p><textarea name="note" rows="2" maxlength="500" class="wide" aria-label="Note" placeholder="Thursday's bad next week"></textarea></p>
+<p><button type="submit">Add it</button> <span class="small muted">Everyone in it sees it, on the days on the table.</span></p></form></details>
 ${suggestForm(v, p)}
 <div class="spread"><div class="row">${organizer ? html`<a class="btn primary" href="${here}?confirm=1">Accept…</a>` : ""}${startForm(
     v,
@@ -596,6 +605,17 @@ ${suggestForm(v, p)}
       ? html`<form method="post" action="${here}/withdraw">${csrf}<button class="link" type="submit">Withdraw</button></form>`
       : ""
   }</div><span class="small muted">${decideHint(v)}</span></div>`;
+}
+
+/** The notes on any of a plan's days (rc28). */
+function planNotes(v: View, p: Plan): Html | string {
+  const first = p.events.map((e) => e.startLocal.slice(0, 10)).sort()[0];
+  const last = p.events.map(lastDay).sort().at(-1);
+  if (first === undefined || last === undefined) return "";
+  const on = v.notes.filter((n) => noteTouches(n, first, last));
+  return on.length === 0
+    ? ""
+    : html`<h3 class="group-h">Notes on these days</h3>${noteList(on, v.nameOf)}`;
 }
 
 function planPage(
@@ -640,7 +660,8 @@ ${
     { compareLetter: base?.letter ?? null, selColour: null, editing: false },
   )}<a class="btn small" href="${here}?more=${q.more + 1}">Show another week</a>`
 }
-<section class="sheet">${planSheet(v, p, base, q, model, link)}</section>`,
+<section class="sheet">${planSheet(v, p, base, q, model, link)}</section>
+${planNotes(v, p)}`,
   );
 }
 
@@ -1068,7 +1089,7 @@ export function registerPlanRoutes(app: Hono<AppEnv>, deps: PlanRouteDeps): void
     access: ThreadAccess,
     me: SignedIn,
     notice: string | null = null,
-    status: 200 | 403 | 409 | 503 = 200,
+    status: 200 | 400 | 403 | 409 | 503 = 200,
   ) => {
     const v = await load(deps, access, me);
     const day = c.req.query("day") ?? "";
@@ -1097,6 +1118,33 @@ export function registerPlanRoutes(app: Hono<AppEnv>, deps: PlanRouteDeps): void
     const access = await gate(c, deps, me);
     if (access instanceof Response) return access;
     return renderThread(c, access, me);
+  });
+
+  // A note with a vote (rc28): from the plan page, back to it.
+  app.post(`${PLANS_PATH}/:thread/notes`, async (c) => {
+    const r = await posting(c);
+    if (r instanceof Response) return r;
+    const back = str(r.form, "back");
+    const v = await load(deps, r.access, r.me);
+    const p = v.plans.find((x) => x.id === back);
+    const here =
+      p === undefined ? threadPath(r.access.thread.id) : planPath(r.access.thread.id, p.id);
+    const again = (why: string, status: 400 | 409) =>
+      p === undefined
+        ? renderThread(c, r.access, r.me, why, status)
+        : c.html(page(c, p.name, planPage(v, p, planQuery(c), deps, why)), status);
+    try {
+      const added = await addVoteNote(deps.storage, r.access, {
+        body: str(r.form, "note"),
+        now: deps.now(),
+      });
+      if (added.kind === "closed") return again("Nothing is on the table to note against.", 409);
+    } catch (err) {
+      const message = problem(err);
+      if (message === null) throw err;
+      return again(message, 400);
+    }
+    return c.redirect(here, 303);
   });
 
   // Vote links by email (rc26): the organizer asks; each member gets their own.

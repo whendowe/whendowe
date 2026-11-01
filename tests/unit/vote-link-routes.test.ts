@@ -8,6 +8,7 @@ import {
   createPollThread,
   sendDraft,
   startDraft,
+  suggestTime,
 } from "../../src/plans/plan.js";
 import { findThreadForMember, leaveThread } from "../../src/plans/thread.js";
 import { issueVoteLinks } from "../../src/plans/vote-link.js";
@@ -84,6 +85,7 @@ it("the page shows what's on the table, escaped, as nobody signed in, and writes
   expect(text).toMatch(/from Guest \d{4} · /); // no handle yet: a pseudonym, never the address
   expect(text).toContain("<title>Your vote");
   expect(text).not.toContain("Signed in as");
+  expect(text).not.toContain("<h2>Notes</h2>");
 
   const dead = await b.request(`${VOTE_PATH}?t=nope`);
   expect(dead.status).toBe(404);
@@ -265,4 +267,107 @@ it("an undelivered link is withdrawn, and the cap stops the rest from being trie
   });
   expect(left[0]?.n).toBe(0);
   expect(tried).toBe(1); // after the cap, nobody else is tried
+});
+
+// --- a note with a vote (rc28) -------------------------------------------------------
+
+it("the vote link takes a note, with the votes or alone, and shows everyone's, escaped", async () => {
+  const b = await browser({ now: () => NOW });
+  const f = await pollWith(b, ["david", "ana"]);
+  const [early] = f.planIds;
+  const res = await vote(b, f.token(0), {
+    [`plan_${early}`]: "no",
+    note: "Thursday's <b>bad</b> next week",
+  });
+  expect(res.status).toBe(303);
+  const asAna = await (await b.request(f.link(1))).text();
+  expect(asAna).toContain("<h2>Notes</h2>");
+  expect(asAna).toMatch(
+    /<strong>Guest \d{4}<\/strong> <span class="muted">on Mon 14 Nov – Mon 21 Nov:<\/span> <span[^>]*>Thursday&#39;s &lt;b&gt;bad&lt;\/b&gt; next week<\/span>/,
+  );
+  // A note alone is an answer too; a note too long is refused, keeping the page.
+  expect((await vote(b, f.token(1), { note: "Either works" })).status).toBe(303);
+  const long = await vote(b, f.token(1), { note: "x".repeat(501) });
+  expect(long.status).toBe(400);
+  expect(await long.text()).toContain("Keep it under 500 characters.");
+  const notes = await b.storage.query({
+    sql: "SELECT body FROM plan_note WHERE thread_id = ? ORDER BY created_at, id",
+    params: [f.threadId],
+  });
+  expect(notes.map((n) => n.body)).toEqual(["Thursday's <b>bad</b> next week", "Either works"]);
+  // A blank note is no note: alone it answers nothing; with votes it is dropped.
+  const blank = await vote(b, f.token(1), { note: "   " });
+  expect(blank.status).toBe(400);
+  expect(await blank.text()).toContain("Pick an answer first.");
+  expect((await vote(b, f.token(1), { [`plan_${early}`]: "yes", note: "  " })).status).toBe(303);
+  // A note on one day says the day once.
+  await b.storage.batch([
+    {
+      sql: `INSERT INTO plan_note (id, thread_id, author_id, first_day, last_day, body, private, created_at)
+            VALUES ('one-day', ?, ?, '2101-11-14', '2101-11-14', 'just then', 0, ?)`,
+      params: [f.threadId, f.mara.id, NOW],
+    },
+  ]);
+  expect(await (await b.request(f.link(1))).text()).toMatch(
+    /<span class="muted">on Mon 14 Nov:<\/span> <span[^>]*>just then/,
+  );
+  // Decided: a note alone has no days to lie on.
+  await acceptPlan(b.storage, await f.as(f.mara.id), { planId: early ?? "", now: NOW });
+  const late = await vote(b, f.token(0), { note: "too late" });
+  expect(late.status).toBe(409);
+});
+
+it("a note from the plan page lands on the thread and on the plans whose days it touches", async () => {
+  const b = await browser({ now: () => NOW });
+  const f = await signedInPoll(b, ["david", "ana"]);
+  const plan = `${f.thread}/p/${f.planIds[0]}`;
+  expect(await (await b.request(plan)).text()).toContain("Add a note");
+  expect(await (await b.request(f.thread)).text()).not.toContain("Notes</h3>");
+  const res = await b.request(
+    `${f.thread}/notes`,
+    post({ csrf: (await home(b)).csrf, back: f.planIds[0] ?? "", note: "I'll bring the cake" }),
+  );
+  expect(res.status).toBe(303);
+  expect(res.headers.get("location")).toBe(plan);
+  expect(await (await b.request(plan)).text()).toMatch(
+    /Notes on these days<\/h3><ul class="notes"><li><strong>Guest \d{4}<\/strong>/,
+  );
+  expect(await (await b.request(f.thread)).text()).toContain("I&#39;ll bring the cake");
+  // The latest time starts on the note's last day: it is on it too.
+  expect(await (await b.request(`${f.thread}/p/${f.planIds[1]}`)).text()).toContain(
+    "Notes on these days",
+  );
+  // A time suggested after the note, past its days, is not.
+  const after = await suggestTime(b.storage, await f.as(f.mara.id), {
+    planId: f.planIds[0] ?? "",
+    startLocal: "2101-11-28",
+    endLocal: "2101-11-29",
+    now: NOW,
+  });
+  if (after.kind !== "suggested") throw new Error(after.kind);
+  expect(await (await b.request(`${f.thread}/p/${after.planId}`)).text()).not.toContain(
+    "Notes on these days",
+  );
+  // Without a plan to go back to, back to the thread.
+  const toThread = await b.request(
+    `${f.thread}/notes`,
+    post({ csrf: (await home(b)).csrf, note: "and plates" }),
+  );
+  expect(toThread.headers.get("location")).toBe(f.thread);
+  const empty = await b.request(
+    `${f.thread}/notes`,
+    post({ csrf: (await home(b)).csrf, back: f.planIds[0] ?? "", note: " " }),
+  );
+  expect(empty.status).toBe(400);
+  expect(await empty.text()).toContain("Write something first.");
+  expect(
+    (await b.request(`${f.thread}/notes`, post({ csrf: "nope", note: "forged" }))).status,
+  ).toBe(403);
+  await acceptPlan(b.storage, await f.as(f.mara.id), { planId: f.planIds[0] ?? "", now: NOW });
+  const closed = await b.request(
+    `${f.thread}/notes`,
+    post({ csrf: (await home(b)).csrf, note: "late" }),
+  );
+  expect(closed.status).toBe(409);
+  expect(await closed.text()).toContain("Nothing is on the table to note against.");
 });
