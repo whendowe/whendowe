@@ -177,3 +177,35 @@ it("stopping one person's mail stops it through every group, and nobody else's",
   const eva = await signIn(h, "eva@example.org", "eva");
   expect(await groupBy(eva, "Eva's table")).toBe(1);
 });
+
+it("never names the sender by their account name, which could join two of their names", async () => {
+  const h = await harness();
+  const dm = await signIn(h, "dm@example.org", "Lena");
+  // An event made by email, no group: the mail names her as the event sees her.
+  const res = await h.app.request(
+    "/events",
+    post(
+      {
+        csrf: dm.csrf,
+        title: "Picnic",
+        start: "2101-10-20T12:00",
+        end: "2101-10-20T15:00",
+        tzid: "Europe/Prague",
+        email_0: "ana@example.org",
+        tier_0: "view",
+        vis_0: "FULL",
+        ask_0: "ack",
+      },
+      dm.cookie,
+    ),
+  );
+  expect(res.status).toBe(303);
+  const event = res.headers.get("location") ?? "";
+  await h.app.request(`${event}/me`, post({ csrf: dm.csrf, handle: "Kestrel" }, dm.cookie));
+  await h.app.request(`${event}/links`, post({ csrf: dm.csrf }, dm.cookie));
+  const mail = h.sent.find((m) => m.to === "ana@example.org");
+  expect(mail?.text).toContain("Kestrel");
+  const page = await (await h.app.request(`${OPT_OUT_PATH}?t=${optOutToken(mail)}`)).text();
+  expect(page).toContain("Stop emails from the person who sent this");
+  expect(page).not.toContain("Lena");
+});

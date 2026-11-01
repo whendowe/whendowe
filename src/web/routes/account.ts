@@ -117,7 +117,11 @@ function optOutGonePage(c: Context<AppEnv>) {
   );
 }
 
-/** Who sent it and through which group, named as that group sees them; null if gone. */
+/**
+ * Who sent it and through which group, named as that group sees them; null if gone. Never
+ * by the sender's account name: someone may be "Kestrel" in one group and "Lena" in
+ * another, and this page must not join the two (§10 rc21).
+ */
 async function optOutNames(storage: StoragePort, link: OptOutLink) {
   const group =
     link.groupId === null
@@ -133,19 +137,13 @@ async function optOutNames(storage: StoragePort, link: OptOutLink) {
               })
             )[0],
           )?.name ?? null);
-  let sender: string | null = null;
-  if (link.senderId !== null) {
-    const inGroup =
-      link.groupId === null
-        ? null
-        : await appearanceIn(storage, { kind: "group", id: link.groupId }, link.senderId);
-    const person = await findPersonById(storage, link.senderId);
-    sender =
-      inGroup?.shown.name ??
-      person?.displayName ??
-      (person === null ? null : "the person who sent it");
-  }
-  return { group, sender };
+  if (link.senderId === null || (await findPersonById(storage, link.senderId)) === null)
+    return { group, sender: null };
+  const inGroup =
+    link.groupId === null
+      ? null
+      : await appearanceIn(storage, { kind: "group", id: link.groupId }, link.senderId);
+  return { group, sender: inGroup?.shown.name ?? "the person who sent this" };
 }
 
 /** The first ZodError message, for a form; anything else is a bug and propagates. */
