@@ -2,11 +2,15 @@
 import { createClient } from "@libsql/client";
 import { expect, it } from "vitest";
 import { sqliteStoragePort } from "../../src/db/sqlite.js";
+import { createPoll } from "../../src/events/poll.js";
 import { MailCapReachedError } from "../../src/mail/capped.js";
 import type { MailMessage } from "../../src/mail/port.js";
+import { findGroupForMember } from "../../src/people/group.js";
+import { findOrCreatePerson } from "../../src/people/person.js";
 import { createApp } from "../../src/web/app.js";
 import { ACCOUNT_PATH } from "../../src/web/layout.js";
 import { CONFIRM_PATH, SIGN_IN_PATH } from "../../src/web/routes/auth.js";
+import { pollInputFromForm } from "../../src/web/routes/events.js";
 import { GROUPS_PATH, INVITE_PATH } from "../../src/web/routes/groups.js";
 import { loadMigrationSql } from "../conftest.js";
 
@@ -365,10 +369,25 @@ const POLL = {
   end_1: "2101-10-20T23:00",
 };
 
-async function startPoll(h: H, dm: Who, group: string, fields: Record<string, string> = POLL) {
-  const res = await h.app.request(`${group}/polls`, post({ csrf: dm.csrf, ...fields }, dm.cookie));
-  expect(res.status).toBe(303);
-  return res.headers.get("location") ?? "";
+/**
+ * An event-poll, as "Find a time" made before rc26. The form now makes a thread of plans
+ * (tests/unit/vote-link-routes.test.ts); event-polls already open run on until P6d, so
+ * their pages are still tested — made through the domain, from the same form fields.
+ */
+async function startPoll(h: H, _dm: Who, group: string, fields: Record<string, string> = POLL) {
+  const dm = await findOrCreatePerson(h.storage, "dm@example.org", {
+    now: new Date().toISOString(),
+  });
+  const membership = await findGroupForMember(h.storage, group.split("/").at(-1) ?? "", dm.id);
+  const input = pollInputFromForm(fields);
+  const event = await createPoll(h.storage, {
+    creatorId: dm.id,
+    group: membership,
+    fields: input.fields,
+    candidates: input.candidates,
+    now: new Date().toISOString(),
+  });
+  return `/events/${event.id}`;
 }
 
 async function revisionOnPage(h: H, event: string, who: Who): Promise<string> {
@@ -398,6 +417,38 @@ it("refuses a poll with one option, keeping what was typed", async () => {
   const body = await res.text();
   expect(body).toContain("at least 2");
   expect(body).toContain('value="2101-10-22T18:00"');
+});
+
+it("the form makes a thread: who sees what the group plans votes, busy-only members don't", async () => {
+  const h = await harness();
+  const { dm, group } = await setup(h);
+  await join(h, dm, group, "petra@example.org", "view", "DETAILS");
+  await join(h, dm, group, "gran@example.org", "view", "BUSY");
+  const form = await text(h, `${group}/polls/new`, dm);
+  expect(form).toContain(`action="${group}/polls"`);
+  expect(form).toContain("Everyone in Thursday Table who sees what the group plans votes;");
+  expect(form).not.toContain('name="tier_0"');
+  expect(form).not.toContain('name="vis_0"');
+  const res = await h.app.request(`${group}/polls`, post({ csrf: dm.csrf, ...POLL }, dm.cookie));
+  expect(res.status).toBe(303);
+  const thread = res.headers.get("location") ?? "";
+  expect(thread).toMatch(/^\/plans\/[0-9a-f-]+$/);
+  const [row] = await h.storage.query({
+    sql: `SELECT count(*) AS n, sum(p.email = 'gran@example.org') AS gran FROM plan_thread_member m
+          JOIN person p ON p.id = m.person_id WHERE m.thread_id = ?`,
+    params: [thread.split("/").at(-1) ?? ""],
+  });
+  expect(row).toEqual({ n: 2, gran: 0 }); // the DM and Petra
+});
+
+it("a poll with nobody to ask is refused, keeping what was typed", async () => {
+  const h = await harness();
+  const dm = await signIn(h, "dm@example.org");
+  const res = await h.app.request("/polls", post({ csrf: dm.csrf, ...POLL }, dm.cookie));
+  expect(res.status).toBe(400);
+  const body = await res.text();
+  expect(body).toContain("Add at least one person to plan with.");
+  expect(body).toContain('value="Session 13"');
 });
 
 it("players vote, change their mind, and the DM sees who said what", async () => {

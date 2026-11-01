@@ -3,6 +3,7 @@ import { expect, it } from "vitest";
 import { findPersonByEmail } from "../../src/people/person.js";
 import { EVENTS_PATH, POLLS_PATH } from "../../src/web/routes/events.js";
 import { GROUPS_PATH, INVITE_PATH } from "../../src/web/routes/groups.js";
+import { PLANS_PATH } from "../../src/web/routes/plans.js";
 import {
   addAccount,
   type Browser,
@@ -151,12 +152,18 @@ it("from a group: its members are copied in, and anyone else can be added by ema
   expect((await b.request(group)).status).toBe(404);
 });
 
-it("a poll for people by email: each can vote", async () => {
+it("a poll for people by email: a thread they vote in, and between two the second yes agrees it", async () => {
   const b = await browser();
   await addAccount(b, "ann@example.org");
   const form = await (await b.request(`${POLLS_PATH}/new`)).text();
   expect(form).toContain('name="email_0"');
+  expect(form).toContain('aria-label="Email 1"');
+  expect(form).toContain("Who are you finding a time with?");
   expect(form).not.toContain('name="ask_0"'); // a poll asks everyone the same thing
+  // Everyone in a poll's thread sees what it says (rc26): no terms to pick.
+  expect(form).not.toContain('name="tier_0"');
+  expect(form).not.toContain('name="vis_0"');
+  expect(form).toContain("everyone in the poll sees these");
   const res = await create(b, POLLS_PATH, {
     title: "When next?",
     location: "",
@@ -167,19 +174,21 @@ it("a poll for people by email: each can vote", async () => {
     start_1: "2101-11-11T19:00",
     end_1: "2101-11-11T22:00",
     email_0: "bob@example.org",
-    tier_0: "view",
-    vis_0: "FULL",
   });
   expect(res.status).toBe(303);
-  const poll = res.headers.get("location") ?? "";
+  const thread = res.headers.get("location") ?? "";
+  expect(thread).toMatch(new RegExp(`^${PLANS_PATH}/[0-9a-f-]+$`));
   await addAccount(b, "bob@example.org");
-  const asBob = await (await b.request(poll)).text();
-  expect(asBob).toContain('name="slot_0"');
+  expect((await home(b)).text).toContain("2 waiting for your vote");
+  const asBob = await (await b.request(thread)).text();
+  const plans = [...asBob.matchAll(/href="(\/plans\/[^"]+\/p\/[^"]+)"/g)].map((m) => m[1] ?? "");
+  const first = plans[0] ?? "";
   const voted = await b.request(
-    `${poll}/votes`,
-    post({ csrf: (await home(b)).csrf, slot_0: "yes", slot_1: "no", revision: "1" }),
+    `${first}/vote`,
+    post({ csrf: (await home(b)).csrf, answer: "yes" }),
   );
   expect(voted.status).toBe(303);
+  expect(await (await b.request(first)).text()).toContain("Both said yes to it");
 });
 
 it("home offers both, with no group needed", async () => {

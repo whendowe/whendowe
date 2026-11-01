@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { expect, it } from "vitest";
+import { createPoll } from "../../src/events/poll.js";
+import { findGroupForMember } from "../../src/people/group.js";
+import { findOrCreatePerson } from "../../src/people/person.js";
 import { SWITCH_PATH } from "../../src/web/routes/auth.js";
+import { pollInputFromForm } from "../../src/web/routes/events.js";
 import { GROUPS_PATH } from "../../src/web/routes/groups.js";
 import { addAccount, type Browser, browser, home, post } from "../property/one-browser.js";
 
@@ -45,15 +49,21 @@ it("lists polls first, then what's coming soonest first, then the past folded aw
   await make(b, `${group}/events`, at("Later", "2101-12-01T19:00", "2101-12-01T22:00"));
   await make(b, `${group}/events`, at("Sooner", "2101-11-05T19:00", "2101-11-05T22:00"));
   await make(b, `${group}/events`, at("Long ago", "2101-10-01T19:00", "2101-10-01T22:00"));
-  await make(b, `${group}/polls`, {
+  // An event-poll made before rc26 (the form makes a thread now): still listed first.
+  const ann = await findOrCreatePerson(b.storage, "ann@example.org", { now: NOW });
+  const input = pollInputFromForm({
     title: "When next?",
-    location: "",
-    description: "",
     tzid: "Europe/Prague",
     start_0: "2101-11-10T19:00",
     end_0: "2101-11-10T22:00",
     start_1: "2101-11-11T19:00",
     end_1: "2101-11-11T22:00",
+  });
+  await createPoll(b.storage, {
+    creatorId: ann.id,
+    group: await findGroupForMember(b.storage, group.split("/").at(-1) ?? "", ann.id),
+    ...input,
+    now: NOW,
   });
 
   const before = b.writes;
