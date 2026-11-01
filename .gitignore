@@ -14,3 +14,6 @@ tests/browser/.pages/
 tests/browser/test-results/
 # Hegel keeps the examples it has found between local runs.
 .hegel/
+# Mutation testing (npm run mutate): the report and Stryker's incremental state, and its sandbox.
+reports/
+.stryker-tmp/
