@@ -13,13 +13,18 @@ import { loadMigrationSql } from "../conftest.js";
 // the route tests (tests/unit/accounts-routes.test.ts) and the accounts property.
 
 export interface Browser {
+  /** The session cookie, as `wdw_session=…`, or "" when none. */
   cookie: string;
+  /** Every other cookie a response set, by name (the claim cookie, rc29). Paths aren't modelled. */
+  readonly jar: Map<string, string>;
   /** Statements that wrote to storage, since the browser was made. */
   writes: number;
   readonly sent: MailMessage[];
   /** The storage behind the app, for acting "elsewhere" (another device, an expiry). */
   readonly storage: StoragePort;
   request(path: string, init?: RequestInit): Promise<Response>;
+  /** Another browser (another phone) on the same instance: same app, storage and mail; its own cookies. */
+  another(): Browser;
 }
 
 const writing = (s: SqlStatement) => !/^\s*SELECT\b/i.test(s.sql);
@@ -62,29 +67,40 @@ export async function browser(
       now: options.now ?? (() => new Date().toISOString()),
     },
   });
-  const b: Browser = {
-    cookie: "",
-    get writes() {
-      return writes;
-    },
-    set writes(n) {
-      writes = n;
-    },
-    sent,
-    storage: inner,
-    async request(path, init = {}) {
-      const headers = new Headers(init.headers);
-      if (b.cookie !== "") headers.set("cookie", b.cookie);
-      const res = await app.request(path, { ...init, headers });
-      const set = res.headers.get("set-cookie");
-      if (set?.startsWith(`${SESSION_COOKIE}=`)) {
-        const value = set.split(";")[0] ?? "";
-        b.cookie = value === `${SESSION_COOKIE}=` ? "" : value;
-      }
-      return res;
-    },
+  const open = (): Browser => {
+    const b: Browser = {
+      cookie: "",
+      jar: new Map(),
+      get writes() {
+        return writes;
+      },
+      set writes(n) {
+        writes = n;
+      },
+      sent,
+      storage: inner,
+      another: open,
+      async request(path, init = {}) {
+        const headers = new Headers(init.headers);
+        const cookies = [b.cookie, ...[...b.jar].map(([k, v]) => `${k}=${v}`)].filter(
+          (x) => x !== "",
+        );
+        if (cookies.length > 0) headers.set("cookie", cookies.join("; "));
+        const res = await app.request(path, { ...init, headers });
+        for (const set of res.headers.getSetCookie()) {
+          const value = set.split(";")[0] ?? "";
+          const [name = "", ...rest] = value.split("=");
+          const v = rest.join("=");
+          if (name === SESSION_COOKIE) b.cookie = v === "" ? "" : value;
+          else if (v === "" || /max-age=0\b/i.test(set)) b.jar.delete(name);
+          else b.jar.set(name, v);
+        }
+        return res;
+      },
+    };
+    return b;
   };
-  return b;
+  return open();
 }
 
 export const post = (fields: Record<string, string>): RequestInit => ({
