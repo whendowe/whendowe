@@ -56,7 +56,7 @@ const ATTENDANCE_LABEL: Record<Attendance, string> = {
 };
 const ANSWER_LABEL: Record<Answer, string> = { yes: "Yes", ifneedbe: "If need be", no: "No" };
 
-function sensitive(c: Context<AppEnv>): void {
+export function sensitive(c: Context<AppEnv>): void {
   c.header("Referrer-Policy", "no-referrer");
   c.header("Cache-Control", "no-store");
 }
@@ -66,11 +66,11 @@ function sensitive(c: Context<AppEnv>): void {
  * (§13: the link is the identity, and never touches a session). A "Signed in as"
  * header here would suggest the answer goes out as that account, so they have none.
  */
-function linkPage(title: string, body: Html): string {
+export function linkPage(title: string, body: Html): string {
   return renderPage(title, body, null);
 }
 
-function deadLink(): string {
+export function deadLink(): string {
   return linkPage(
     "Link no longer works",
     html`<h1>This link no longer works</h1>
@@ -188,10 +188,19 @@ export function noteList(
   )}</ul>`;
 }
 
-/** One plan on the table, as the link's person votes on it: a card, then the choices. */
-function votePlan(access: ThreadAccess, p: Plan): Html {
+/**
+ * One plan on the table, as the link's person votes on it: a card, then the choices.
+ * `personId` is "" for someone not in the thread yet (a shared link, rc25).
+ */
+export function votePlan(
+  access: Pick<ThreadAccess, "members" | "personId">,
+  p: Plan,
+  /** What the form had chosen, when it comes back with a problem. */
+  chosen: ReadonlyMap<string, Answer> = new Map(),
+): Html {
   const [e, ...more] = p.events;
-  const mine = p.votes.find((v) => v.personId === access.personId)?.answer ?? null;
+  const mine =
+    chosen.get(p.id) ?? p.votes.find((v) => v.personId === access.personId)?.answer ?? null;
   const author = access.members.find((m) => m.personId === p.authorId);
   const n = (a: Answer) => p.votes.filter((v) => v.answer === a).length;
   const what =
@@ -238,7 +247,7 @@ ${notes === "" ? "" : html`<h2>Notes</h2>${notes}`}
 }
 
 /** plan_<id> fields → answers; anything else is ignored. */
-function readVotes(form: Record<string, unknown>): Map<string, Answer> {
+export function readVotes(form: Record<string, unknown>): Map<string, Answer> {
   const votes = new Map<string, Answer>();
   for (const [key, value] of Object.entries(form)) {
     const id = /^plan_([0-9a-f-]{1,64})$/.exec(key)?.[1];
@@ -248,9 +257,57 @@ function readVotes(form: Record<string, unknown>): Map<string, Answer> {
   return votes;
 }
 
-function readToken(value: unknown): string | null {
+export function readToken(value: unknown): string | null {
   const parsed = tokenSchema.safeParse(value);
   return parsed.success ? parsed.data : null;
+}
+
+export interface Answers {
+  readonly votes: ReadonlyMap<string, Answer>;
+  readonly note: string;
+}
+
+/** The votes and note a vote form sent, or null when it sent neither. */
+export function readAnswers(form: Record<string, unknown>): Answers | null {
+  const votes = readVotes(form);
+  const note = typeof form.note === "string" ? form.note : "";
+  return votes.size === 0 && note.trim() === "" ? null : { votes, note };
+}
+
+/**
+ * Record a vote form's note and votes as this member: null when all went in, else why
+ * not, for the page to say. The note first: a yes below may agree a time and leave
+ * nothing on the table to note against.
+ */
+export async function applyAnswers(
+  storage: StoragePort,
+  access: ThreadAccess,
+  answers: Answers,
+  now: string,
+): Promise<{ readonly message: string; readonly status: 400 | 409 } | null> {
+  let closed = false;
+  let agreed = false;
+  if (answers.note.trim() !== "") {
+    try {
+      if ((await addVoteNote(storage, access, { body: answers.note, now })).kind === "closed")
+        closed = true;
+    } catch (err) {
+      if (err instanceof PlanInputError) return { message: err.message, status: 400 };
+      throw err;
+    }
+  }
+  for (const [planId, answer] of answers.votes) {
+    const result = await castVote(storage, access, { planId, answer, now });
+    if (result.kind === "accepted") agreed = true;
+    if (result.kind === "closed" || result.kind === "invalid") closed = true;
+  }
+  // A yes here that agreed a time replaced the rest of its question: not a refusal.
+  return closed && !agreed
+    ? {
+        message: "Something you answered was decided meanwhile. Your other answers are saved.",
+        status: 409,
+      }
+    : null;
 }
 
 export function registerRespondRoutes(app: Hono<AppEnv>, deps: RespondRouteDeps): void {
@@ -357,37 +414,15 @@ export function registerRespondRoutes(app: Hono<AppEnv>, deps: RespondRouteDeps)
     // Resolved again on the POST: membership is re-checked at the moment of acting.
     const access = token === null ? null : await resolveVoteLink(deps.storage, token, now);
     if (token === null || access === null) return c.html(deadLink(), 404);
-    const votes = readVotes(form);
-    const note = typeof form.note === "string" ? form.note : "";
+    const answers = readAnswers(form);
     const refuse = async (message: string, status: 400 | 409) =>
       c.html(
         await votePage(deps.storage, access, token, html`<p class="error">${message}</p>`),
         status,
       );
-    if (votes.size === 0 && note.trim() === "") return refuse("Pick an answer first.", 400);
-    let closed = false;
-    let agreed = false;
-    // The note first: a yes below may agree a time and leave nothing on the table.
-    if (note.trim() !== "") {
-      try {
-        if ((await addVoteNote(deps.storage, access, { body: note, now })).kind === "closed")
-          closed = true;
-      } catch (err) {
-        if (err instanceof PlanInputError) return refuse(err.message, 400);
-        throw err;
-      }
-    }
-    for (const [planId, answer] of votes) {
-      const result = await castVote(deps.storage, access, { planId, answer, now });
-      if (result.kind === "accepted") agreed = true;
-      if (result.kind === "closed" || result.kind === "invalid") closed = true;
-    }
-    // A yes here that agreed a time replaced the rest of its question: not a refusal.
-    if (closed && !agreed)
-      return refuse(
-        "Something you answered was decided meanwhile. Your other answers are saved.",
-        409,
-      );
+    if (answers === null) return refuse("Pick an answer first.", 400);
+    const refused = await applyAnswers(deps.storage, access, answers, now);
+    if (refused !== null) return refuse(refused.message, refused.status);
     const back = new URL(VOTE_PATH, "http://placeholder");
     back.searchParams.set("t", token);
     back.searchParams.set("saved", "1");

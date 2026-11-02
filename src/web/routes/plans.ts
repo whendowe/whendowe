@@ -34,6 +34,7 @@ import {
   updateDraftEvent,
   withdrawPlan,
 } from "../../plans/plan.js";
+import { issueShareLink, shareLinkExpiry, turnOffShareLink } from "../../plans/share.js";
 import {
   createThread,
   decidesByConsensus,
@@ -77,7 +78,8 @@ import {
 } from "../session.js";
 import { appearanceSection, saveAppearance } from "./account.js";
 import { EVENTS_PATH } from "./events.js";
-import { noteList, sendVoteLink } from "./respond.js";
+import { noteList, sendVoteLink, sensitive } from "./respond.js";
+import { SHARE_PATH } from "./share.js";
 
 // Plan pages (DESIGN §10 rc19, slices P2–P3): a thread, a plan, and your draft. Every read
 // goes through findThreadForMember (no IDOR) and every write takes its access. Every
@@ -113,6 +115,10 @@ interface View {
   readonly csrf: string;
   /** Notes on days (rc28): public ones, and the viewer's own. */
   readonly notes: readonly PlanNote[];
+  /** The organizer's: until when the shared link works, or null with none (rc25). */
+  readonly shareUntil: string | null;
+  /** A link made by this very request, shown once to copy; never stored (rc25). */
+  readonly sharedUrl: string | null;
 }
 
 async function load(deps: PlanRouteDeps, access: ThreadAccess, me: SignedIn): Promise<View> {
@@ -132,6 +138,11 @@ async function load(deps: PlanRouteDeps, access: ThreadAccess, me: SignedIn): Pr
       .toString(),
     csrf: me.csrfToken,
     notes: await listNotes(deps.storage, access),
+    shareUntil:
+      access.thread.organizerId === access.personId
+        ? await shareLinkExpiry(deps.storage, access, deps.now())
+        : null,
+    sharedUrl: null,
   };
 }
 
@@ -364,6 +375,27 @@ ${opts.rest ? html`<input type="hidden" name="rest" value="1" />` : ""}
 <button type="submit"${opts.primary ? html` class="primary"` : ""}>${label}</button></form>`;
 }
 
+/**
+ * The organizer's shared link (rc25, rc29): make one, see until when it works, replace it
+ * or turn it off. A new link is shown once, on the page that made it; only its hash is kept.
+ */
+function shareSection(v: View): Html {
+  const here = `${threadPath(v.access.thread.id)}/share`;
+  const csrf = html`<input type="hidden" name="csrf" value="${v.csrf}" />`;
+  const fresh =
+    v.sharedUrl === null
+      ? ""
+      : html`<p><label>Paste this into your group chat:<br /><input readonly value="${v.sharedUrl}" style="width:100%" /></label></p>
+<p class="muted small">It's shown only now. Lost it? Make a new one — the old one then stops working.</p>`;
+  const live =
+    v.shareUntil === null
+      ? html`<p class="muted small">One link for the whole chat: anyone with it can vote, signed in or not. Once you share it, you decide which time it is.</p>
+<form method="post" action="${here}">${csrf}<button type="submit">Share a link</button></form>`
+      : html`<p class="muted small">Anyone with the link can vote until ${dayLabel(v.shareUntil.slice(0, 10))}, or until you decide.</p>
+<div class="row"><form method="post" action="${here}">${csrf}<button type="submit">New link</button></form><form method="post" action="${here}/off">${csrf}<button class="link" type="submit">Turn the link off</button></form></div>`;
+  return html`<section class="share"><h3 class="group-h">Share in a group chat</h3>${fresh}${live}</section>`;
+}
+
 function threadPage(v: View, day: string | null, notice: string | null = null): Html {
   const t = v.access.thread;
   const waiting = v.plans.filter(
@@ -423,6 +455,7 @@ ${
         : ""
     }</div>
 ${notice === null ? "" : html`<p class="notice">${notice}</p>`}
+${onTable.length > 0 && t.organizerId === v.access.personId ? shareSection(v) : ""}
 ${groups.map(([title, ps]) =>
   ps.length === 0 ? "" : html`<h3 class="group-h">${title}</h3>${ps.map((p) => planRow(v, p))}`,
 )}
@@ -1090,8 +1123,9 @@ export function registerPlanRoutes(app: Hono<AppEnv>, deps: PlanRouteDeps): void
     me: SignedIn,
     notice: string | null = null,
     status: 200 | 400 | 403 | 409 | 503 = 200,
+    sharedUrl: string | null = null,
   ) => {
-    const v = await load(deps, access, me);
+    const v = { ...(await load(deps, access, me)), sharedUrl };
     const day = c.req.query("day") ?? "";
     const id = access.thread.id;
     const appearance = await appearanceSection(
@@ -1186,6 +1220,32 @@ export function registerPlanRoutes(app: Hono<AppEnv>, deps: PlanRouteDeps): void
       failed > 0 ? `Couldn't send to ${failed} — please try again later.` : "",
     ].filter((p) => p !== "");
     return renderThread(c, r.access, r.me, parts.join(" "), failed > 0 ? 503 : 200);
+  });
+
+  // The shared link (rc25): the organizer makes it, replaces it, or turns it off.
+  app.post(`${PLANS_PATH}/:thread/share`, async (c) => {
+    const r = await posting(c);
+    if (r instanceof Response) return r;
+    const issued = await issueShareLink(deps.storage, r.access, { now: deps.now() });
+    if (issued.kind === "forbidden")
+      return renderThread(c, r.access, r.me, "Only the organizer shares a link.", 403);
+    if (issued.kind === "closed")
+      return renderThread(c, r.access, r.me, "Nothing is on the table to vote on.", 409);
+    // The page carries the link: never cached, never sent on as a referrer (§13).
+    sensitive(c);
+    const url = new URL(SHARE_PATH, deps.publicBaseUrl);
+    url.searchParams.set("t", issued.token);
+    const fresh = await findThreadForMember(deps.storage, r.access.thread.id, r.me.personId);
+    return renderThread(c, fresh ?? r.access, r.me, null, 200, url.toString());
+  });
+
+  app.post(`${PLANS_PATH}/:thread/share/off`, async (c) => {
+    const r = await posting(c);
+    if (r instanceof Response) return r;
+    const off = await turnOffShareLink(deps.storage, r.access);
+    if (off.kind === "forbidden")
+      return renderThread(c, r.access, r.me, "Only the organizer turns the link off.", 403);
+    return renderThread(c, r.access, r.me, "The link is off. Anyone who already joined stays in.");
   });
 
   // Leaving (DESIGN §10 rc21). GET says what will happen; POST does it.

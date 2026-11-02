@@ -88,6 +88,18 @@ test("the thread: what waits for you, the plans, and their history", async ({ pa
   expect(errors).toEqual([]);
 });
 
+test("the shared link, on a phone with no account: a name and the votes, one form", async ({
+  page,
+}) => {
+  const errors = await open(page, "share-guest");
+  await expect(page.getByLabel("Your name")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Which of these work for you?" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Send my answer" })).toBeVisible();
+  await expect(page.getByText("Signed in as")).toHaveCount(0);
+  await expect(page).toHaveScreenshot("share-guest.png");
+  expect(errors).toEqual([]);
+});
+
 test.describe("without JavaScript", () => {
   test.use({ javaScriptEnabled: false });
 

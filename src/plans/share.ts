@@ -4,6 +4,8 @@ import type { StoragePort } from "../db/port.js";
 import { uuidv7 } from "../ids.js";
 import { handleSchema } from "../people/person.js";
 import { hashToken, issueToken } from "../people/tokens.js";
+import { listNotes, type PlanNote } from "./note.js";
+import { listPlans, type Plan } from "./plan.js";
 import {
   findThreadById,
   findThreadForMember,
@@ -12,6 +14,7 @@ import {
   type Thread,
   type ThreadAccess,
   ThreadInputError,
+  type ThreadMember,
   threadMembers,
 } from "./thread.js";
 
@@ -124,6 +127,30 @@ export async function resolveShareLink(
   if (thread === null) return null;
   const names = (await threadMembers(storage, threadId)).map(memberName);
   return { thread, names, open: await anythingOnTable(storage, threadId), tokenHash };
+}
+
+/**
+ * What someone not yet in the thread may see from a live link: the plans on the table and the
+ * public notes, as any member sees them (rc25: nothing above DETAILS — and no draft, since
+ * nobody is its author). The link is the proof; there is no person yet, so no access is
+ * handed out.
+ */
+export async function questionAsOutsider(
+  storage: StoragePort,
+  question: SharedQuestion,
+): Promise<{
+  readonly onTable: readonly Plan[];
+  readonly notes: readonly PlanNote[];
+  readonly members: readonly ThreadMember[];
+}> {
+  // An address a member shows to the thread is not shown to whoever holds the link.
+  const members = (await threadMembers(storage, question.thread.id)).map((m) => ({
+    ...m,
+    shown: { ...m.shown, email: null },
+  }));
+  const nobody: ThreadAccess = { thread: question.thread, personId: "", members };
+  const onTable = (await listPlans(storage, nobody)).filter((p) => p.status === "on_table");
+  return { onTable, notes: await listNotes(storage, nobody), members };
 }
 
 export type JoinResult =

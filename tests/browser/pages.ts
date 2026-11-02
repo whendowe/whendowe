@@ -252,6 +252,18 @@ for (const [name, path] of Object.entries(pages)) {
   writeFileSync(new URL(`${name}.html`, OUT), await res.text());
 }
 
+// The table's shared link (DESIGN §10 rc25), opened on a phone with no account: after
+// the pages above, so the thread page is drawn before it was shared.
+const shared = await (
+  await app.request(`${table}/share`, asPost({ csrf: await csrfOf(cookie) }, cookie))
+).text();
+const shareUrl = new URL(
+  must(/value="(https:\/\/whendowe\.example\/s\?t=[^"]+)"/.exec(shared)?.[1], "shared link"),
+);
+const guestPage = await app.request(`${shareUrl.pathname}${shareUrl.search}`);
+if (guestPage.status !== 200) throw new Error(`the shared link answered ${guestPage.status}`);
+writeFileSync(new URL("share-guest.html", OUT), await guestPage.text());
+
 // Lea is signed in here but not in the group; switched to her, the DM's event offers
 // the switch back (DESIGN §13 rc18). A 404, as the page is not hers to see.
 const leaSession = must(
@@ -292,4 +304,4 @@ const withGoogle = createApp({
 const signInPage = await withGoogle.request(SIGN_IN_PATH);
 if (signInPage.status !== 200) throw new Error(`sign-in answered ${signInPage.status}`);
 writeFileSync(new URL("sign-in.html", OUT), await signInPage.text());
-console.log(`rendered ${Object.keys(pages).length + 2} pages`);
+console.log(`rendered ${Object.keys(pages).length + 3} pages`);
