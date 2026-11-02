@@ -34,7 +34,8 @@ export type IssueVoteLinksResult =
 const recipientRowSchema = z.object({ person_id: z.string(), email: z.string() });
 
 /**
- * Issue a link to every member but the organizer asking. Only the organizer may: the
+ * Issue a link to every member but the organizer asking, and but guests and former
+ * members, who have no address to send it to (rc25, rc21). Only the organizer may: the
  * mail goes out in their name. Per member ONE upsert, replacing a link older than the
  * resend interval (rotate on resend); RETURNING says whether a fresh token was stored,
  * and only then is it handed out, so a throttled member is never sent a dead link.
@@ -57,7 +58,8 @@ export async function issueVoteLinks(
   const recipients = (
     await storage.query({
       sql: `SELECT m.person_id, p.email FROM plan_thread_member m JOIN person p ON p.id = m.person_id
-            WHERE m.thread_id = ? AND m.person_id <> ? ORDER BY p.email`,
+            WHERE m.thread_id = ? AND m.person_id <> ? AND p.guest_at IS NULL AND p.erased_at IS NULL
+            ORDER BY p.email`,
       params: [access.thread.id, access.personId],
     })
   ).map((row) => recipientRowSchema.parse(row));

@@ -59,6 +59,9 @@ export function suppressingMailPort(
 ): MailPort {
   return {
     async send(message: MailMessage): Promise<void> {
+      // Guests and former members carry `.invalid` addresses (RFC 6761): nothing goes there,
+      // whoever asked (rc25, rc21). Here, so no caller can forget it.
+      if (message.to.endsWith(".invalid")) return;
       const cause = message.cause;
       if (cause.kind === "self") return inner.send(message);
       if (await isSuppressed(storage, message.to, cause)) return;

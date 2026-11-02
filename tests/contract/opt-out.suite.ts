@@ -50,6 +50,22 @@ async function organizer(port: StoragePort, tag: string) {
 
 export function runOptOutContract(makePort: () => Promise<StoragePort>): void {
   describe("opt-outs (DESIGN §10 rc24)", () => {
+    it("nothing goes to an .invalid address, whoever asked (guests, former members)", async () => {
+      const port = await makePort();
+      const { sent, inner } = recorder();
+      const { dm, group } = await organizer(port, "inv");
+      const mail = suppressingMailPort(inner, port, { publicBaseUrl: BASE, now: () => T0 });
+      const from = { kind: "from", senderId: dm.id, groupId: group.id, why: "w" } as const;
+      for (const cause of [{ kind: "self" } as const, from])
+        await mail.send({ to: "x@guest.invalid", subject: "s", text: "b", cause });
+      expect(sent).toHaveLength(0);
+      const tokens = await port.query({
+        sql: "SELECT 1 AS ok FROM opt_out_token WHERE email = ?",
+        params: ["x@guest.invalid"],
+      });
+      expect(tokens).toHaveLength(0);
+    });
+
     it("mail the address asked for passes untouched; mail others cause gets its own 90-day link", async () => {
       const port = await makePort();
       const { sent, inner } = recorder();

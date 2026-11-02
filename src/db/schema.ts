@@ -181,6 +181,9 @@ export const person = sqliteTable("person", {
   // rc24: the first session. Null = never signed in, so the opt-out page may offer to delete
   // everything about the address without signing in (§10 *People who never signed up*).
   signedInAt: text("signed_in_at"),
+  // rc25: set on a GUEST — someone who claimed a name from a shared link. Its address is
+  // '<id>@guest.invalid' (RFC 6761): never mailed, can't sign in.
+  guestAt: text("guest_at"),
 });
 
 export const loginToken = sqliteTable(
@@ -523,6 +526,9 @@ export const planThread = sqliteTable("plan_thread", {
   // rc27: the group it was started from, if any — accepting gives that group's BUSY
   // members the result, and the events take it as their provenance.
   groupId: text("group_id").references(() => personGroup.id, { onDelete: "set null" }),
+  // rc29: when a shared link was first made. Set, the organizer decides however few
+  // members there are, and it stays set, so who decides can't change between two votes.
+  sharedAt: text("shared_at"),
 });
 
 export const planThreadMember = sqliteTable(
@@ -742,4 +748,35 @@ export const planVoteToken = sqliteTable(
     createdAt: text("created_at").notNull(),
   },
   (t) => [unique("plan_vote_token_thread_person_uq").on(t.threadId, t.personId)],
+);
+
+// rc25: one link for a whole question, pasted into a group chat; re-issuing replaces it.
+// Only the hash is stored.
+export const shareLink = sqliteTable("share_link", {
+  tokenHash: text("token_hash").primaryKey(),
+  threadId: text("thread_id")
+    .notNull()
+    .unique()
+    .references(() => planThread.id, { onDelete: "cascade" }),
+  createdBy: text("created_by")
+    .notNull()
+    .references(() => person.id, { onDelete: "cascade" }),
+  expiresAt: text("expires_at").notNull(),
+  createdAt: text("created_at").notNull(),
+});
+
+// rc25: "keep this link" — changes one guest's answers in one question. Only the hash.
+export const guestClaim = sqliteTable(
+  "guest_claim",
+  {
+    tokenHash: text("token_hash").primaryKey(),
+    personId: text("person_id")
+      .notNull()
+      .references(() => person.id, { onDelete: "cascade" }),
+    threadId: text("thread_id")
+      .notNull()
+      .references(() => planThread.id, { onDelete: "cascade" }),
+    createdAt: text("created_at").notNull(),
+  },
+  (t) => [index("guest_claim_thread_idx").on(t.threadId, t.createdAt)],
 );

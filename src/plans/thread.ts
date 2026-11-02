@@ -21,6 +21,8 @@ export interface Thread {
   readonly createdAt: string;
   /** The group it was started from, if any (rc27). */
   readonly groupId: string | null;
+  /** When a shared link was first made (rc29); set, the organizer decides. */
+  readonly sharedAt: string | null;
 }
 
 export interface ThreadMember {
@@ -39,10 +41,12 @@ export interface ThreadAccess {
 
 /**
  * Two members decide by consensus; more, by the organizer after voting (owner decision,
- * 2026-10-25). Derived from the member count at the moment of deciding, never stored.
+ * 2026-10-25). Derived from the member count at the moment of deciding, never stored. A
+ * thread that has had a shared link is the organizer's to decide however few are in it
+ * (rc29): its members aren't all there yet, so the first guest's yes can't settle it.
  */
 export function decidesByConsensus(access: ThreadAccess): boolean {
-  return access.members.length <= 2;
+  return access.members.length <= 2 && access.thread.sharedAt === null;
 }
 
 /** Who may decide: both in a pair, the organizer in a larger group. */
@@ -139,6 +143,7 @@ export function threadStatements(input: {
     tzid: input.tzid,
     createdAt: input.now,
     groupId: input.groupId ?? null,
+    sharedAt: null,
   };
   return { thread, statements };
 }
@@ -150,6 +155,7 @@ const threadRowSchema = z.object({
   tzid: z.string(),
   created_at: z.string(),
   group_id: z.string().nullable(),
+  shared_at: z.string().nullable(),
 });
 
 const memberRowSchema = shownRowSchema.extend({
@@ -165,6 +171,7 @@ function toThread(row: unknown): Thread {
     tzid: r.tzid,
     createdAt: r.created_at,
     groupId: r.group_id,
+    sharedAt: r.shared_at,
   };
 }
 
@@ -175,13 +182,21 @@ export async function findThreadForMember(
   personId: string,
 ): Promise<ThreadAccess | null> {
   const rows = await storage.query({
-    sql: `SELECT t.id, t.name, t.organizer_id, t.tzid, t.created_at, t.group_id
+    sql: `SELECT t.id, t.name, t.organizer_id, t.tzid, t.created_at, t.group_id, t.shared_at
           FROM plan_thread t JOIN plan_thread_member m ON m.thread_id = t.id
           WHERE t.id = ? AND m.person_id = ?`,
     params: [threadId, personId],
   });
   if (rows[0] === undefined) return null;
-  const members = (
+  return { thread: toThread(rows[0]), personId, members: await threadMembers(storage, threadId) };
+}
+
+/** A thread's members as they are shown, in the order they joined. Callers prove access. */
+export async function threadMembers(
+  storage: StoragePort,
+  threadId: string,
+): Promise<ThreadMember[]> {
+  return (
     await storage.query({
       sql: `SELECT m.person_id, p.email, p.display_name, m.handle, m.show_email
             FROM plan_thread_member m JOIN person p ON p.id = m.person_id
@@ -192,7 +207,18 @@ export async function findThreadForMember(
     const r = memberRowSchema.parse(row);
     return { personId: r.person_id, shown: shownAs(r.person_id, r, threadId) };
   });
-  return { thread: toThread(rows[0]), personId, members };
+}
+
+/** The thread by id, for a caller that has proven a right to it some other way (a shared link). */
+export async function findThreadById(
+  storage: StoragePort,
+  threadId: string,
+): Promise<Thread | null> {
+  const rows = await storage.query({
+    sql: "SELECT id, name, organizer_id, tzid, created_at, group_id, shared_at FROM plan_thread WHERE id = ?",
+    params: [threadId],
+  });
+  return rows[0] === undefined ? null : toThread(rows[0]);
 }
 
 export interface ThreadSummary extends Thread {
@@ -214,7 +240,7 @@ export async function listThreadsFor(
   personId: string,
 ): Promise<ThreadSummary[]> {
   const rows = await storage.query({
-    sql: `SELECT t.id, t.name, t.organizer_id, t.tzid, t.created_at, t.group_id,
+    sql: `SELECT t.id, t.name, t.organizer_id, t.tzid, t.created_at, t.group_id, t.shared_at,
             (SELECT count(*) FROM plan_thread_member c WHERE c.thread_id = t.id) AS member_count,
             (SELECT count(*) FROM plan p WHERE p.thread_id = t.id AND p.status = 'on_table'
                AND NOT EXISTS (SELECT 1 FROM plan_vote v WHERE v.plan_id = p.id AND v.person_id = ?)) AS waiting,
@@ -270,6 +296,9 @@ export async function leaveThread(
     { sql: "DELETE FROM plan_note WHERE thread_id = ? AND author_id = ?", params: [t, me] },
     // A vote link outlives nothing it can no longer open (rc26).
     { sql: "DELETE FROM plan_vote_token WHERE thread_id = ? AND person_id = ?", params: [t, me] },
+    // So do a guest's claim and the shared link this person made (rc25).
+    { sql: "DELETE FROM guest_claim WHERE thread_id = ? AND person_id = ?", params: [t, me] },
+    { sql: "DELETE FROM share_link WHERE thread_id = ? AND created_by = ?", params: [t, me] },
     {
       sql: `UPDATE plan_thread SET organizer_id =
               (SELECT person_id FROM plan_thread_member WHERE thread_id = ? AND person_id <> ?

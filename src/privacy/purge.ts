@@ -348,6 +348,10 @@ async function expired(storage: StoragePort, now: string): Promise<number> {
       stmt: { sql: "DELETE FROM plan_vote_token WHERE expires_at < ?", params: [dayAgo] },
     },
     {
+      flag: "share",
+      stmt: { sql: "DELETE FROM share_link WHERE expires_at < ?", params: [dayAgo] },
+    },
+    {
       flag: "invite",
       stmt: { sql: "DELETE FROM group_invite WHERE expires_at < ?", params: [dayAgo] },
     },
@@ -374,12 +378,14 @@ async function expired(storage: StoragePort, now: string): Promise<number> {
             EXISTS (SELECT 1 FROM session WHERE expires_at < ? OR revoked_at < ?) AS session,
             EXISTS (SELECT 1 FROM response_token WHERE expires_at < ?) AS answer,
             EXISTS (SELECT 1 FROM plan_vote_token WHERE expires_at < ?) AS vote,
+            EXISTS (SELECT 1 FROM share_link WHERE expires_at < ?) AS share,
             EXISTS (SELECT 1 FROM group_invite WHERE expires_at < ?) AS invite,
             EXISTS (SELECT 1 FROM mail_send WHERE month < ?) AS mail,
             EXISTS (SELECT 1 FROM opt_out_token WHERE expires_at < ?) AS optout,
             EXISTS (SELECT 1 FROM plan_note WHERE last_day < date(?, ?)) AS note,
             EXISTS (SELECT 1 FROM erasure_ledger WHERE erased_at < ?) AS ledger`,
     params: [
+      dayAgo,
       dayAgo,
       dayAgo,
       dayAgo,
