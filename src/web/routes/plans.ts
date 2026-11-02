@@ -393,7 +393,11 @@ function shareSection(v: View): Html {
 <form method="post" action="${here}">${csrf}<button type="submit">Share a link</button></form>`
       : html`<p class="muted small">Anyone with the link can vote until ${dayLabel(v.shareUntil.slice(0, 10))}, or until you decide.</p>
 <div class="row"><form method="post" action="${here}">${csrf}<button type="submit">New link</button></form><form method="post" action="${here}/off">${csrf}<button class="link" type="submit">Turn the link off</button></form></div>`;
-  return html`<section class="share"><h3 class="group-h">Share in a group chat</h3>${fresh}${live}</section>`;
+  const alone =
+    v.access.members.length === 1
+      ? html`<p><strong>Nobody's in this yet.</strong> Share a link in your group chat: whoever opens it can vote.</p>`
+      : "";
+  return html`<section class="share" id="share"><h3 class="group-h">Share in a group chat</h3>${alone}${fresh}${live}</section>`;
 }
 
 function threadPage(v: View, day: string | null, notice: string | null = null): Html {

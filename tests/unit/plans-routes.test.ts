@@ -238,6 +238,14 @@ it("only members see a thread; a form without its token does nothing; text is es
   expect(await res.text()).toContain("This is visible to adam@example.org");
 });
 
+it("planning needs someone to plan with; only a poll may start alone (rc29)", async () => {
+  const b = await browser({ now: () => "2101-11-01T09:00:00.000Z" });
+  await addAccount(b, "adam@example.org");
+  const res = await act(b, PLANS_PATH, { name: "Kiddo's weeks", tzid: "Europe/Prague" });
+  expect(res.status).toBe(400);
+  expect(await res.text()).toContain("Add at least one person to plan with.");
+});
+
 it("leaving a plan thread: the last one out deletes it (§10 rc21)", async () => {
   const b = await browser();
   await addAccount(b, "adam@example.org");

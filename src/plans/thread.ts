@@ -43,10 +43,12 @@ export interface ThreadAccess {
  * Two members decide by consensus; more, by the organizer after voting (owner decision,
  * 2026-10-25). Derived from the member count at the moment of deciding, never stored. A
  * thread that has had a shared link is the organizer's to decide however few are in it
- * (rc29): its members aren't all there yet, so the first guest's yes can't settle it.
+ * (rc29): its members aren't all there yet, so the first guest's yes can't settle it. One
+ * member alone (a poll made to be shared, or everyone else left) is not a consensus of
+ * two: their own yes must not accept a time, so the organizer — they — decide.
  */
 export function decidesByConsensus(access: ThreadAccess): boolean {
-  return access.members.length <= 2 && access.thread.sharedAt === null;
+  return access.members.length === 2 && access.thread.sharedAt === null;
 }
 
 /** Who may decide: both in a pair, the organizer in a larger group. */
@@ -116,13 +118,16 @@ export function threadStatements(input: {
   readonly creatorId: string;
   readonly memberIds: readonly string[];
   readonly groupId?: string | null;
+  /** A poll may start with nobody else in it, to be shared in a group chat (rc29). */
+  readonly alone?: boolean;
   readonly now: string;
   readonly newId?: () => string;
 }): { readonly thread: Thread; readonly statements: SqlStatement[] } {
   const name = normalizeThreadName(input.name);
   if (!isTimeZone(input.tzid)) throw new ThreadInputError("Choose a valid time zone.");
   const others = [...new Set(input.memberIds)].filter((id) => id !== input.creatorId);
-  if (others.length === 0) throw new ThreadInputError("Add at least one person to plan with.");
+  if (others.length === 0 && input.alone !== true)
+    throw new ThreadInputError("Add at least one person to plan with.");
   if (others.length + 1 > MAX_MEMBERS)
     throw new ThreadInputError(`At most ${MAX_MEMBERS} people plan together.`);
   const id = (input.newId ?? (() => uuidv7()))();

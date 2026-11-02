@@ -80,7 +80,12 @@ import {
 } from "../../people/invite.js";
 import { appearanceIn, normalizeEmail } from "../../people/person.js";
 import { createPollThread } from "../../plans/plan.js";
-import { listThreadsFor, ThreadInputError, type ThreadSummary } from "../../plans/thread.js";
+import {
+  findThreadForMember,
+  listThreadsFor,
+  ThreadInputError,
+  type ThreadSummary,
+} from "../../plans/thread.js";
 import { retainDaysSchema } from "../../privacy/retention.js";
 import {
   formatRRule,
@@ -619,7 +624,7 @@ const LEAD_ALONE = "Who is it for? They can answer from an emailed link, with no
 const leadFor = (m: GroupMembership) =>
   `Everyone in ${m.group.name} takes part, on their usual terms. Add anyone else here.`;
 const POLL_ALONE =
-  "Who are you finding a time with? They vote from an emailed link, with no account.";
+  "Who are you finding a time with? Add them here and they vote from an emailed link, no account needed — or leave this empty and share one link in your group chat.";
 const pollLeadFor = (m: GroupMembership) =>
   `Everyone in ${m.group.name} who sees what the group plans votes; anyone who sees only busy time gets the result. Add anyone else here.`;
 
@@ -1411,7 +1416,10 @@ ${pollForm(`/groups/${membership.group.id}/polls`, csrf, values, error, peopleFi
         people: people.map((p) => p.personId),
         now: deps.now(),
       });
-      return c.redirect(`${PLANS_PATH}/${threadId}`, 303);
+      // Nobody else in it yet: it was made to be shared, so it opens on that step (rc29).
+      const made = await findThreadForMember(deps.storage, threadId, me.personId);
+      const alone = made?.members.length === 1;
+      return c.redirect(`${PLANS_PATH}/${threadId}${alone ? "#share" : ""}`, 303);
     } catch (error) {
       return again(errorMessage(error));
     }

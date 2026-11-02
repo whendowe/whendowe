@@ -1085,6 +1085,8 @@ export async function createPollThread(
     creatorId: input.creatorId,
     memberIds: [...fromGroup, ...(input.people ?? [])],
     groupId: input.group?.group.id ?? null,
+    // Nobody else yet is a poll made to be shared (rc29).
+    alone: true,
     now: input.now,
     newId,
   });
