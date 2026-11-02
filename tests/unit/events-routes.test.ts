@@ -441,14 +441,20 @@ it("the form makes a thread: who sees what the group plans votes, busy-only memb
   expect(row).toEqual({ n: 2, gran: 0 }); // the DM and Petra
 });
 
-it("a poll with nobody to ask is refused, keeping what was typed", async () => {
+it("a poll with nobody to ask is a poll of one, opened on sharing it (rc29)", async () => {
   const h = await harness();
   const dm = await signIn(h, "dm@example.org");
   const res = await h.app.request("/polls", post({ csrf: dm.csrf, ...POLL }, dm.cookie));
-  expect(res.status).toBe(400);
-  const body = await res.text();
-  expect(body).toContain("Add at least one person to plan with.");
-  expect(body).toContain('value="Session 13"');
+  expect(res.status).toBe(303);
+  const location = res.headers.get("location") ?? "";
+  expect(location).toMatch(/^\/plans\/[0-9a-f-]+#share$/);
+  const page = await (
+    await h.app.request(location.split("#")[0] ?? "", { headers: { cookie: dm.cookie } })
+  ).text();
+  expect(page).toContain('id="share"');
+  expect(page).toContain("Nobody's in this yet.");
+  expect(page).toContain("Share a link");
+  expect(page).not.toContain("Email vote links");
 });
 
 it("players vote, change their mind, and the DM sees who said what", async () => {

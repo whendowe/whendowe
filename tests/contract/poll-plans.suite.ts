@@ -18,7 +18,12 @@ import {
   suggestTime,
   withdrawPlan,
 } from "../../src/plans/plan.js";
-import { findThreadForMember, ThreadInputError } from "../../src/plans/thread.js";
+import {
+  decidesByConsensus,
+  findThreadForMember,
+  MAX_MEMBERS,
+  ThreadInputError,
+} from "../../src/plans/thread.js";
 
 // Polls as one-event plans (DESIGN §10 rc26–27) on BOTH drivers: the poll is one batch,
 // accepting writes the place, notes and group, and the group's BUSY members get the
@@ -229,8 +234,43 @@ export function runPollPlansContract(makePort: () => Promise<StoragePort>): void
           now: T0,
         });
       await expect(poll(TIMES.slice(0, 1), [david.id])).rejects.toBeInstanceOf(PollInputError);
-      await expect(poll(TIMES, [])).rejects.toBeInstanceOf(ThreadInputError);
+      // rc29: nobody else is allowed (a poll made to be shared); too many is not.
+      const crowd = await Promise.all(
+        Array.from({ length: MAX_MEMBERS }, (_, i) => person(port, `crowd${i}`, "d")),
+      );
+      await expect(
+        poll(
+          TIMES,
+          crowd.map((p) => p.id),
+        ),
+      ).rejects.toBeInstanceOf(ThreadInputError);
       expect(await count()).toBe(0);
+    });
+
+    it("a poll of one is made to be shared: its creator's own yes agrees nothing (rc29)", async () => {
+      const port = await makePort();
+      const mara = await person(port, "mara", "one");
+      const { threadId, planIds } = await createPollThread(port, {
+        creatorId: mara.id,
+        group: null,
+        fields: FIELDS,
+        candidates: TIMES,
+        people: [],
+        now: T0,
+      });
+      const access = await gate(port, threadId, mara.id);
+      expect(access.members.map((m) => m.personId)).toEqual([mara.id]);
+      expect(decidesByConsensus(access)).toBe(false);
+      // A yes again, as from the plan page: still only a vote.
+      expect(
+        (await castVote(port, access, { planId: planIds[0] ?? "", answer: "yes", now: T1 })).kind,
+      ).toBe("recorded");
+      const plans = await listPlans(port, access);
+      expect(plans.every((p) => p.status === "on_table")).toBe(true);
+      // The organizer decides when they choose to.
+      expect((await acceptPlan(port, access, { planId: planIds[0] ?? "", now: T2 })).kind).toBe(
+        "accepted",
+      );
     });
 
     it("a thread outlives its group, which it then no longer names", async () => {
