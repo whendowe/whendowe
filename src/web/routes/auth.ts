@@ -6,14 +6,15 @@ import { MailCapReachedError } from "../../mail/capped.js";
 import type { MailPort } from "../../mail/port.js";
 import { signOutActive, switchTo } from "../../people/accounts.js";
 import {
-  consumeLoginToken,
+  consumeLoginLink,
   issueLoginToken,
   LOGIN_TOKEN_TTL_MS,
   peekLoginToken,
 } from "../../people/login.js";
 import { findOrCreatePerson, findPersonByEmail, normalizeEmail } from "../../people/person.js";
 import { revokeSession } from "../../people/session.js";
-import { html, SIGN_OUT_ALL_PATH, SIGN_OUT_PATH, SWITCH_PATH } from "../layout.js";
+import { moveGuest } from "../../plans/share.js";
+import { html, PLANS_PATH, SIGN_OUT_ALL_PATH, SIGN_OUT_PATH, SWITCH_PATH } from "../layout.js";
 import {
   type AppEnv,
   page,
@@ -29,7 +30,8 @@ import {
 //   GET  /auth/sign-in   form: your email
 //   POST /auth/sign-in   issue a link, email it, "check your inbox"
 //   GET  /auth/confirm   "Sign in as ann@…? [Continue]" — reads, never consumes
-//   POST /auth/confirm   consume the link, create the person if new, start a session
+//   POST /auth/confirm   consume the link, create the person if new, start a session;
+//                        a link from Confirm with email also moves the guest (rc30)
 //   POST /auth/sign-out      sign out of the active account; the next becomes active
 //   POST /auth/sign-out-all  sign out of every account on this browser
 //   POST /auth/switch        make another of this browser's accounts active
@@ -136,6 +138,76 @@ function expiredPage(c: Context<AppEnv>) {
   );
 }
 
+export type SendResult = "sent" | "rate_limited" | "capped" | "failed";
+
+/**
+ * Issue a sign-in link for an address and email it. With a guest (rc30), using the link
+ * also moves that guest's answers to the address: Confirm with email on a shared link.
+ */
+export async function sendSignInLink(
+  deps: Pick<AuthDeps, "storage" | "mail" | "publicBaseUrl" | "now">,
+  email: string,
+  guestId?: string,
+): Promise<SendResult> {
+  const issued = await issueLoginToken(deps.storage, email, { now: deps.now(), guestId });
+  if (!issued.ok) return "rate_limited";
+  // From the configured origin — never c.req.url / Host (see the header comment).
+  const link = new URL(CONFIRM_PATH, deps.publicBaseUrl);
+  link.searchParams.set("t", issued.token);
+  try {
+    await deps.mail.send({
+      to: email,
+      subject: "Your WhenDoWe sign-in link",
+      // Anyone can ask for one, signed in or not: it draws on the anonymous share.
+      anonymous: true,
+      // Asked for on our own form: no opt-out stops it (rc24).
+      cause: { kind: "self" },
+      text: [
+        "Sign in to WhenDoWe:",
+        "",
+        link.toString(),
+        "",
+        `The link works once and expires in ${LOGIN_TOKEN_TTL_MS / 60_000} minutes.`,
+        "If you didn't ask for it, ignore this email — nothing happens unless the link is used.",
+      ].join("\n"),
+    });
+  } catch (error) {
+    return error instanceof MailCapReachedError ? "capped" : "failed";
+  }
+  return "sent";
+}
+
+/** The page for a link that wasn't sent, and why. */
+export function notSent(c: Context<AppEnv>, why: Exclude<SendResult, "sent">) {
+  if (why === "rate_limited")
+    return c.html(
+      page(
+        c,
+        "Too many requests",
+        html`<h1>Too many sign-in links</h1>
+<p>Several links were already sent to this address in the last hour. Use the newest one, or try again later.</p>`,
+      ),
+      429,
+    );
+  if (why === "capped")
+    return c.html(
+      page(
+        c,
+        "Can't send email",
+        html`<h1>We can't send email right now</h1><p>Please try again later.</p>`,
+      ),
+      503,
+    );
+  return c.html(
+    page(
+      c,
+      "Couldn't send",
+      html`<h1>We couldn't send your link</h1><p>Please check the address and try again.</p>`,
+    ),
+    502,
+  );
+}
+
 export function registerAuthRoutes(
   app: Hono<AppEnv>,
   deps: AuthDeps,
@@ -171,61 +243,8 @@ export function registerAuthRoutes(
       );
     }
 
-    const issued = await issueLoginToken(deps.storage, email, { now: deps.now() });
-    if (!issued.ok) {
-      return c.html(
-        page(
-          c,
-          "Too many requests",
-          html`<h1>Too many sign-in links</h1>
-<p>Several links were already sent to this address in the last hour. Use the newest one, or try again later.</p>`,
-        ),
-        429,
-      );
-    }
-
-    // From the configured origin — never c.req.url / Host (see the header comment).
-    const link = new URL(CONFIRM_PATH, deps.publicBaseUrl);
-    link.searchParams.set("t", issued.token);
-
-    try {
-      await deps.mail.send({
-        to: email,
-        subject: "Your WhenDoWe sign-in link",
-        // Anyone can ask for one, signed in or not: it draws on the anonymous share.
-        anonymous: true,
-        // Asked for on our own form: no opt-out stops it (rc24).
-        cause: { kind: "self" },
-        text: [
-          "Sign in to WhenDoWe:",
-          "",
-          link.toString(),
-          "",
-          `The link works once and expires in ${LOGIN_TOKEN_TTL_MS / 60_000} minutes.`,
-          "If you didn't ask for it, ignore this email — nothing happens unless the link is used.",
-        ].join("\n"),
-      });
-    } catch (error) {
-      if (error instanceof MailCapReachedError) {
-        return c.html(
-          page(
-            c,
-            "Can't send email",
-            html`<h1>We can't send email right now</h1><p>Please try again later.</p>`,
-          ),
-          503,
-        );
-      }
-      return c.html(
-        page(
-          c,
-          "Couldn't send",
-          html`<h1>We couldn't send your link</h1><p>Please check the address and try again.</p>`,
-        ),
-        502,
-      );
-    }
-
+    const sent = await sendSignInLink(deps, email);
+    if (sent !== "sent") return notSent(c, sent);
     return c.html(
       page(
         c,
@@ -269,11 +288,17 @@ export function registerAuthRoutes(
       const known = await findPersonByEmail(deps.storage, peeked);
       if (!roomFor(c, known?.id ?? null)) return tooManyAccounts(c);
     }
-    const email = token.success ? await consumeLoginToken(deps.storage, token.data, { now }) : null;
-    if (email === null) return c.html(expiredPage(c), 400);
+    const used = token.success ? await consumeLoginLink(deps.storage, token.data, { now }) : null;
+    if (used === null) return c.html(expiredPage(c), 400);
 
-    const person = await findOrCreatePerson(deps.storage, email, { now });
+    const person = await findOrCreatePerson(deps.storage, used.email, { now });
     if (!(await signInAs(c, deps, person.id))) return tooManyAccounts(c);
+    // Confirm with email (rc30): the link carries the guest, and using it moves its answers.
+    if (used.guestId !== null) {
+      const moved = await moveGuest(deps.storage, { guestId: used.guestId, personId: person.id });
+      const [thread] = moved.kind === "moved" ? moved.threadIds : [];
+      if (thread !== undefined) return c.redirect(`${PLANS_PATH}/${thread}`, 303);
+    }
     return c.redirect("/", 303);
   });
 

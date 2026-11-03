@@ -65,7 +65,7 @@ import {
   whenText,
   whoText,
 } from "../../plans/weeks.js";
-import { type Html, html, ZONE_GUESS } from "../layout.js";
+import { type Html, html, PLANS_PATH, ZONE_GUESS } from "../layout.js";
 import { PLAN_STYLE, planAssets } from "../plan-editor.js";
 import {
   type AppEnv,
@@ -87,7 +87,7 @@ import { SHARE_PATH } from "./share.js";
 // A" and the accept confirmation are all query parameters of a plain page, so everything
 // works without JavaScript (rc15), and the week-row script (P4) only adds gestures.
 
-export const PLANS_PATH = "/plans";
+export { PLANS_PATH };
 
 export interface PlanRouteDeps {
   readonly storage: StoragePort;

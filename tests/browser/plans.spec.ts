@@ -100,6 +100,19 @@ test("the shared link, on a phone with no account: a name and the votes, one for
   expect(errors).toEqual([]);
 });
 
+test("just claimed a name: the claim link, once, and confirming by email", async ({ page }) => {
+  const errors = await open(page, "share-claimed");
+  await expect(page.getByText("your answer is saved")).toBeVisible();
+  await expect(page.getByLabel(/keep this link/)).toHaveValue(/&c=/);
+  await expect(page.getByRole("button", { name: "Confirm with email" })).toBeVisible();
+  await expect(page.getByLabel("Your name")).toHaveCount(0);
+  // The link carries a fresh random token on every render; mask it, not the page.
+  await expect(page).toHaveScreenshot("share-claimed.png", {
+    mask: [page.getByLabel(/keep this link/)],
+  });
+  expect(errors).toEqual([]);
+});
+
 test.describe("without JavaScript", () => {
   test.use({ javaScriptEnabled: false });
 

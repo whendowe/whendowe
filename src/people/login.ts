@@ -47,7 +47,7 @@ export async function issueLoginToken(
     readonly now: string;
     readonly newId?: () => string;
     /** rc30: the guest whose answers using this link moves to the address (L2). */
-    readonly guestId?: string;
+    readonly guestId?: string | undefined;
   },
 ): Promise<IssueResult> {
   const email = normalizeEmail(rawEmail);

@@ -3,6 +3,8 @@ import type { Context, Hono } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import type { StoragePort } from "../../db/port.js";
 import type { Answer } from "../../events/poll.js";
+import { LOGIN_TOKEN_TTL_MS } from "../../people/login.js";
+import { normalizeEmail } from "../../people/person.js";
 import type { Plan } from "../../plans/plan.js";
 import {
   claimName,
@@ -22,6 +24,7 @@ import {
 } from "../../plans/thread.js";
 import { type Html, html } from "../layout.js";
 import { type AppEnv, page, rejectedPage, type SignedIn, verifyFormCsrf } from "../session.js";
+import { type AuthDeps, notSent, sendSignInLink } from "./auth.js";
 import {
   type Answers,
   applyAnswers,
@@ -42,6 +45,12 @@ import {
 //   POST /s              answer: signed in, join and vote; otherwise claim a name and vote,
 //                        or vote again as the name this browser claimed
 //   POST /s/forget       "Not you?": this browser forgets its claim on this question
+//   POST /s/confirm      Confirm with email (rc30): a sign-in link that, used, moves this
+//                        name's answers to that address
+//
+// Keep this link (rc30) is the shared link with the claim's token added (`&c=…`), shown
+// once, right after a name is claimed: it opens the question as that name on any device,
+// and answering from it makes this browser remember the claim too.
 //
 // Who it is for (rc29): the people in the chat, answering in two taps — the name and the
 // votes are one form. Signed in, the page acts as the active account and shows it in the
@@ -55,11 +64,10 @@ export const SHARE_PATH = "/s";
 export const CLAIM_COOKIE = "wdw_claims";
 const MAX_CLAIMS = 8;
 
-export interface ShareRouteDeps {
-  readonly storage: StoragePort;
-  readonly now: () => string;
-  readonly secureCookies: boolean;
-}
+export type ShareRouteDeps = Pick<
+  AuthDeps,
+  "storage" | "now" | "secureCookies" | "mail" | "publicBaseUrl"
+>;
 
 // --- The claim cookie: pure ---------------------------------------------------------------
 
@@ -107,7 +115,8 @@ function writeClaims(c: Context<AppEnv>, claims: readonly Claim[], secure: boole
 /** Who is answering: the active account, the name this browser claimed, or someone new. */
 type Answering =
   | { readonly kind: "account"; readonly me: SignedIn; readonly access: ThreadAccess | null }
-  | { readonly kind: "claim"; readonly access: ThreadAccess }
+  /** `token` is the claim's, when it came in the link rather than this browser's cookie. */
+  | { readonly kind: "claim"; readonly access: ThreadAccess; readonly token?: string }
   | { readonly kind: "guest" };
 
 interface Shown {
@@ -146,6 +155,10 @@ async function sharePage(
     votes: new Map(),
   },
 ): Promise<string> {
+  const claimField =
+    who.kind === "claim" && who.token !== undefined
+      ? html`<input type="hidden" name="c" value="${who.token}" />`
+      : "";
   const access = accessOf(who);
   const s = await shown(deps.storage, q);
   const voter = { members: s.members, personId: access?.personId ?? "" };
@@ -156,12 +169,12 @@ async function sharePage(
         ? html`<p>You're signed in, so you'll answer as yourself and join this plan.</p>`
         : html`<p>Answering as <strong>${mine === undefined ? "you" : memberName(mine)}</strong>.</p>`
       : who.kind === "claim"
-        ? html`<div class="row"><p>You're <strong>${mine === undefined ? "" : memberName(mine)}</strong>.</p><form method="post" action="${SHARE_PATH}/forget"><input type="hidden" name="t" value="${token}" /><button class="link" type="submit">Not you?</button></form></div>`
+        ? html`<div class="row"><p>You're <strong>${mine === undefined ? "" : memberName(mine)}</strong>.</p><form method="post" action="${SHARE_PATH}/forget"><input type="hidden" name="t" value="${token}" />${claimField}<button class="link" type="submit">Not you?</button></form></div>`
         : "";
   const body = !q.open
     ? html`<p><strong>This is decided.</strong> There's nothing to vote on any more.</p>`
     : html`${lead}<form method="post" action="${SHARE_PATH}">
-  <input type="hidden" name="t" value="${token}" />
+  <input type="hidden" name="t" value="${token}" />${claimField}
   ${who.kind === "account" ? html`<input type="hidden" name="csrf" value="${who.me.csrfToken}" />` : ""}
   ${
     who.kind === "guest"
@@ -175,8 +188,20 @@ async function sharePage(
   <textarea name="note" rows="2" maxlength="500" style="width:100%"></textarea></label></p>
   <p><button class="primary" type="submit">Send my answer</button></p>
 </form>`;
+  // A guest's answer is kept by this browser only; the page offers to keep it for good.
+  const keep =
+    who.kind === "claim" && q.open
+      ? html`<h2>Keep your answer</h2>
+<form method="post" action="${SHARE_PATH}/confirm">
+  <input type="hidden" name="t" value="${token}" />${claimField}
+  <p><label>Your email <span class="muted">(nobody in it sees this)</span><br />
+  <input name="email" type="email" autocomplete="email" required /></label></p>
+  <p><button type="submit">Confirm with email</button> <span class="muted">— a sign-in link; using it makes these answers your account's</span></p>
+</form>`
+      : "";
   const content = html`${notice}<h1>${q.thread.name}</h1>
 ${body}
+${keep}
 ${s.notes === "" ? "" : html`<h2>Notes</h2>${s.notes}`}
 <p class="muted">Anyone with this link can answer${who.kind === "account" ? "" : ", no account needed"}.</p>`;
   // Signed in, the page acts as the account: its header says which (§13 rc18).
@@ -190,6 +215,7 @@ async function answering(
   c: Context<AppEnv>,
   deps: ShareRouteDeps,
   q: SharedQuestion,
+  link?: unknown,
 ): Promise<Answering> {
   const me = c.get("signedIn");
   if (me !== null)
@@ -198,10 +224,32 @@ async function answering(
       me,
       access: await findThreadForMember(deps.storage, q.thread.id, me.personId),
     };
+  // Keep this link (rc30): a claim in the link comes before this browser's own.
+  const linked = readToken(link) ?? "";
+  const viaLink = await resolveClaim(deps.storage, linked, q.thread.id);
+  if (viaLink !== null) return { kind: "claim", access: viaLink, token: linked };
   const claim = parseClaims(getCookie(c, CLAIM_COOKIE)).find((x) => x.threadId === q.thread.id);
   const access =
     claim === undefined ? null : await resolveClaim(deps.storage, claim.token, q.thread.id);
   return access === null ? { kind: "guest" } : { kind: "claim", access };
+}
+
+/** This browser remembers the claim, newest first (rc29). */
+function remember(c: Context<AppEnv>, deps: ShareRouteDeps, claim: Claim): void {
+  writeClaims(c, withClaim(parseClaims(getCookie(c, CLAIM_COOKIE)), claim), deps.secureCookies);
+}
+
+/** Keep this link (rc30): the shared link with the claim, from the configured origin. */
+function keepLink(deps: ShareRouteDeps, token: string, claim: string): string {
+  const link = new URL(SHARE_PATH, deps.publicBaseUrl);
+  link.searchParams.set("t", token);
+  link.searchParams.set("c", claim);
+  return link.toString();
+}
+
+function claimedName(access: ThreadAccess): string {
+  const me = access.members.find((m) => m.personId === access.personId);
+  return me === undefined ? "you" : memberName(me);
 }
 
 const saved = (token: string) => {
@@ -221,7 +269,8 @@ export function registerShareRoutes(app: Hono<AppEnv>, deps: ShareRouteDeps): vo
       c.req.query("saved") === "1"
         ? html`<p class="notice"><strong>Thanks — your answer is saved.</strong> Open this link again to change it.</p>`
         : "";
-    return c.html(await sharePage(c, deps, q, token, await answering(c, deps, q), notice));
+    const who = await answering(c, deps, q, c.req.query("c"));
+    return c.html(await sharePage(c, deps, q, token, who, notice));
   });
 
   app.post(SHARE_PATH, async (c) => {
@@ -232,7 +281,7 @@ export function registerShareRoutes(app: Hono<AppEnv>, deps: ShareRouteDeps): vo
     // Resolved again on the POST, and every join re-checks it in the statement that writes.
     const q = token === null ? null : await resolveShareLink(deps.storage, token, now);
     if (token === null || q === null) return c.html(deadLink(), 404);
-    const who = await answering(c, deps, q);
+    const who = await answering(c, deps, q, form.c);
     if (who.kind === "account" && !(await verifyFormCsrf(who.me, form)))
       return rejectedPage(c, form);
     const answers = readAnswers(form);
@@ -249,8 +298,11 @@ export function registerShareRoutes(app: Hono<AppEnv>, deps: ShareRouteDeps): vo
     if (answers === null) return again("Pick an answer first.", 400);
 
     let access: ThreadAccess;
-    if (who.kind === "claim") access = who.access;
-    else if (who.kind === "account") {
+    let claimedNow: string | null = null;
+    if (who.kind === "claim") {
+      access = who.access;
+      if (who.token !== undefined) remember(c, deps, { threadId: q.thread.id, token: who.token });
+    } else if (who.kind === "account") {
       const joined = await joinByShareLink(deps.storage, q, who.me.personId, now);
       if (joined.kind === "gone") return again("This was decided meanwhile.", 409);
       if (joined.kind === "full") return again("This plan is full — ask whoever shared it.", 409);
@@ -270,12 +322,8 @@ export function registerShareRoutes(app: Hono<AppEnv>, deps: ShareRouteDeps): vo
       if (claimed.kind === "full") return again("This plan is full — ask whoever shared it.", 409);
       if (claimed.kind === "gone") return again("This was decided meanwhile.", 409);
       access = claimed.access;
-      const claims = parseClaims(getCookie(c, CLAIM_COOKIE));
-      writeClaims(
-        c,
-        withClaim(claims, { threadId: q.thread.id, token: claimed.token }),
-        deps.secureCookies,
-      );
+      claimedNow = claimed.token;
+      remember(c, deps, { threadId: q.thread.id, token: claimed.token });
     }
     const refused = await applyAnswers(deps.storage, access, answers satisfies Answers, now);
     if (refused !== null) {
@@ -293,7 +341,58 @@ export function registerShareRoutes(app: Hono<AppEnv>, deps: ShareRouteDeps): vo
         refused.status,
       );
     }
-    return c.redirect(saved(token), 303);
+    if (claimedNow === null) return c.redirect(saved(token), 303);
+    // Just claimed: the one time the claim link is shown (rc30), so this page isn't a redirect.
+    return c.html(
+      await sharePage(
+        c,
+        deps,
+        q,
+        token,
+        { kind: "claim", access },
+        html`<div class="notice"><p><strong>Thanks — your answer is saved.</strong> This phone remembers you're ${claimedName(access)}.</p>
+<p><label>To change it from anywhere else, keep this link — it's yours, so don't share it:<br />
+<input readonly value="${keepLink(deps, token, claimedNow)}" style="width:100%" /></label></p></div>`,
+      ),
+    );
+  });
+
+  // Confirm with email (rc30): only for a name this browser (or its link) holds. The link
+  // is a sign-in link with the same limits; it moves nothing until it's used.
+  app.post(`${SHARE_PATH}/confirm`, async (c) => {
+    sensitive(c);
+    const form = await c.req.parseBody();
+    const token = readToken(form.t);
+    const q = token === null ? null : await resolveShareLink(deps.storage, token, deps.now());
+    if (token === null || q === null) return c.html(deadLink(), 404);
+    const who = await answering(c, deps, q, form.c);
+    if (who.kind !== "claim")
+      return c.redirect(`${SHARE_PATH}?t=${encodeURIComponent(token)}`, 303);
+    let email: string;
+    try {
+      email = normalizeEmail(typeof form.email === "string" ? form.email : "");
+    } catch {
+      return c.html(
+        await sharePage(
+          c,
+          deps,
+          q,
+          token,
+          who,
+          html`<p class="error">That doesn't look like an email address.</p>`,
+        ),
+        400,
+      );
+    }
+    const sent = await sendSignInLink(deps, email, who.access.personId);
+    if (sent !== "sent") return notSent(c, sent);
+    return c.html(
+      linkPage(
+        "Check your email",
+        html`<h1>Check your email</h1>
+<p>We sent a sign-in link to <strong>${email}</strong>. Using it signs you in and makes ${claimedName(who.access)}'s answers yours. It works once and expires in ${LOGIN_TOKEN_TTL_MS / 60_000} minutes.</p>`,
+      ),
+    );
   });
 
   // "Not you?" (rc29): forgets this question's claim on this browser. Writes no storage.

@@ -262,7 +262,18 @@ const shareUrl = new URL(
 );
 const guestPage = await app.request(`${shareUrl.pathname}${shareUrl.search}`);
 if (guestPage.status !== 200) throw new Error(`the shared link answered ${guestPage.status}`);
-writeFileSync(new URL("share-guest.html", OUT), await guestPage.text());
+const guestHtml = await guestPage.text();
+writeFileSync(new URL("share-guest.html", OUT), guestHtml);
+
+// Kestrel claims a name there and votes (rc30): the one page that shows the claim link,
+// with Confirm with email below.
+const firstPlan = must(/name="(plan_[^"]+)"/.exec(guestHtml)?.[1], "a plan to vote on");
+const claimed = await app.request(
+  shareUrl.pathname,
+  asPost({ t: shareUrl.searchParams.get("t") ?? "", name: "Kestrel", [firstPlan]: "yes" }, ""),
+);
+if (claimed.status !== 200) throw new Error(`claiming a name answered ${claimed.status}`);
+writeFileSync(new URL("share-claimed.html", OUT), await claimed.text());
 
 // Lea is signed in here but not in the group; switched to her, the DM's event offers
 // the switch back (DESIGN §13 rc18). A 404, as the page is not hers to see.

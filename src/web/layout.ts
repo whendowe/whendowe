@@ -66,6 +66,8 @@ export const SIGN_OUT_ALL_PATH = "/auth/sign-out-all";
 export const ADD_ACCOUNT_PATH = "/auth/sign-in";
 export const ACCOUNT_PATH = "/account";
 export const KEEP_ACCOUNT_PATH = "/account/keep";
+/** Plans (src/web/routes/plans.ts); here so routes that only link to it needn't import it. */
+export const PLANS_PATH = "/plans";
 
 /** The day an account goes, as pages and mail say it: "2101-11-08 10:00 UTC". */
 export function deletionDay(iso: string): string {

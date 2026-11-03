@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, expect, it } from "vitest";
+import { MailCapReachedError } from "../../src/mail/capped.js";
+import { LOGIN_REQUESTS_PER_WINDOW } from "../../src/people/login.js";
 import { findOrCreatePerson } from "../../src/people/person.js";
 import { acceptPlan, castVote, createPollThread, listPlans } from "../../src/plans/plan.js";
 import { claimName, GUESTS_PER_DAY, resolveShareLink } from "../../src/plans/share.js";
@@ -126,6 +128,8 @@ describe("the shared link's page (rc25, rc29)", () => {
     expect(text).toContain("no account needed");
     expect(text).toContain('name="name" value=""');
     expect(text).not.toContain("your answer is saved");
+    expect(text).not.toContain('name="c"');
+    expect(text).not.toContain("Confirm with email");
     const plans = await listPlans(org.storage, await member(org, f.threadId, f.mara.id));
     const [first, second] = plans;
     const res = await guest.request(
@@ -423,6 +427,177 @@ describe("the shared link's page (rc25, rc29)", () => {
     const { csrf } = await home(b);
     const res = await b.request(`${PLANS_PATH}/${f.threadId}/share`, post({ csrf }));
     expect(res.status).toBe(409);
+  });
+});
+
+/** Kestrel claims a name on a fresh phone and votes yes, no; the phone and its claim link. */
+async function kestrel(org: Browser, f: Awaited<ReturnType<typeof maraPoll>>, path: string) {
+  const phone = org.another();
+  const [first, second] = await listPlans(org.storage, await member(org, f.threadId, f.mara.id));
+  const res = await phone.request(
+    SHARE_PATH,
+    post({
+      t: tokenOf(path),
+      name: "Kestrel",
+      [`plan_${first?.id}`]: "yes",
+      [`plan_${second?.id}`]: "no",
+    }),
+  );
+  const text = await res.text();
+  const url = /value="(https:\/\/whendowe\.example\/s\?t=[^"]+&amp;c=[^"]+)"/.exec(text)?.[1] ?? "";
+  expect(url).not.toBe("");
+  const u = new URL(url.replaceAll("&amp;", "&"));
+  return {
+    phone,
+    keep: `${u.pathname}${u.search}`,
+    claim: u.searchParams.get("c") ?? "",
+    guestId: await guestIdIn(org, f.threadId, "Kestrel"),
+    plans: [first?.id ?? "", second?.id ?? ""],
+  };
+}
+
+describe("keeping a guest's answer (rc30)", () => {
+  it("the claim link opens the question as that name on another device, which then remembers it", async () => {
+    const org = await browser({ now: () => NOW });
+    const f = await maraPoll(org);
+    const { path } = await share(org, f.threadId);
+    const k = await kestrel(org, f, path);
+    // Shown once: answering again redirects, and the page doesn't show it.
+    const again = await (await k.phone.request(path)).text();
+    expect(again).toContain("You're <strong>Kestrel</strong>");
+    expect(again).not.toContain("&amp;c=");
+    expect(again).not.toContain('name="c"');
+    const fromCookie = await k.phone.request(
+      SHARE_PATH,
+      post({ t: tokenOf(path), [`plan_${k.plans[0]}`]: "yes" }),
+    );
+    expect(fromCookie.status).toBe(303);
+    expect(fromCookie.headers.get("set-cookie")).toBeNull();
+
+    const laptop = org.another();
+    const writes = org.writes;
+    const opened = await laptop.request(k.keep);
+    expect(opened.headers.get("set-cookie")).toBeNull();
+    expect(org.writes).toBe(writes);
+    const text = await opened.text();
+    expect(text).toContain("You're <strong>Kestrel</strong>");
+    expect(text).toContain(`name="c" value="${k.claim}"`);
+    expect(text).not.toContain('name="name"');
+    const res = await laptop.request(
+      SHARE_PATH,
+      post({ t: tokenOf(path), c: k.claim, [`plan_${k.plans[1]}`]: "yes" }),
+    );
+    expect(res.status).toBe(303);
+    expect(res.headers.get("set-cookie") ?? "").toContain(`${CLAIM_COOKIE}=`);
+    expect(await votesOf(org, f.threadId, k.guestId)).toEqual(["yes", "yes"]);
+    expect(await (await laptop.request(path)).text()).toContain("You're <strong>Kestrel</strong>");
+    // A claim that opens nothing is no claim: the page asks for a name.
+    const stranger = await org.another().request(`${path}&c=not-a-claim`);
+    expect(await stranger.text()).toContain('name="name"');
+  });
+
+  it("confirming by email: the link it sends, used anywhere, makes the answers that account's", async () => {
+    const org = await browser({ now: () => NOW });
+    const f = await maraPoll(org);
+    const { path } = await share(org, f.threadId);
+    const k = await kestrel(org, f, path);
+    const page = await (await k.phone.request(path)).text();
+    expect(page).toContain("Confirm with email");
+    const sent = org.sent.length;
+    const res = await k.phone.request(
+      `${SHARE_PATH}/confirm`,
+      post({ t: tokenOf(path), email: "Kestrel@Example.org" }),
+    );
+    expect(res.status).toBe(200);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(res.headers.get("referrer-policy")).toBe("no-referrer");
+    const check = await res.text();
+    expect(check).toContain("makes Kestrel's answers yours");
+    expect(check).toContain("expires in 15 minutes");
+    expect(org.sent).toHaveLength(sent + 1);
+    const mail = org.sent.at(-1);
+    expect(mail?.to).toBe("kestrel@example.org");
+    const link = new URL(/https?:\/\/\S+/.exec(mail?.text ?? "")?.[0] ?? "");
+    expect(link.origin).toBe("https://whendowe.example");
+
+    // Opened on the laptop: the guest is moved as the link signs in.
+    const laptop = org.another();
+    const used = await laptop.request(link.pathname, post({ t: link.searchParams.get("t") ?? "" }));
+    expect(used.status).toBe(303);
+    expect(used.headers.get("location")).toBe(`${PLANS_PATH}/${f.threadId}`);
+    const account = await findOrCreatePerson(org.storage, "kestrel@example.org", { now: NOW });
+    expect(await votesOf(org, f.threadId, account.id)).toEqual(["yes", "no"]);
+    expect(await votesOf(org, f.threadId, k.guestId)).toBeNull();
+    const thread = await (await laptop.request(`${PLANS_PATH}/${f.threadId}`)).text();
+    expect(thread).toContain("Kestrel");
+    // The phone's claim is gone with the guest: it asks for a name again.
+    expect(await (await k.phone.request(path)).text()).toContain('name="name"');
+  });
+
+  it("confirming needs a claim and an address; a plain sign-in link moves nothing", async () => {
+    const org = await browser({ now: () => NOW });
+    const f = await maraPoll(org);
+    const { path } = await share(org, f.threadId);
+    const sent = org.sent.length;
+    const nobody = await org
+      .another()
+      .request(`${SHARE_PATH}/confirm`, post({ t: tokenOf(path), email: "x@example.org" }));
+    expect(nobody.status).toBe(303);
+    expect(nobody.headers.get("location")).toBe(path);
+    const k = await kestrel(org, f, path);
+    const bad = await k.phone.request(
+      `${SHARE_PATH}/confirm`,
+      post({ t: tokenOf(path), email: "not an address" }),
+    );
+    expect(bad.status).toBe(400);
+    expect(await bad.text()).toContain("doesn't look like an email address");
+    const dead = await k.phone.request(
+      `${SHARE_PATH}/confirm`,
+      post({ t: "dead-link", email: "x@example.org" }),
+    );
+    expect(dead.status).toBe(404);
+    expect(org.sent).toHaveLength(sent);
+    // Signing in the usual way leaves the guest where it is.
+    const laptop = org.another();
+    const signedIn = await addAccount(laptop, "kestrel@example.org");
+    expect(signedIn.headers.get("location")).toBe("/");
+    expect(await votesOf(org, f.threadId, k.guestId)).toEqual(["yes", "no"]);
+  });
+
+  it("a link that can't be sent says why, as signing in does", async () => {
+    let fail: Error | null = null;
+    const org = await browser({ now: () => NOW, mailFails: () => fail });
+    const f = await maraPoll(org);
+    const { path } = await share(org, f.threadId);
+    const k = await kestrel(org, f, path);
+    const confirm = () =>
+      k.phone.request(`${SHARE_PATH}/confirm`, post({ t: tokenOf(path), email: "k@example.org" }));
+    fail = new MailCapReachedError({ daily: 1, monthly: 1 });
+    expect((await confirm()).status).toBe(503);
+    fail = new Error("provider down");
+    expect((await confirm()).status).toBe(502);
+    fail = null;
+    // A link that went unsent still counts towards the address's hourly limit.
+    for (let i = 2; i < LOGIN_REQUESTS_PER_WINDOW; i++) expect((await confirm()).status).toBe(200);
+    expect((await confirm()).status).toBe(429);
+  });
+
+  it("a confirm link whose guest is gone only signs in", async () => {
+    const org = await browser({ now: () => NOW });
+    const f = await maraPoll(org);
+    const { path } = await share(org, f.threadId);
+    const k = await kestrel(org, f, path);
+    await k.phone.request(
+      `${SHARE_PATH}/confirm`,
+      post({ t: tokenOf(path), email: "k@example.org" }),
+    );
+    const link = new URL(/https?:\/\/\S+/.exec(org.sent.at(-1)?.text ?? "")?.[0] ?? "");
+    await org.storage.query({ sql: "DELETE FROM person WHERE id = ?", params: [k.guestId] });
+    const used = await org
+      .another()
+      .request(link.pathname, post({ t: link.searchParams.get("t") ?? "" }));
+    expect(used.status).toBe(303);
+    expect(used.headers.get("location")).toBe("/");
   });
 });
 
