@@ -2,13 +2,13 @@
 import { z } from "zod";
 import type { StoragePort } from "../db/port.js";
 import { uuidv7 } from "../ids.js";
-import type { GroupMembership } from "../people/group.js";
 import {
   type EditTier,
   editTierSchema,
+  type GroupMembership,
   type Visibility,
   visibilitySchema,
-} from "../people/invite.js";
+} from "../people/group.js";
 import {
   findOrCreatePerson,
   normalizeEmail,

@@ -3,7 +3,13 @@ import { z } from "zod";
 import type { StoragePort } from "../db/port.js";
 import { uuidv7 } from "../ids.js";
 import { isSuppressed } from "../privacy/suppression.js";
-import type { GroupMembership } from "./group.js";
+import {
+  type EditTier,
+  editTierSchema,
+  type GroupMembership,
+  type Visibility,
+  visibilitySchema,
+} from "./group.js";
 import { findOrCreatePerson, normalizeEmail, type Shown, shownAs } from "./person.js";
 import { hashToken, issueToken } from "./tokens.js";
 
@@ -21,10 +27,9 @@ export const INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 /** Per-group invites per rolling day — bounds a runaway form and the mail budget. */
 export const INVITES_PER_GROUP_PER_DAY = 50;
 
-export const editTierSchema = z.enum(["edit", "propose", "view"]);
-export const visibilitySchema = z.enum(["FULL", "DETAILS", "BUSY", "HIDDEN"]);
-export type EditTier = z.infer<typeof editTierSchema>;
-export type Visibility = z.infer<typeof visibilitySchema>;
+// The tiers live in group.ts (a group member's defaults), and are re-exported here for the
+// modules that have always imported them from invites.
+export { type EditTier, editTierSchema, type Visibility, visibilitySchema } from "./group.js";
 
 export type CreateInviteResult =
   | {

@@ -5,6 +5,17 @@ import { uuidv7 } from "../ids.js";
 import { collect } from "../privacy/purge.js";
 import { type Shown, shownAs, shownRowSchema } from "./person.js";
 
+/**
+ * What a person may change, and what they see (DESIGN §10 rc7). Here, with a group member's
+ * defaults, and not with invites: participation.ts needs them too, and importing invites
+ * from there closed an import cycle (invite → suppression → erasure → event →
+ * participation → invite) that left these undefined when invites loaded first.
+ */
+export const editTierSchema = z.enum(["edit", "propose", "view"]);
+export const visibilitySchema = z.enum(["FULL", "DETAILS", "BUSY", "HIDDEN"]);
+export type EditTier = z.infer<typeof editTierSchema>;
+export type Visibility = z.infer<typeof visibilitySchema>;
+
 // Groups (MVP-1 slice D): a reusable set of people — a household, a D&D table.
 //
 // AUTHORIZATION LIVES HERE, not in the routes: the only way to read a group is
