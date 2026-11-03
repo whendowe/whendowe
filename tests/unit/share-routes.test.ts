@@ -142,12 +142,14 @@ describe("the shared link's page (rc25, rc29)", () => {
         note: "Bringing the frisbee",
       }),
     );
-    expect(res.status).toBe(303);
+    // Just claimed, the page itself answers (rc30): the one time it shows the claim link.
+    expect(res.status).toBe(200);
     expect(res.headers.get("cache-control")).toBe("no-store");
     expect(res.headers.get("referrer-policy")).toBe("no-referrer");
-    const location = res.headers.get("location") ?? "";
-    expect(location).toContain("saved=1");
-    expect(await (await guest.request(location)).text()).toContain("your answer is saved");
+    const saved = await res.text();
+    expect(saved).toContain("your answer is saved");
+    expect(saved).toContain("keep this link");
+    expect(saved).toContain("You're <strong>Kestrel</strong>");
     const set = res.headers.get("set-cookie") ?? "";
     expect(set).toContain(`${CLAIM_COOKIE}=`);
     expect(set).toContain("Path=/s");
