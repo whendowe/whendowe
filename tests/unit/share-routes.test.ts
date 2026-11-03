@@ -61,7 +61,11 @@ async function share(b: Browser, threadId: string) {
   expect(text).toContain("Paste this into your group chat");
   // The page that made the link already knows the thread is shared: Mara decides (rc29).
   expect(text).toContain("You decide, after the votes are in");
-  const url = /value="(https:\/\/whendowe\.example\/s\?t=[^"]+)"/.exec(text)?.[1] ?? "";
+  // The link ends the message to paste (rc25): "Picnic: which of these work for you? <link>".
+  const url =
+    /which of these work for you\? (https:\/\/whendowe\.example\/s\?t=[^\s<]+)<\/textarea>/.exec(
+      text,
+    )?.[1] ?? "";
   expect(url).not.toBe("");
   const u = new URL(url.replaceAll("&amp;", "&"));
   return { path: `${u.pathname}${u.search}`, token: u.searchParams.get("t") ?? "" };

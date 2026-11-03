@@ -258,7 +258,10 @@ const shared = await (
   await app.request(`${table}/share`, asPost({ csrf: await csrfOf(cookie) }, cookie))
 ).text();
 const shareUrl = new URL(
-  must(/value="(https:\/\/whendowe\.example\/s\?t=[^"]+)"/.exec(shared)?.[1], "shared link"),
+  must(
+    /you\? (https:\/\/whendowe\.example\/s\?t=[^\s<]+)<\/textarea>/.exec(shared)?.[1],
+    "shared link",
+  ),
 );
 // The page that made the link: the message to paste, with Share… and Copy (rc25).
 writeFileSync(new URL("plan-thread-shared.html", OUT), shared);
