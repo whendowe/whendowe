@@ -1,0 +1,1 @@
+ALTER TABLE `login_token` ADD `guest_id` text REFERENCES person(id) ON DELETE SET NULL;

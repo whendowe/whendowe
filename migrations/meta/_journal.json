@@ -155,6 +155,13 @@
       "when": 1793633569131,
       "tag": "0021_share_links",
       "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "6",
+      "when": 1793715941964,
+      "tag": "0022_guest_confirm",
+      "breakpoints": true
     }
   ]
 }

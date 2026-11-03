@@ -312,3 +312,87 @@ async function anythingOnTable(storage: StoragePort, threadId: string): Promise<
   });
   return rows.length > 0;
 }
+
+// --- Moving a guest's answers (rc30, slice L2) ------------------------------------------
+
+export type MoveGuestResult =
+  | { readonly kind: "moved"; readonly threadIds: readonly string[] }
+  /** No such guest any more — removed, collected, or already moved — or no such account. */
+  | { readonly kind: "gone" };
+
+/**
+ * Move everything a guest is to an account, then delete the guest (rc30): confirming by
+ * email and signing in over a claim both end here. The guest's answers win where both
+ * answered; the account takes the guest's place, and its name in a thread the account
+ * wasn't in; anything else the guest became passes over, the account's own row kept
+ * where both have one. What a guest can become is what the shared page lets it: a member
+ * who votes and notes, the organizer after a hand-over (leaveThread), and a participant of
+ * the event its thread agreed. Anything more would need a page a guest doesn't have; the
+ * guest's deletion would take it, as for any person.
+ *
+ * One batch, and every statement carries the same guard (the guest is a guest, the
+ * account is not), so a second move of the same guest — a double-click, or the mail
+ * link racing the shared page — finds no guest and changes nothing. (Both callers hear
+ * "moved" then; the one that lost the race moved nothing, and its page says nothing more.)
+ */
+export async function moveGuest(
+  storage: StoragePort,
+  input: { readonly guestId: string; readonly personId: string },
+): Promise<MoveGuestResult> {
+  const g = input.guestId;
+  const a = input.personId;
+  const guard = `EXISTS (SELECT 1 FROM person WHERE id = ? AND guest_at IS NOT NULL)
+    AND EXISTS (SELECT 1 FROM person WHERE id = ? AND guest_at IS NULL AND erased_at IS NULL)`;
+  const both = [g, a];
+  if (
+    g === a ||
+    (await storage.query({ sql: `SELECT 1 AS ok WHERE ${guard}`, params: both })).length === 0
+  )
+    return { kind: "gone" };
+  const threads = await storage.query({
+    sql: "SELECT thread_id FROM plan_thread_member WHERE person_id = ?",
+    params: [g],
+  });
+  await storage.batch([
+    // Its place in each thread: the guest's name and join time, unless the account is in.
+    {
+      sql: `INSERT INTO plan_thread_member (thread_id, person_id, created_at, handle)
+            SELECT m.thread_id, ?, m.created_at, m.handle FROM plan_thread_member m
+            WHERE m.person_id = ? AND ${guard}
+              AND NOT EXISTS (SELECT 1 FROM plan_thread_member o
+                              WHERE o.thread_id = m.thread_id AND o.person_id = ?)`,
+      params: [a, g, ...both, a],
+    },
+    // The guest's answers win: the account's answer to the same plan goes first.
+    {
+      sql: `DELETE FROM plan_vote WHERE person_id = ?
+              AND plan_id IN (SELECT plan_id FROM plan_vote WHERE person_id = ?) AND ${guard}`,
+      params: [a, g, ...both],
+    },
+    {
+      sql: `UPDATE plan_vote SET person_id = ? WHERE person_id = ? AND ${guard}`,
+      params: [a, g, ...both],
+    },
+    {
+      sql: `UPDATE plan_note SET author_id = ? WHERE author_id = ? AND ${guard}`,
+      params: [a, g, ...both],
+    },
+    {
+      sql: `UPDATE plan_thread SET organizer_id = ? WHERE organizer_id = ? AND ${guard}`,
+      params: [a, g, ...both],
+    },
+    // An event the thread agreed: the account's own participation kept where it has one.
+    {
+      sql: `UPDATE event_participation SET person_id = ? WHERE person_id = ? AND ${guard}
+              AND canonical_event_id NOT IN
+                (SELECT canonical_event_id FROM event_participation WHERE person_id = ?)`,
+      params: [a, g, ...both, a],
+    },
+    // Last, the guest itself: what is left of it (its claim, its membership) goes with it.
+    { sql: `DELETE FROM person WHERE id = ? AND ${guard}`, params: [g, ...both] },
+  ]);
+  return {
+    kind: "moved",
+    threadIds: threads.map((r) => z.object({ thread_id: z.string() }).parse(r).thread_id),
+  };
+}

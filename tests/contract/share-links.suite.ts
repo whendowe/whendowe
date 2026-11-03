@@ -1,13 +1,16 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, expect, it } from "vitest";
 import type { StoragePort } from "../../src/db/port.js";
+import { consumeLoginLink, issueLoginToken } from "../../src/people/login.js";
 import { findOrCreatePerson, setAccountHandle } from "../../src/people/person.js";
+import { addVoteNote } from "../../src/plans/note.js";
 import { acceptPlan, castVote, createPollThread, listPlans } from "../../src/plans/plan.js";
 import {
   claimName,
   GUESTS_PER_DAY,
   issueShareLink,
   joinByShareLink,
+  moveGuest,
   resolveClaim,
   resolveShareLink,
   type SharedQuestion,
@@ -306,6 +309,172 @@ export function runShareLinksContract(makePort: () => Promise<StoragePort>): voi
       expect(await count()).toBe(1);
       await retentionPass(port, SWEPT);
       expect(await count()).toBe(0);
+    });
+  });
+
+  describe("moving a guest's answers (rc30)", () => {
+    const voteOf = async (port: StoragePort, planId: string, personId: string) =>
+      (
+        await port.query({
+          sql: "SELECT answer FROM plan_vote WHERE plan_id = ? AND person_id = ?",
+          params: [planId, personId],
+        })
+      )[0]?.answer;
+    const exists = async (port: StoragePort, personId: string) =>
+      (await port.query({ sql: "SELECT 1 AS ok FROM person WHERE id = ?", params: [personId] }))
+        .length > 0;
+
+    it("an account not in the thread takes the guest's place, name and answers", async () => {
+      const port = await makePort();
+      const f = await poll(port, "n");
+      const { q } = await shared(port, f);
+      const r = await claimed(port, q, "Kestrel");
+      const [p0 = ""] = f.planIds;
+      await castVote(port, r.access, { planId: p0, answer: "yes", now: LATER });
+      await addVoteNote(port, r.access, { body: "Bringing a kite", now: LATER });
+      const ana = await findOrCreatePerson(port, "share-ana-n@example.org", { now: T0 });
+      const guest = r.access.personId;
+
+      expect(await moveGuest(port, { guestId: guest, personId: ana.id })).toEqual({
+        kind: "moved",
+        threadIds: [f.threadId],
+      });
+      const access = await f.as(ana.id);
+      expect(access.members).toHaveLength(3);
+      const me = access.members.find((m) => m.personId === ana.id);
+      expect(me?.shown.name).toBe("Kestrel");
+      expect(await voteOf(port, p0, ana.id)).toBe("yes");
+      const notes = await port.query({
+        sql: "SELECT body FROM plan_note WHERE thread_id = ? AND author_id = ?",
+        params: [f.threadId, ana.id],
+      });
+      expect(notes.map((n) => n.body)).toEqual(["Bringing a kite"]);
+      expect(await exists(port, guest)).toBe(false);
+      expect(await resolveClaim(port, r.token, f.threadId)).toBeNull();
+      // At most once.
+      expect(await moveGuest(port, { guestId: guest, personId: ana.id })).toEqual({ kind: "gone" });
+    });
+
+    it("the guest's answers win where both answered; a member keeps its own name", async () => {
+      const port = await makePort();
+      const f = await poll(port, "o");
+      const { q } = await shared(port, f);
+      const [p0 = "", p1 = ""] = f.planIds;
+      const david = await f.as(f.david.id);
+      await castVote(port, david, { planId: p0, answer: "no", now: T0 });
+      await castVote(port, david, { planId: p1, answer: "yes", now: T0 });
+      const r = await claimed(port, q, "Kestrel");
+      await castVote(port, r.access, { planId: p0, answer: "yes", now: LATER });
+
+      expect(
+        (await moveGuest(port, { guestId: r.access.personId, personId: f.david.id })).kind,
+      ).toBe("moved");
+      expect(await voteOf(port, p0, f.david.id)).toBe("yes");
+      expect(await voteOf(port, p1, f.david.id)).toBe("yes");
+      const after = await f.as(f.david.id);
+      expect(after.members).toHaveLength(2);
+      expect(after.members.find((m) => m.personId === f.david.id)?.shown.name).not.toBe("Kestrel");
+      // The guest's name is free again.
+      expect((await claimName(port, q, { name: "Kestrel", now: LATER })).kind).toBe("claimed");
+    });
+
+    it("only a guest moves, and only to an account", async () => {
+      const port = await makePort();
+      const f = await poll(port, "p");
+      const { q } = await shared(port, f);
+      const r = await claimed(port, q, "Kestrel");
+      const other = await claimed(port, q, "Wren");
+      const guest = r.access.personId;
+      const gone = { kind: "gone" };
+      expect(await moveGuest(port, { guestId: f.david.id, personId: f.mara.id })).toEqual(gone);
+      expect(await moveGuest(port, { guestId: guest, personId: other.access.personId })).toEqual(
+        gone,
+      );
+      expect(await moveGuest(port, { guestId: guest, personId: guest })).toEqual(gone);
+      expect(await moveGuest(port, { guestId: guest, personId: "nobody" })).toEqual(gone);
+      const erased = await findOrCreatePerson(port, "share-gone-p@example.org", { now: T0 });
+      await port.query({
+        sql: "UPDATE person SET erased_at = ? WHERE id = ?",
+        params: [T0, erased.id],
+      });
+      expect(await moveGuest(port, { guestId: guest, personId: erased.id })).toEqual(gone);
+      expect((await f.as(f.david.id)).members).toHaveLength(4);
+      expect(await exists(port, guest)).toBe(true);
+    });
+
+    it("a guest that became the organizer passes it on", async () => {
+      const port = await makePort();
+      const mara = await findOrCreatePerson(port, "share-mara-q@example.org", { now: T0 });
+      const { threadId } = await createPollThread(port, {
+        creatorId: mara.id,
+        group: null,
+        fields: { title: "Picnic", description: null, location: null, allDay: true, tzid: null },
+        candidates: [
+          { startLocal: "2101-11-21", endLocal: "2101-11-22" },
+          { startLocal: "2101-11-14", endLocal: "2101-11-15" },
+        ],
+        people: [],
+        now: T0,
+      });
+      const own = await findThreadForMember(port, threadId, mara.id);
+      if (own === null) throw new Error("expected membership");
+      const issued = await issueShareLink(port, own, { now: T0 });
+      if (issued.kind !== "issued") throw new Error(issued.kind);
+      const q = await resolveShareLink(port, issued.token, T0);
+      if (q === null) throw new Error("expected the link to open");
+      const r = await claimed(port, q, "Kestrel");
+      await leaveThread(port, own, LATER);
+      const ana = await findOrCreatePerson(port, "share-ana-q@example.org", { now: T0 });
+      await moveGuest(port, { guestId: r.access.personId, personId: ana.id });
+      expect((await findThreadForMember(port, threadId, ana.id))?.thread.organizerId).toBe(ana.id);
+    });
+
+    it("a guest in the agreed event passes it on, and a member keeps its own", async () => {
+      const port = await makePort();
+      const f = await poll(port, "r");
+      const { q } = await shared(port, f);
+      const kestrel = await claimed(port, q, "Kestrel");
+      const wren = await claimed(port, q, "Wren");
+      await acceptPlan(port, await f.as(f.mara.id), { planId: f.planIds[0] ?? "", now: LATER });
+      const ana = await findOrCreatePerson(port, "share-ana-r@example.org", { now: T0 });
+      await moveGuest(port, { guestId: kestrel.access.personId, personId: ana.id });
+      await moveGuest(port, { guestId: wren.access.personId, personId: f.david.id });
+      const rows = async (personId: string) =>
+        (
+          await port.query({
+            sql: "SELECT canonical_event_id FROM event_participation WHERE person_id = ?",
+            params: [personId],
+          })
+        ).length;
+      expect(await rows(ana.id)).toBe(1);
+      expect(await rows(f.david.id)).toBe(1);
+      expect(await exists(port, wren.access.personId)).toBe(false);
+    });
+
+    it("a sign-in link can carry a guest, and loses it when the guest goes", async () => {
+      const port = await makePort();
+      const f = await poll(port, "s");
+      const { q } = await shared(port, f);
+      const r = await claimed(port, q, "Kestrel");
+      const guestId = r.access.personId;
+      const carrying = await issueLoginToken(port, "share-ana-s@example.org", { now: T0, guestId });
+      const plain = await issueLoginToken(port, "share-bo-s@example.org", { now: T0 });
+      const stale = await issueLoginToken(port, "share-cy-s@example.org", { now: T0, guestId });
+      if (!carrying.ok || !plain.ok || !stale.ok) throw new Error("rate limited");
+      expect(await consumeLoginLink(port, carrying.token, { now: T0 })).toEqual({
+        email: "share-ana-s@example.org",
+        guestId,
+      });
+      expect(await consumeLoginLink(port, plain.token, { now: T0 })).toEqual({
+        email: "share-bo-s@example.org",
+        guestId: null,
+      });
+      await leaveThread(port, r.access, LATER);
+      await port.query({ sql: "DELETE FROM person WHERE id = ?", params: [guestId] });
+      expect(await consumeLoginLink(port, stale.token, { now: T0 })).toEqual({
+        email: "share-cy-s@example.org",
+        guestId: null,
+      });
     });
   });
 }

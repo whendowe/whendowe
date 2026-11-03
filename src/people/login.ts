@@ -43,15 +43,20 @@ export type IssueResult =
 export async function issueLoginToken(
   storage: StoragePort,
   rawEmail: string,
-  options: { readonly now: string; readonly newId?: () => string },
+  options: {
+    readonly now: string;
+    readonly newId?: () => string;
+    /** rc30: the guest whose answers using this link moves to the address (L2). */
+    readonly guestId?: string;
+  },
 ): Promise<IssueResult> {
   const email = normalizeEmail(rawEmail);
   const { token, hash } = await issueToken();
   const expiresAt = plusMs(options.now, LOGIN_TOKEN_TTL_MS);
   const windowStart = plusMs(options.now, -LOGIN_RATE_WINDOW_MS);
   const rows = await storage.query({
-    sql: `INSERT INTO login_token (id, token_hash, email, expires_at, created_at)
-          SELECT ?, ?, ?, ?, ?
+    sql: `INSERT INTO login_token (id, token_hash, email, expires_at, created_at, guest_id)
+          SELECT ?, ?, ?, ?, ?, ?
           WHERE (SELECT count(*) FROM login_token WHERE email = ? AND created_at > ?) < ?
           RETURNING id`,
     params: [
@@ -60,6 +65,7 @@ export async function issueLoginToken(
       email,
       expiresAt,
       options.now,
+      options.guestId ?? null,
       email,
       windowStart,
       LOGIN_REQUESTS_PER_WINDOW,
@@ -71,6 +77,13 @@ export async function issueLoginToken(
 }
 
 const consumedSchema = z.object({ email: z.string() });
+const linkSchema = z.object({ email: z.string(), guest_id: z.string().nullable() });
+
+/** What a used login link proves: its address, and the guest it moves there, if any (rc30). */
+export interface UsedLoginLink {
+  readonly email: string;
+  readonly guestId: string | null;
+}
 
 /**
  * Consume a login token: the email it proves, or null.
@@ -85,13 +98,24 @@ export async function consumeLoginToken(
   token: string,
   options: { readonly now: string },
 ): Promise<string | null> {
+  return (await consumeLoginLink(storage, token, options))?.email ?? null;
+}
+
+/** consumeLoginToken, with the guest the link carries (rc30). The same single statement. */
+export async function consumeLoginLink(
+  storage: StoragePort,
+  token: string,
+  options: { readonly now: string },
+): Promise<UsedLoginLink | null> {
   const rows = await storage.query({
     sql: `UPDATE login_token SET consumed_at = ?
           WHERE token_hash = ? AND consumed_at IS NULL AND expires_at > ?
-          RETURNING email`,
+          RETURNING email, guest_id`,
     params: [options.now, await hashToken(token), options.now],
   });
-  return rows[0] === undefined ? null : consumedSchema.parse(rows[0]).email;
+  if (rows[0] === undefined) return null;
+  const row = linkSchema.parse(rows[0]);
+  return { email: row.email, guestId: row.guest_id };
 }
 
 /**
