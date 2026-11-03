@@ -196,7 +196,7 @@ async function sharePage(
   ${
     who.kind === "guest"
       ? html`<p><label>Your name <span class="muted">(everyone in it sees this)</span><br />
-  <input name="name" value="${typed.name}" maxlength="40" autocomplete="nickname" required /></label></p>`
+  <input name="name" value="${typed.name}" maxlength="40" autocomplete="off" required /></label></p>`
       : ""
   }
   ${answerPart(

@@ -131,6 +131,8 @@ describe("the shared link's page (rc25, rc29)", () => {
     expect(text).not.toContain("<h2>Notes</h2>");
     expect(text).toContain("no account needed");
     expect(text).toContain('name="name" value=""');
+    // The browser mustn't offer names typed in other questions on this phone (rc29, rc31).
+    expect(text).toMatch(/<input name="name"[^>]* autocomplete="off"/);
     expect(text).not.toContain("your answer is saved");
     expect(text).not.toContain('name="c"');
     expect(text).not.toContain("Confirm with email");
