@@ -224,7 +224,7 @@ async function sharePage(
   <input type="hidden" name="t" value="${token}" />${claimField}
   <input type="hidden" name="csrf" value="${who.me.csrfToken}" />
   <p>This browser answered as <strong>${claimedName(who.held.access)}</strong> before you signed in.</p>
-  <p><button type="submit">Move ${claimedName(who.held.access)}'s answers to your account</button> <span class="muted">— where you both answered, ${claimedName(who.held.access)}'s answer is kept</span></p>
+  <p><button type="submit">Move ${claimedName(who.held.access)}'s answers to your account</button></p>
 </form>`
       : "";
   const content = html`${notice}<h1>${q.thread.name}</h1>

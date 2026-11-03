@@ -322,8 +322,8 @@ export type MoveGuestResult =
 
 /**
  * Move everything a guest is to an account, then delete the guest (rc30): confirming by
- * email and signing in over a claim both end here. The guest's answers win where both
- * answered; the account takes the guest's place, and its name in a thread the account
+ * email and signing in over a claim both end here. Where both answered a plan, the later
+ * answer is kept, a tie going to the guest (rc32); the account takes the guest's place, and its name in a thread the account
  * wasn't in; anything else the guest became passes over, the account's own row kept
  * where both have one. What a guest can become is what the shared page lets it: a member
  * who votes and notes, the organizer after a hand-over (leaveThread), and a participant of
@@ -363,11 +363,19 @@ export async function moveGuest(
                               WHERE o.thread_id = m.thread_id AND o.person_id = ?)`,
       params: [a, g, ...both, a],
     },
-    // The guest's answers win: the account's answer to the same plan goes first.
+    // Where both answered, the later answer is kept (rc32): first the account's, where the
+    // guest's is as late or later, then the guest's, where the account's that is left is later.
     {
-      sql: `DELETE FROM plan_vote WHERE person_id = ?
-              AND plan_id IN (SELECT plan_id FROM plan_vote WHERE person_id = ?) AND ${guard}`,
-      params: [a, g, ...both],
+      sql: `DELETE FROM plan_vote WHERE person_id = ? AND ${guard}
+              AND EXISTS (SELECT 1 FROM plan_vote gv WHERE gv.person_id = ?
+                            AND gv.plan_id = plan_vote.plan_id
+                            AND gv.responded_at >= plan_vote.responded_at)`,
+      params: [a, ...both, g],
+    },
+    {
+      sql: `DELETE FROM plan_vote WHERE person_id = ? AND ${guard}
+              AND plan_id IN (SELECT plan_id FROM plan_vote WHERE person_id = ?)`,
+      params: [g, ...both, a],
     },
     {
       sql: `UPDATE plan_vote SET person_id = ? WHERE person_id = ? AND ${guard}`,
