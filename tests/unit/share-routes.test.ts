@@ -755,6 +755,55 @@ describe("the organizer and guests (rc30)", () => {
   });
 });
 
+describe("the card a chat draws (rc25)", () => {
+  const og = (text: string) =>
+    Object.fromEntries(
+      [...text.matchAll(/<meta property="og:(\w+)" content="([^"]*)" \/>/g)].map((m) => [
+        m[1],
+        m[2],
+      ]),
+    );
+
+  it("title and the first three times, never the place, notes or people", async () => {
+    const org = await browser({ now: () => NOW });
+    await addAccount(org, "mara@example.org");
+    await nameActive(org, "mara@example.org");
+    const mara = await findOrCreatePerson(org.storage, "mara@example.org", { now: NOW });
+    const { threadId } = await createPollThread(org.storage, {
+      creatorId: mara.id,
+      group: null,
+      fields: {
+        title: "Kites",
+        description: "Bring string",
+        location: "The hill",
+        allDay: true,
+        tzid: null,
+      },
+      candidates: ["11", "12", "13", "14", "15"].map((d) => ({
+        startLocal: `2101-11-${d}`,
+        endLocal: `2101-11-${Number(d) + 1}`,
+      })),
+      people: [],
+      now: NOW,
+    });
+    const { path } = await share(org, threadId);
+    const k = await kestrel(org, { mara, david: mara, threadId, planIds: [] }, path);
+    const writes = org.writes;
+    const card = og(await (await org.another().request(path)).text());
+    expect(org.writes).toBe(writes);
+    expect(card).toEqual({
+      type: "website",
+      site_name: "WhenDoWe",
+      title: "Kites",
+      description:
+        "Which of these work for you? Fri 11 Nov, all day · Sat 12 Nov, all day · Sun 13 Nov, all day · and 2 more",
+    });
+    // The page for a claimed name, and a dead link, alike: no more, and nothing at all.
+    expect(og(await (await k.phone.request(path)).text())).toEqual(card);
+    expect(og(await (await org.another().request(`${SHARE_PATH}?t=nope`)).text())).toEqual({});
+  });
+});
+
 describe("the claim cookie (rc29), pure", () => {
   const c = (n: number): Claim => ({ threadId: `0000000${n}-aaaa`, token: `tok${n}` });
   it("keeps one claim per question, newest first, at most eight", () => {

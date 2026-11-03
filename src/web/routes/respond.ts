@@ -24,7 +24,7 @@ import { castVote, listPlans, type Plan, PlanInputError } from "../../plans/plan
 import { memberName, type ThreadAccess } from "../../plans/thread.js";
 import { type IssuedVoteLink, resolveVoteLink, VOTE_LINK_TTL_MS } from "../../plans/vote-link.js";
 import { dayLabel, spanText, whenText } from "../../plans/weeks.js";
-import { type Html, html, renderPage } from "../layout.js";
+import { type Html, html, type Preview, renderPage } from "../layout.js";
 import type { AppEnv } from "../session.js";
 import { BUSY_LABEL, describeRRule, formatWhen } from "./events.js";
 
@@ -66,8 +66,32 @@ export function sensitive(c: Context<AppEnv>): void {
  * (§13: the link is the identity, and never touches a session). A "Signed in as"
  * header here would suggest the answer goes out as that account, so they have none.
  */
-export function linkPage(title: string, body: Html): string {
-  return renderPage(title, body, null);
+export function linkPage(title: string, body: Html, preview: Preview | null = null): string {
+  return renderPage(title, body, null, preview);
+}
+
+/** At most this many times in a card; the rest are counted. */
+const PREVIEW_TIMES = 3;
+
+/**
+ * A question's card in a chat (§10 rc25): its name and the times on the table. A plan of
+ * several events is its count and span, not its name, which may name a person.
+ */
+export function questionPreview(name: string, onTable: readonly Plan[]): Preview {
+  if (onTable.length === 0) return { title: name, description: "Nothing to vote on any more." };
+  const times = onTable.map((p) => {
+    const [e, ...more] = p.events;
+    return e !== undefined && more.length === 0
+      ? whenText(e)
+      : `${p.events.length} events, ${spanText(p.events)}`;
+  });
+  const rest = times.length - PREVIEW_TIMES;
+  return {
+    title: name,
+    description: `Which of these work for you? ${times.slice(0, PREVIEW_TIMES).join(" · ")}${
+      rest > 0 ? ` · and ${rest} more` : ""
+    }`,
+  };
 }
 
 export function deadLink(): string {
@@ -243,6 +267,7 @@ async function votePage(
 ${body}
 ${notes === "" ? "" : html`<h2>Notes</h2>${notes}`}
 <p class="muted">This link is just for you — please don't forward it. No account needed.</p>`,
+    questionPreview(access.thread.name, onTable),
   );
 }
 

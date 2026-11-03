@@ -32,6 +32,7 @@ import {
   deadLink,
   linkPage,
   noteList,
+  questionPreview,
   readAnswers,
   readToken,
   sensitive,
@@ -235,7 +236,7 @@ ${s.notes === "" ? "" : html`<h2>Notes</h2>${s.notes}`}
   // Signed in, the page acts as the account: its header says which (§13 rc18).
   return who.kind === "account"
     ? page(c, q.thread.name, content)
-    : linkPage(q.thread.name, content);
+    : linkPage(q.thread.name, content, questionPreview(q.thread.name, q.open ? s.onTable : []));
 }
 
 /** Who answers on this browser: the active account first, then this question's claim. */

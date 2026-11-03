@@ -198,7 +198,21 @@ export const ZONE_GUESS = html`<script>
   if (tz && !tz.value) tz.value = Intl.DateTimeFormat().resolvedOptions().timeZone;
 </script>`;
 
-export function renderPage(title: string, body: Html, viewer: Viewer | null): string {
+/**
+ * What a chat app's card shows for a pasted link page (§10 rc25): the question's title and
+ * its times, never the place, notes or people. Only link pages carry one.
+ */
+export interface Preview {
+  readonly title: string;
+  readonly description: string;
+}
+
+export function renderPage(
+  title: string,
+  body: Html,
+  viewer: Viewer | null,
+  preview: Preview | null = null,
+): string {
   return html`<!doctype html>
 <html lang="en">
 <head>
@@ -206,7 +220,15 @@ export function renderPage(title: string, body: Html, viewer: Viewer | null): st
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <meta http-equiv="Content-Security-Policy" content="${META_CONTENT_SECURITY_POLICY}" />
 <title>${title} · WhenDoWe</title>
-<style>
+${
+  preview === null
+    ? ""
+    : html`<meta property="og:type" content="website" />
+<meta property="og:site_name" content="WhenDoWe" />
+<meta property="og:title" content="${preview.title}" />
+<meta property="og:description" content="${preview.description}" />
+`
+}<style>
   :root { color-scheme: light dark; }
   body { font: 16px/1.6 system-ui, sans-serif; max-width: 34rem; margin: 3rem auto; padding: 0 1.25rem; }
   input[type=email] { font: inherit; padding: .5rem; width: 100%; box-sizing: border-box; }

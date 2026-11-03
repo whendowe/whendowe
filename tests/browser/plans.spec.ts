@@ -96,6 +96,11 @@ test("the shared link, on a phone with no account: a name and the votes, one for
   await expect(page.getByRole("heading", { name: "Which of these work for you?" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Send my answer" })).toBeVisible();
   await expect(page.getByText("Signed in as")).toHaveCount(0);
+  // The card a chat draws (rc25): a plan of several events is its count and span, never
+  // its name, which here names Lea.
+  const card = await page.locator('meta[property="og:description"]').getAttribute("content");
+  expect(card).toMatch(/^Which of these work for you\? .*4 events, Thu 5 Nov/);
+  expect(card).not.toContain("lea");
   await expect(page).toHaveScreenshot("share-guest.png");
   expect(errors).toEqual([]);
 });

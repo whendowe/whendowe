@@ -61,6 +61,12 @@ async function pollWith(
   return { mara, rest, threadId, planIds, as, link, token };
 }
 
+/** The page's Open Graph tags (§10 rc25), as a chat app reads them. */
+const og = (text: string) =>
+  Object.fromEntries(
+    [...text.matchAll(/<meta property="og:(\w+)" content="([^"]*)" \/>/g)].map((m) => [m[1], m[2]]),
+  );
+
 const vote = (b: Browser, t: string, answers: Record<string, string>) =>
   b.request(VOTE_PATH, post({ t, ...answers }));
 
@@ -90,6 +96,22 @@ it("the page shows what's on the table, escaped, as nobody signed in, and writes
   const dead = await b.request(`${VOTE_PATH}?t=nope`);
   expect(dead.status).toBe(404);
   expect(await dead.text()).toContain("This link no longer works");
+});
+
+it("a pasted vote link's card shows the title and times, never the place, notes or people", async () => {
+  const b = await browser({ now: () => NOW });
+  const f = await pollWith(b, ["david", "ana"], "<i>Picnic</i>");
+  expect(og(await (await b.request(f.link(0))).text())).toEqual({
+    type: "website",
+    site_name: "WhenDoWe",
+    title: "&lt;i&gt;Picnic&lt;/i&gt;",
+    description: "Which of these work for you? Mon 14 Nov, all day · Mon 21 Nov, all day",
+  });
+  await acceptPlan(b.storage, await f.as(f.mara.id), { planId: f.planIds[0] ?? "", now: NOW });
+  expect(og(await (await b.request(f.link(0))).text()).description).toBe(
+    "Nothing to vote on any more.",
+  );
+  expect(og(await (await b.request(`${VOTE_PATH}?t=nope`)).text())).toEqual({});
 });
 
 it("a vote is saved and comes back checked; a form with no answer is refused", async () => {
@@ -145,6 +167,11 @@ it("a plan of several events is shown by its name and span", async () => {
   await sendDraft(b.storage, mara, { now: NOW });
   const text = await (await b.request(f.link(0))).text();
   expect(text).toMatch(/<strong>Plan C<\/strong> · 2 events, /);
+  // In the card, its count and span: a plan's name may name someone. Three times, all shown.
+  const card = og(text).description ?? "";
+  expect(card).toMatch(/^Which of these work for you\? (.+, all day · ){2}2 events, \S/);
+  expect(card).not.toContain("Plan C");
+  expect(card).not.toContain("more");
 });
 
 it("decided meanwhile, or left: the link says so", async () => {
