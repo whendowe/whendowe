@@ -275,6 +275,16 @@ const claimed = await app.request(
 if (claimed.status !== 200) throw new Error(`claiming a name answered ${claimed.status}`);
 writeFileSync(new URL("share-claimed.html", OUT), await claimed.text());
 
+// The same phone, later signed in as an account (rc30): the page offers to move Kestrel's
+// answers to it.
+const claims = must(claimed.headers.get("set-cookie")?.split(";")[0], "claim cookie");
+const kestrelAccount = await signIn("kestrel@example.org");
+const over = await app.request(`${shareUrl.pathname}${shareUrl.search}`, {
+  headers: { cookie: `${kestrelAccount}; ${claims}` },
+});
+if (over.status !== 200) throw new Error(`the shared link, signed in, answered ${over.status}`);
+writeFileSync(new URL("share-over-claim.html", OUT), await over.text());
+
 // Lea is signed in here but not in the group; switched to her, the DM's event offers
 // the switch back (DESIGN §13 rc18). A 404, as the page is not hers to see.
 const leaSession = must(

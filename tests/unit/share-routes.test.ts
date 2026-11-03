@@ -603,6 +603,101 @@ describe("keeping a guest's answer (rc30)", () => {
   });
 });
 
+/** The CSRF token in the page's move form (rc30). */
+const moveCsrf = (page: string) =>
+  /action="\/s\/move">[\s\S]*?name="csrf" value="([^"]+)"/.exec(page)?.[1] ?? "";
+
+describe("signed in over a claim (rc30)", () => {
+  it("one tap moves the name's answers to the account, and the browser forgets the claim", async () => {
+    const org = await browser({ now: () => NOW });
+    const f = await maraPoll(org);
+    const { path } = await share(org, f.threadId);
+    const k = await kestrel(org, f, path);
+    // Signed in on the same phone, the account answers once itself, then sees the offer.
+    await addAccount(k.phone, "kestrel@example.org");
+    const account = await findOrCreatePerson(org.storage, "kestrel@example.org", { now: NOW });
+    const t = tokenOf(path);
+    const first = await (await k.phone.request(path)).text();
+    const csrf = moveCsrf(first);
+    expect(csrf).not.toBe("");
+    await k.phone.request(SHARE_PATH, post({ t, csrf, [`plan_${k.plans[0]}`]: "no" }));
+    const page = await (await k.phone.request(path)).text();
+    expect(page).toContain("Move Kestrel's answers to your account");
+    expect(page).toContain("Signed in as");
+    expect(page).not.toContain("Confirm with email");
+
+    const writes = org.writes;
+    const forged = await k.phone.request(`${SHARE_PATH}/move`, post({ t }));
+    expect(forged.status).not.toBe(303);
+    expect(org.writes).toBe(writes);
+    const res = await k.phone.request(`${SHARE_PATH}/move`, post({ t, csrf }));
+    expect(res.status).toBe(303);
+    expect(res.headers.get("location")).toBe(`${PLANS_PATH}/${f.threadId}`);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(res.headers.get("referrer-policy")).toBe("no-referrer");
+    expect(k.phone.jar.has(CLAIM_COOKIE)).toBe(false);
+    // The guest's answers win where both answered.
+    expect(await votesOf(org, f.threadId, account.id)).toEqual(["yes", "no"]);
+    expect(await votesOf(org, f.threadId, k.guestId)).toBeNull();
+    const after = await (await k.phone.request(path)).text();
+    expect(after).toContain("Answering as <strong>");
+    expect(after).not.toContain("/s/move");
+  });
+
+  it("from the claim link on a signed-in laptop, the form carries the claim", async () => {
+    const org = await browser({ now: () => NOW });
+    const f = await maraPoll(org);
+    const { path } = await share(org, f.threadId);
+    const k = await kestrel(org, f, path);
+    const laptop = org.another();
+    await addAccount(laptop, "kestrel@example.org");
+    const page = await (await laptop.request(k.keep)).text();
+    expect(page).toContain("Move Kestrel's answers to your account");
+    expect(page).toContain(`name="c" value="${k.claim}"`);
+    const t = tokenOf(path);
+    const res = await laptop.request(
+      `${SHARE_PATH}/move`,
+      post({ t, c: k.claim, csrf: moveCsrf(page) }),
+    );
+    expect(res.headers.get("location")).toBe(`${PLANS_PATH}/${f.threadId}`);
+    const account = await findOrCreatePerson(org.storage, "kestrel@example.org", { now: NOW });
+    expect(await votesOf(org, f.threadId, account.id)).toEqual(["yes", "no"]);
+  });
+
+  it("the move needs an account, a claim that still stands and a live link", async () => {
+    const org = await browser({ now: () => NOW });
+    const f = await maraPoll(org);
+    const { path } = await share(org, f.threadId);
+    const t = tokenOf(path);
+    const k = await kestrel(org, f, path);
+    const back = `${SHARE_PATH}?t=${encodeURIComponent(t)}`;
+    // Not signed in: a guest has nowhere to move to.
+    const guest = await k.phone.request(`${SHARE_PATH}/move`, post({ t }));
+    expect(guest.status).toBe(303);
+    expect(guest.headers.get("location")).toBe(back);
+    // Signed in, holding no claim: nothing is offered and nothing moves.
+    const ana = org.another();
+    await addAccount(ana, "ana@example.org");
+    const anaPage = await (await ana.request(path)).text();
+    expect(anaPage).not.toContain("/s/move");
+    const { csrf } = await home(ana);
+    const none = await ana.request(`${SHARE_PATH}/move`, post({ t, csrf }));
+    expect(none.headers.get("location")).toBe(back);
+    expect(await votesOf(org, f.threadId, k.guestId)).toEqual(["yes", "no"]);
+    // A guest removed meanwhile is no claim any more: nothing is offered or moved.
+    await addAccount(k.phone, "kestrel@example.org");
+    const offered = moveCsrf(await (await k.phone.request(path)).text());
+    await org.storage.query({ sql: "DELETE FROM person WHERE id = ?", params: [k.guestId] });
+    const gone = await k.phone.request(`${SHARE_PATH}/move`, post({ t, csrf: offered }));
+    expect(gone.headers.get("location")).toBe(back);
+    const dead = await k.phone.request(
+      `${SHARE_PATH}/move`,
+      post({ t: "dead-link", csrf: offered }),
+    );
+    expect(dead.status).toBe(404);
+  });
+});
+
 describe("the claim cookie (rc29), pure", () => {
   const c = (n: number): Claim => ({ threadId: `0000000${n}-aaaa`, token: `tok${n}` });
   it("keeps one claim per question, newest first, at most eight", () => {

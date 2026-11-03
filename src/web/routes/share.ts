@@ -9,6 +9,7 @@ import type { Plan } from "../../plans/plan.js";
 import {
   claimName,
   joinByShareLink,
+  moveGuest,
   questionAsOutsider,
   resolveClaim,
   resolveShareLink,
@@ -22,7 +23,7 @@ import {
   ThreadInputError,
   type ThreadMember,
 } from "../../plans/thread.js";
-import { type Html, html } from "../layout.js";
+import { type Html, html, PLANS_PATH } from "../layout.js";
 import { type AppEnv, page, rejectedPage, type SignedIn, verifyFormCsrf } from "../session.js";
 import { type AuthDeps, notSent, sendSignInLink } from "./auth.js";
 import {
@@ -47,6 +48,8 @@ import {
 //   POST /s/forget       "Not you?": this browser forgets its claim on this question
 //   POST /s/confirm      Confirm with email (rc30): a sign-in link that, used, moves this
 //                        name's answers to that address
+//   POST /s/move         Signed in over a claim (rc30): move this name's answers to the
+//                        active account
 //
 // Keep this link (rc30) is the shared link with the claim's token added (`&c=…`), shown
 // once, right after a name is claimed: it opens the question as that name on any device,
@@ -112,11 +115,25 @@ function writeClaims(c: Context<AppEnv>, claims: readonly Claim[], secure: boole
 
 // --- The page ------------------------------------------------------------------------------
 
-/** Who is answering: the active account, the name this browser claimed, or someone new. */
+/** A name this browser (or the link it opened) holds in this question. */
+interface Held {
+  readonly access: ThreadAccess;
+  /** The claim's token, when it came in the link rather than this browser's cookie. */
+  readonly token?: string;
+}
+
+/**
+ * Who is answering: the active account, the name this browser claimed, or someone new.
+ * Signed in, `held` is a claim this browser holds too, offered to move to the account.
+ */
 type Answering =
-  | { readonly kind: "account"; readonly me: SignedIn; readonly access: ThreadAccess | null }
-  /** `token` is the claim's, when it came in the link rather than this browser's cookie. */
-  | { readonly kind: "claim"; readonly access: ThreadAccess; readonly token?: string }
+  | {
+      readonly kind: "account";
+      readonly me: SignedIn;
+      readonly access: ThreadAccess | null;
+      readonly held: Held | null;
+    }
+  | ({ readonly kind: "claim" } & Held)
   | { readonly kind: "guest" };
 
 interface Shown {
@@ -155,10 +172,9 @@ async function sharePage(
     votes: new Map(),
   },
 ): Promise<string> {
+  const held = who.kind === "claim" ? who : who.kind === "account" ? who.held : null;
   const claimField =
-    who.kind === "claim" && who.token !== undefined
-      ? html`<input type="hidden" name="c" value="${who.token}" />`
-      : "";
+    held?.token === undefined ? "" : html`<input type="hidden" name="c" value="${held.token}" />`;
   const access = accessOf(who);
   const s = await shown(deps.storage, q);
   const voter = { members: s.members, personId: access?.personId ?? "" };
@@ -199,8 +215,20 @@ async function sharePage(
   <p><button type="submit">Confirm with email</button> <span class="muted">— a sign-in link; using it makes these answers your account's</span></p>
 </form>`
       : "";
+  // Signed in over a claim (rc30): the account already proves an address, so one POST.
+  // First on the page, before answering again as the account.
+  const move =
+    who.kind === "account" && who.held !== null
+      ? html`<h2>${claimedName(who.held.access)}'s answers</h2>
+<form method="post" action="${SHARE_PATH}/move">
+  <input type="hidden" name="t" value="${token}" />${claimField}
+  <input type="hidden" name="csrf" value="${who.me.csrfToken}" />
+  <p>This browser answered as <strong>${claimedName(who.held.access)}</strong> before you signed in.</p>
+  <p><button type="submit">Move ${claimedName(who.held.access)}'s answers to your account</button> <span class="muted">— where you both answered, ${claimedName(who.held.access)}'s answer is kept</span></p>
+</form>`
+      : "";
   const content = html`${notice}<h1>${q.thread.name}</h1>
-${body}
+${move}${body}
 ${keep}
 ${s.notes === "" ? "" : html`<h2>Notes</h2>${s.notes}`}
 <p class="muted">Anyone with this link can answer${who.kind === "account" ? "" : ", no account needed"}.</p>`;
@@ -217,21 +245,32 @@ async function answering(
   q: SharedQuestion,
   link?: unknown,
 ): Promise<Answering> {
+  const held = await holding(c, deps, q, link);
   const me = c.get("signedIn");
   if (me !== null)
     return {
       kind: "account",
       me,
       access: await findThreadForMember(deps.storage, q.thread.id, me.personId),
+      held,
     };
-  // Keep this link (rc30): a claim in the link comes before this browser's own.
+  return held === null ? { kind: "guest" } : { kind: "claim", ...held };
+}
+
+/** This question's claim: the link's first (Keep this link, rc30), then this browser's. */
+async function holding(
+  c: Context<AppEnv>,
+  deps: ShareRouteDeps,
+  q: SharedQuestion,
+  link: unknown,
+): Promise<Held | null> {
   const linked = readToken(link) ?? "";
   const viaLink = await resolveClaim(deps.storage, linked, q.thread.id);
-  if (viaLink !== null) return { kind: "claim", access: viaLink, token: linked };
+  if (viaLink !== null) return { access: viaLink, token: linked };
   const claim = parseClaims(getCookie(c, CLAIM_COOKIE)).find((x) => x.threadId === q.thread.id);
   const access =
     claim === undefined ? null : await resolveClaim(deps.storage, claim.token, q.thread.id);
-  return access === null ? { kind: "guest" } : { kind: "claim", access };
+  return access === null ? null : { access };
 }
 
 /** This browser remembers the claim, newest first (rc29). */
@@ -393,6 +432,31 @@ export function registerShareRoutes(app: Hono<AppEnv>, deps: ShareRouteDeps): vo
 <p>We sent a sign-in link to <strong>${email}</strong>. Using it signs you in and makes ${claimedName(who.access)}'s answers yours. It works once and expires in ${LOGIN_TOKEN_TTL_MS / 60_000} minutes.</p>`,
       ),
     );
+  });
+
+  // Signed in over a claim (rc30): moves the name's answers to the active account, and this
+  // browser forgets the claim, which went with the guest.
+  app.post(`${SHARE_PATH}/move`, async (c) => {
+    sensitive(c);
+    const form = await c.req.parseBody();
+    const token = readToken(form.t);
+    const q = token === null ? null : await resolveShareLink(deps.storage, token, deps.now());
+    if (token === null || q === null) return c.html(deadLink(), 404);
+    const who = await answering(c, deps, q, form.c);
+    const back = `${SHARE_PATH}?t=${encodeURIComponent(token)}`;
+    if (who.kind !== "account") return c.redirect(back, 303);
+    if (!(await verifyFormCsrf(who.me, form))) return rejectedPage(c, form);
+    if (who.held === null) return c.redirect(back, 303);
+    const moved = await moveGuest(deps.storage, {
+      guestId: who.held.access.personId,
+      personId: who.me.personId,
+    });
+    writeClaims(
+      c,
+      withoutClaim(parseClaims(getCookie(c, CLAIM_COOKIE)), q.thread.id),
+      deps.secureCookies,
+    );
+    return c.redirect(moved.kind === "moved" ? `${PLANS_PATH}/${q.thread.id}` : back, 303);
   });
 
   // "Not you?" (rc29): forgets this question's claim on this browser. Writes no storage.

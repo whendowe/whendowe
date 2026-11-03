@@ -113,6 +113,17 @@ test("just claimed a name: the claim link, once, and confirming by email", async
   expect(errors).toEqual([]);
 });
 
+test("signed in over a claim: the page offers to move the name's answers", async ({ page }) => {
+  const errors = await open(page, "share-over-claim");
+  await expect(page.getByText("Signed in as")).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Move Kestrel's answers to your account" }),
+  ).toBeVisible();
+  await expect(page.getByRole("button", { name: "Confirm with email" })).toHaveCount(0);
+  await expect(page).toHaveScreenshot("share-over-claim.png");
+  expect(errors).toEqual([]);
+});
+
 test.describe("without JavaScript", () => {
   test.use({ javaScriptEnabled: false });
 
