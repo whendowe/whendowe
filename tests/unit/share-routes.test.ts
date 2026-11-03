@@ -698,6 +698,62 @@ describe("signed in over a claim (rc30)", () => {
   });
 });
 
+describe("the organizer and guests (rc30)", () => {
+  it("the organizer sees who isn't confirmed and removes one; the name is free again", async () => {
+    const org = await browser({ now: () => NOW });
+    const f = await maraPoll(org);
+    const { path } = await share(org, f.threadId);
+    const before = await (await org.request(`${PLANS_PATH}/${f.threadId}`)).text();
+    expect(before).not.toContain('id="guests"');
+    const k = await kestrel(org, f, path);
+    const thread = await (await org.request(`${PLANS_PATH}/${f.threadId}`)).text();
+    expect(thread).toContain(`action="${PLANS_PATH}/${f.threadId}/guests/remove"`);
+    expect(thread).toContain("<strong>Kestrel</strong> · not confirmed");
+    expect(thread).toContain("Remove Kestrel");
+    expect(thread).not.toContain(`value="${f.david.id}"`);
+    const remove = `${PLANS_PATH}/${f.threadId}/guests/remove`;
+    const writes = org.writes;
+    const forged = await org.request(remove, post({ guest: k.guestId }));
+    expect(forged.status).toBe(403);
+    expect(await forged.text()).toContain("Request rejected");
+    expect(org.writes).toBe(writes);
+
+    const { csrf } = await home(org);
+    const res = await org.request(remove, post({ csrf, guest: k.guestId }));
+    expect(res.status).toBe(200);
+    const after = await res.text();
+    expect(after).toContain("Kestrel is removed, with their answers. The name is free again.");
+    expect(after).not.toContain('id="guests"');
+    expect(await votesOf(org, f.threadId, k.guestId)).toBeNull();
+    // The phone's claim went with the guest; the name can be claimed again.
+    expect(await (await k.phone.request(path)).text()).toContain('name="name"');
+    await kestrel(org, f, path);
+    const again = await org.request(remove, post({ csrf, guest: k.guestId }));
+    expect(again.status).toBe(409);
+    expect(await again.text()).toContain("They aren&#39;t a guest here any more.");
+  });
+
+  it("only the organizer sees guests marked, and only the organizer removes one", async () => {
+    const org = await browser({ now: () => NOW });
+    const f = await maraPoll(org);
+    const { path } = await share(org, f.threadId);
+    const k = await kestrel(org, f, path);
+    const david = org.another();
+    await addAccount(david, "david@example.org");
+    const page = await (await david.request(`${PLANS_PATH}/${f.threadId}`)).text();
+    expect(page).toContain("Kestrel");
+    expect(page).not.toContain("not confirmed");
+    const { csrf } = await home(david);
+    const res = await david.request(
+      `${PLANS_PATH}/${f.threadId}/guests/remove`,
+      post({ csrf, guest: k.guestId }),
+    );
+    expect(res.status).toBe(403);
+    expect(await res.text()).toContain("Only the organizer removes someone.");
+    expect(await votesOf(org, f.threadId, k.guestId)).toEqual(["yes", "no"]);
+  });
+});
+
 describe("the claim cookie (rc29), pure", () => {
   const c = (n: number): Claim => ({ threadId: `0000000${n}-aaaa`, token: `tok${n}` });
   it("keeps one claim per question, newest first, at most eight", () => {

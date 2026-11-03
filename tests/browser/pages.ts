@@ -285,6 +285,11 @@ const over = await app.request(`${shareUrl.pathname}${shareUrl.search}`, {
 if (over.status !== 200) throw new Error(`the shared link, signed in, answered ${over.status}`);
 writeFileSync(new URL("share-over-claim.html", OUT), await over.text());
 
+// Back on the DM's thread page (rc30): Kestrel is marked "not confirmed", with Remove.
+const withGuest = await app.request(table, { headers: { cookie } });
+if (withGuest.status !== 200) throw new Error(`${table} with a guest answered ${withGuest.status}`);
+writeFileSync(new URL("plan-thread-guest.html", OUT), await withGuest.text());
+
 // Lea is signed in here but not in the group; switched to her, the DM's event offers
 // the switch back (DESIGN §13 rc18). A 404, as the page is not hers to see.
 const leaSession = must(

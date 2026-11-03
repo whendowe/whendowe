@@ -124,6 +124,14 @@ test("signed in over a claim: the page offers to move the name's answers", async
   expect(errors).toEqual([]);
 });
 
+test("the organizer sees a guest as not confirmed, with Remove", async ({ page }) => {
+  const errors = await open(page, "plan-thread-guest");
+  await expect(page.getByText("· not confirmed")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Remove Kestrel" })).toBeVisible();
+  await expect(page.locator("#guests")).toHaveScreenshot("plan-thread-guest.png");
+  expect(errors).toEqual([]);
+});
+
 test.describe("without JavaScript", () => {
   test.use({ javaScriptEnabled: false });
 

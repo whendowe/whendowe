@@ -396,3 +396,37 @@ export async function moveGuest(
     threadIds: threads.map((r) => z.object({ thread_id: z.string() }).parse(r).thread_id),
   };
 }
+
+// --- Removing a guest (rc30, slice L2) --------------------------------------------------
+
+export type RemoveGuestResult =
+  | { readonly kind: "removed"; readonly name: string }
+  | { readonly kind: "forbidden" }
+  /** Not a guest in this thread any more: moved to an account, collected or removed. */
+  | { readonly kind: "gone" };
+
+/**
+ * The organizer removes a guest (rc30): the guest is deleted, its answers, notes and claim
+ * with it, and its name is free again. Only a guest of this thread, and only by whoever
+ * organizes it when the statement runs, so a hand-over meanwhile refuses it. A guest that
+ * organizes a thread is never deleted here: the thread would go with it.
+ */
+export async function removeGuest(
+  storage: StoragePort,
+  access: ThreadAccess,
+  guestId: string,
+): Promise<RemoveGuestResult> {
+  if (access.thread.organizerId !== access.personId) return { kind: "forbidden" };
+  const guest = access.members.find((m) => m.personId === guestId && m.guest);
+  if (guest === undefined) return { kind: "gone" };
+  const threadId = access.thread.id;
+  const rows = await storage.query({
+    sql: `DELETE FROM person WHERE id = ? AND guest_at IS NOT NULL
+            AND EXISTS (SELECT 1 FROM plan_thread_member WHERE thread_id = ? AND person_id = ?)
+            AND EXISTS (SELECT 1 FROM plan_thread WHERE id = ? AND organizer_id = ?)
+            AND NOT EXISTS (SELECT 1 FROM plan_thread WHERE organizer_id = ?)
+          RETURNING id`,
+    params: [guestId, threadId, guestId, threadId, access.personId, guestId],
+  });
+  return rows.length > 0 ? { kind: "removed", name: memberName(guest) } : { kind: "gone" };
+}

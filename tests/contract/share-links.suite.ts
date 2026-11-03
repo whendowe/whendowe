@@ -11,6 +11,7 @@ import {
   issueShareLink,
   joinByShareLink,
   moveGuest,
+  removeGuest,
   resolveClaim,
   resolveShareLink,
   type SharedQuestion,
@@ -475,6 +476,115 @@ export function runShareLinksContract(makePort: () => Promise<StoragePort>): voi
         email: "share-cy-s@example.org",
         guestId: null,
       });
+    });
+  });
+
+  describe("removing a guest (rc30)", () => {
+    const exists = async (port: StoragePort, personId: string) =>
+      (await port.query({ sql: "SELECT 1 AS ok FROM person WHERE id = ?", params: [personId] }))
+        .length > 0;
+
+    it("the organizer removes a guest; its answers go, and the name is free again", async () => {
+      const port = await makePort();
+      const f = await poll(port, "t");
+      const { q } = await shared(port, f);
+      const r = await claimed(port, q, "Kestrel");
+      const [p0 = ""] = f.planIds;
+      await castVote(port, r.access, { planId: p0, answer: "yes", now: LATER });
+      await addVoteNote(port, r.access, { body: "Bringing a kite", now: LATER });
+      const own = await f.as(f.mara.id);
+      expect(own.members.map((m) => m.guest)).toEqual([false, false, true]);
+
+      expect(await removeGuest(port, own, r.access.personId)).toEqual({
+        kind: "removed",
+        name: "Kestrel",
+      });
+      expect(await exists(port, r.access.personId)).toBe(false);
+      expect(await resolveClaim(port, r.token, f.threadId)).toBeNull();
+      const left = await port.query({
+        sql: `SELECT (SELECT count(*) FROM plan_vote WHERE person_id = ?) AS votes,
+                     (SELECT count(*) FROM plan_note WHERE author_id = ?) AS notes`,
+        params: [r.access.personId, r.access.personId],
+      });
+      expect(left[0]).toEqual({ votes: 0, notes: 0 });
+      expect((await f.as(f.mara.id)).members).toHaveLength(2);
+      expect(await removeGuest(port, own, r.access.personId)).toEqual({ kind: "gone" });
+      expect((await claimName(port, q, { name: "Kestrel", now: LATER })).kind).toBe("claimed");
+    });
+
+    it("removes the guest it names, and only one the organizer's page knew of", async () => {
+      const port = await makePort();
+      const f = await poll(port, "w");
+      const { q } = await shared(port, f);
+      const seen = await f.as(f.mara.id);
+      // Wren joined after the organizer's page was drawn: not removed from that page.
+      const wren = (await claimed(port, q, "Wren")).access.personId;
+      expect(await removeGuest(port, seen, wren)).toEqual({ kind: "gone" });
+      expect(await exists(port, wren)).toBe(true);
+      const kestrel = (await claimed(port, q, "Kestrel")).access.personId;
+      expect(await removeGuest(port, await f.as(f.mara.id), kestrel)).toEqual({
+        kind: "removed",
+        name: "Kestrel",
+      });
+      expect(await exists(port, wren)).toBe(true);
+    });
+
+    it("only the organizer, only a guest, only of this thread", async () => {
+      const port = await makePort();
+      const f = await poll(port, "u");
+      const { q } = await shared(port, f);
+      const k = (await claimed(port, q, "Kestrel")).access.personId;
+      const other = await poll(port, "u2");
+      const elsewhere = (await claimed(port, (await shared(port, other)).q, "Wren")).access
+        .personId;
+      const own = await f.as(f.mara.id);
+      expect(await removeGuest(port, await f.as(f.david.id), k)).toEqual({ kind: "forbidden" });
+      expect(await removeGuest(port, own, f.david.id)).toEqual({ kind: "gone" });
+      expect(await removeGuest(port, own, elsewhere)).toEqual({ kind: "gone" });
+      // The statement checks again, whatever the page that asked believed.
+      const believed = (personId: string) => ({
+        ...own,
+        members: [...own.members, { personId, shown: { name: "x", email: null }, guest: true }],
+      });
+      const asGuests = { ...own, members: own.members.map((m) => ({ ...m, guest: true })) };
+      expect(await removeGuest(port, asGuests, f.david.id)).toEqual({ kind: "gone" });
+      expect(await removeGuest(port, believed(elsewhere), elsewhere)).toEqual({ kind: "gone" });
+      expect(await exists(port, f.david.id)).toBe(true);
+      expect(await exists(port, elsewhere)).toBe(true);
+      // Organizer no more: Mara left, and David organizes it now.
+      await leaveThread(port, own, LATER);
+      expect(await removeGuest(port, own, k)).toEqual({ kind: "gone" });
+      expect(await exists(port, k)).toBe(true);
+    });
+
+    it("a guest that organizes a thread isn't deleted with it", async () => {
+      const port = await makePort();
+      const solo = await findOrCreatePerson(port, "share-solo-v@example.org", { now: T0 });
+      const { threadId } = await createPollThread(port, {
+        creatorId: solo.id,
+        group: null,
+        fields: { title: "Kites", description: null, location: null, allDay: true, tzid: null },
+        candidates: [
+          { startLocal: "2101-11-21", endLocal: "2101-11-22" },
+          { startLocal: "2101-11-14", endLocal: "2101-11-15" },
+        ],
+        people: [],
+        now: T0,
+      });
+      const soloAccess = await findThreadForMember(port, threadId, solo.id);
+      if (soloAccess === null) throw new Error("expected membership");
+      const issued = await issueShareLink(port, soloAccess, { now: T0 });
+      if (issued.kind !== "issued") throw new Error(issued.kind);
+      const kites = await resolveShareLink(port, issued.token, T0);
+      if (kites === null) throw new Error("expected the link to open");
+      const k = (await claimed(port, kites, "Kestrel")).access.personId;
+      await leaveThread(port, soloAccess, LATER);
+      // Kestrel organizes Kites now, and is in Mara's thread too.
+      const f = await poll(port, "v");
+      const { q } = await shared(port, f);
+      expect((await joinByShareLink(port, q, k, LATER)).kind).toBe("joined");
+      expect(await removeGuest(port, await f.as(f.mara.id), k)).toEqual({ kind: "gone" });
+      expect((await findThreadForMember(port, threadId, k))?.thread.organizerId).toBe(k);
     });
   });
 }

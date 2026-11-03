@@ -29,6 +29,8 @@ export interface ThreadMember {
   readonly personId: string;
   /** As the other members see them (DESIGN §10 rc21): a handle, an address only if shown. */
   readonly shown: Shown;
+  /** A name claimed from a shared link, not yet an account's (rc29): "not confirmed" (rc30). */
+  readonly guest: boolean;
 }
 
 /** Proof that a person is a member of a thread, with everyone who plans in it. */
@@ -165,6 +167,7 @@ const threadRowSchema = z.object({
 
 const memberRowSchema = shownRowSchema.extend({
   person_id: z.string(),
+  guest_at: z.string().nullable(),
 });
 
 function toThread(row: unknown): Thread {
@@ -203,14 +206,18 @@ export async function threadMembers(
 ): Promise<ThreadMember[]> {
   return (
     await storage.query({
-      sql: `SELECT m.person_id, p.email, p.display_name, m.handle, m.show_email
+      sql: `SELECT m.person_id, p.email, p.display_name, m.handle, m.show_email, p.guest_at
             FROM plan_thread_member m JOIN person p ON p.id = m.person_id
             WHERE m.thread_id = ? ORDER BY m.created_at, m.person_id`,
       params: [threadId],
     })
   ).map((row) => {
     const r = memberRowSchema.parse(row);
-    return { personId: r.person_id, shown: shownAs(r.person_id, r, threadId) };
+    return {
+      personId: r.person_id,
+      shown: shownAs(r.person_id, r, threadId),
+      guest: r.guest_at !== null,
+    };
   });
 }
 

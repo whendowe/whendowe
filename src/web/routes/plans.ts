@@ -34,7 +34,12 @@ import {
   updateDraftEvent,
   withdrawPlan,
 } from "../../plans/plan.js";
-import { issueShareLink, shareLinkExpiry, turnOffShareLink } from "../../plans/share.js";
+import {
+  issueShareLink,
+  removeGuest,
+  shareLinkExpiry,
+  turnOffShareLink,
+} from "../../plans/share.js";
 import {
   createThread,
   decidesByConsensus,
@@ -400,6 +405,22 @@ function shareSection(v: View): Html {
   return html`<section class="share" id="share"><h3 class="group-h">Share in a group chat</h3>${alone}${fresh}${live}</section>`;
 }
 
+/**
+ * Who answered from the shared link and hasn't confirmed (rc30), for the organizer: each
+ * can be removed, and the name is then free again.
+ */
+function guestsSection(v: View): Html | string {
+  const guests = v.access.members.filter((m) => m.guest);
+  if (guests.length === 0 || v.access.thread.organizerId !== v.access.personId) return "";
+  const here = `${threadPath(v.access.thread.id)}/guests/remove`;
+  return html`<section class="guests" id="guests"><h3 class="group-h">Not confirmed</h3>
+<p class="muted small">They answered from the shared link without an account. Removing one takes their answers with them and frees the name.</p>
+${guests.map(
+  (m) =>
+    html`<div class="row"><span><strong>${memberName(m)}</strong> · not confirmed</span><form method="post" action="${here}"><input type="hidden" name="csrf" value="${v.csrf}" /><input type="hidden" name="guest" value="${m.personId}" /><button class="link" type="submit">Remove ${memberName(m)}</button></form></div>`,
+)}</section>`;
+}
+
 function threadPage(v: View, day: string | null, notice: string | null = null): Html {
   const t = v.access.thread;
   const waiting = v.plans.filter(
@@ -460,6 +481,7 @@ ${
     }</div>
 ${notice === null ? "" : html`<p class="notice">${notice}</p>`}
 ${onTable.length > 0 && t.organizerId === v.access.personId ? shareSection(v) : ""}
+${guestsSection(v)}
 ${groups.map(([title, ps]) =>
   ps.length === 0 ? "" : html`<h3 class="group-h">${title}</h3>${ps.map((p) => planRow(v, p))}`,
 )}
@@ -1250,6 +1272,25 @@ export function registerPlanRoutes(app: Hono<AppEnv>, deps: PlanRouteDeps): void
     if (off.kind === "forbidden")
       return renderThread(c, r.access, r.me, "Only the organizer turns the link off.", 403);
     return renderThread(c, r.access, r.me, "The link is off. Anyone who already joined stays in.");
+  });
+
+  // Removing a guest (rc30): the organizer's, a POST; the name is then free again.
+  app.post(`${PLANS_PATH}/:thread/guests/remove`, async (c) => {
+    const r = await posting(c);
+    if (r instanceof Response) return r;
+    const guest = typeof r.form.guest === "string" ? r.form.guest : "";
+    const removed = await removeGuest(deps.storage, r.access, guest);
+    if (removed.kind === "forbidden")
+      return renderThread(c, r.access, r.me, "Only the organizer removes someone.", 403);
+    if (removed.kind === "gone")
+      return renderThread(c, r.access, r.me, "They aren't a guest here any more.", 409);
+    const fresh = await findThreadForMember(deps.storage, r.access.thread.id, r.me.personId);
+    return renderThread(
+      c,
+      fresh ?? r.access,
+      r.me,
+      `${removed.name} is removed, with their answers. The name is free again.`,
+    );
   });
 
   // Leaving (DESIGN §10 rc21). GET says what will happen; POST does it.
