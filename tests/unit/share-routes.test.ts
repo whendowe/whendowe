@@ -636,7 +636,8 @@ describe("signed in over a claim (rc30)", () => {
     expect(res.headers.get("cache-control")).toBe("no-store");
     expect(res.headers.get("referrer-policy")).toBe("no-referrer");
     expect(k.phone.jar.has(CLAIM_COOKIE)).toBe(false);
-    // The guest's answers win where both answered.
+    // Both answered the first time at the same moment (this clock is frozen): a tie goes to
+    // the guest (rc32). The contract suite has the later-answer cases.
     expect(await votesOf(org, f.threadId, account.id)).toEqual(["yes", "no"]);
     expect(await votesOf(org, f.threadId, k.guestId)).toBeNull();
     const after = await (await k.phone.request(path)).text();

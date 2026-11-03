@@ -356,27 +356,56 @@ export function runShareLinksContract(makePort: () => Promise<StoragePort>): voi
       expect(await moveGuest(port, { guestId: guest, personId: ana.id })).toEqual({ kind: "gone" });
     });
 
-    it("the guest's answers win where both answered; a member keeps its own name", async () => {
+    it("where both answered, the later answer is kept; a member keeps its own name (rc32)", async () => {
       const port = await makePort();
       const f = await poll(port, "o");
       const { q } = await shared(port, f);
       const [p0 = "", p1 = ""] = f.planIds;
       const david = await f.as(f.david.id);
-      await castVote(port, david, { planId: p0, answer: "no", now: T0 });
-      await castVote(port, david, { planId: p1, answer: "yes", now: T0 });
       const r = await claimed(port, q, "Kestrel");
+      // p0: David first, the guest later. p1: the guest first, David later.
+      await castVote(port, david, { planId: p0, answer: "no", now: T0 });
       await castVote(port, r.access, { planId: p0, answer: "yes", now: LATER });
+      await castVote(port, r.access, { planId: p1, answer: "no", now: T0 });
+      await castVote(port, david, { planId: p1, answer: "yes", now: LATER });
 
       expect(
         (await moveGuest(port, { guestId: r.access.personId, personId: f.david.id })).kind,
       ).toBe("moved");
       expect(await voteOf(port, p0, f.david.id)).toBe("yes");
       expect(await voteOf(port, p1, f.david.id)).toBe("yes");
+      expect(await exists(port, r.access.personId)).toBe(false);
       const after = await f.as(f.david.id);
       expect(after.members).toHaveLength(2);
       expect(after.members.find((m) => m.personId === f.david.id)?.shown.name).not.toBe("Kestrel");
       // The guest's name is free again.
       expect((await claimName(port, q, { name: "Kestrel", now: LATER })).kind).toBe("claimed");
+    });
+
+    it("a tie goes to the guest, and answers only one of them gave are all kept (rc32)", async () => {
+      const port = await makePort();
+      const f = await poll(port, "o2");
+      const { q } = await shared(port, f);
+      const [p0 = "", p1 = ""] = f.planIds;
+      const david = await f.as(f.david.id);
+      const r = await claimed(port, q, "Kestrel");
+      await castVote(port, david, { planId: p0, answer: "no", now: T0 });
+      await castVote(port, r.access, { planId: p0, answer: "ifneedbe", now: T0 });
+      await castVote(port, r.access, { planId: p1, answer: "no", now: T0 });
+
+      await moveGuest(port, { guestId: r.access.personId, personId: f.david.id });
+      expect(await voteOf(port, p0, f.david.id)).toBe("ifneedbe");
+      expect(await voteOf(port, p1, f.david.id)).toBe("no");
+      // And the other way round: only David answered p1 here.
+      const g = await poll(port, "o3");
+      const s = await shared(port, g);
+      const [g0 = "", g1 = ""] = g.planIds;
+      const k = await claimed(port, s.q, "Wren");
+      await castVote(port, await g.as(g.david.id), { planId: g1, answer: "yes", now: T0 });
+      await castVote(port, k.access, { planId: g0, answer: "no", now: LATER });
+      await moveGuest(port, { guestId: k.access.personId, personId: g.david.id });
+      expect(await voteOf(port, g0, g.david.id)).toBe("no");
+      expect(await voteOf(port, g1, g.david.id)).toBe("yes");
     });
 
     it("only a guest moves, and only to an account", async () => {
