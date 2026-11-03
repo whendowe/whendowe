@@ -70,7 +70,7 @@ import {
   whenText,
   whoText,
 } from "../../plans/weeks.js";
-import { type Html, html, PLANS_PATH, ZONE_GUESS } from "../layout.js";
+import { type Html, html, PLANS_PATH, SHARE_BUTTONS, shareBox, ZONE_GUESS } from "../layout.js";
 import { PLAN_STYLE, planAssets } from "../plan-editor.js";
 import {
   type AppEnv,
@@ -390,7 +390,8 @@ function shareSection(v: View): Html {
   const fresh =
     v.sharedUrl === null
       ? ""
-      : html`<p><label>Paste this into your group chat:<br /><input readonly value="${v.sharedUrl}" style="width:100%" /></label></p>
+      : html`<p>Paste this into your group chat:</p>
+${shareBox("Message to paste", html`${v.access.thread.name}: which of these work for you? ${v.sharedUrl}`)}${SHARE_BUTTONS}
 <p class="muted small">It's shown only now. Lost it? Make a new one — the old one then stops working.</p>`;
   const live =
     v.shareUntil === null
@@ -625,7 +626,7 @@ function planSheet(
             ? "You decide once everyone has voted."
             : `${v.nameOf(t.organizerId)} decides once everyone has voted.`
       }</p><p class="small">To let them know, paste this where you usually talk:</p>
-<textarea class="paste wide" rows="3" readonly aria-label="Message to paste">${t.name}: I've proposed “${p.name}” (${spanText(p.events)}). Have a look: ${link}</textarea></div>`
+${shareBox("Message to paste", html`${t.name}: I've proposed “${p.name}” (${spanText(p.events)}). Have a look: ${link}`, 3)}${SHARE_BUTTONS}</div>`
     : "";
   if (p.status === "accepted")
     return html`${about}<p class="small muted">${p.decidedBy === null ? "Both said yes to it" : `${v.nameOf(p.decidedBy)} accepted it`}, ${instant(v, p.decidedAt)}. Its events are in everyone's events.</p>`;

@@ -5,7 +5,7 @@ import { expect, it } from "vitest";
 import { bytesToBase64 } from "../../src/crypto/base64.js";
 import { createApp } from "../../src/web/app.js";
 import { CONTENT_SECURITY_POLICY, SCRIPT_HASHES } from "../../src/web/csp.js";
-import { ZONE_GUESS } from "../../src/web/layout.js";
+import { SHARE_BUTTONS, ZONE_GUESS } from "../../src/web/layout.js";
 import { pickerAssets } from "../../src/web/picker.js";
 import { planAssets } from "../../src/web/plan-editor.js";
 
@@ -13,7 +13,7 @@ import { planAssets } from "../../src/web/plan-editor.js";
 // scripts the pages actually ship, so changing a script without updating csp.ts fails
 // here, with the value to paste, rather than silently in a browser.
 
-const SHIPPED = [ZONE_GUESS.value, pickerAssets().value, planAssets().value];
+const SHIPPED = [ZONE_GUESS.value, SHARE_BUTTONS.value, pickerAssets().value, planAssets().value];
 
 function bodyOf(assets: string): string {
   const start = assets.indexOf("<script>");

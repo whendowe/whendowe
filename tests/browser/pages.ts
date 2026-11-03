@@ -260,6 +260,8 @@ const shared = await (
 const shareUrl = new URL(
   must(/value="(https:\/\/whendowe\.example\/s\?t=[^"]+)"/.exec(shared)?.[1], "shared link"),
 );
+// The page that made the link: the message to paste, with Share… and Copy (rc25).
+writeFileSync(new URL("plan-thread-shared.html", OUT), shared);
 const guestPage = await app.request(`${shareUrl.pathname}${shareUrl.search}`);
 if (guestPage.status !== 200) throw new Error(`the shared link answered ${guestPage.status}`);
 const guestHtml = await guestPage.text();

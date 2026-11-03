@@ -190,6 +190,39 @@ export function retentionSection(v: RetentionView): Html {
 }
 
 /**
+ * Something to paste into a chat (§10 rc25): its text, then Share… (the phone's share sheet)
+ * and Copy, each shown only where the browser has it. Without them, or without JavaScript,
+ * the text is there to select. Follow it with SHARE_BUTTONS once per page.
+ */
+export function shareBox(label: string, text: Html | string, rows = 2): Html {
+  return html`<div class="share-box" data-share><textarea class="paste wide" rows="${String(rows)}" readonly aria-label="${label}">${text}</textarea>
+<div class="row"><button type="button" data-share-sheet hidden>Share…</button><button type="button" data-copy hidden>Copy</button></div></div>`;
+}
+
+/** Wires every shareBox on the page. One fixed script, so the CSP allows it by hash. */
+export const SHARE_BUTTONS = html`<script>
+  document.querySelectorAll("[data-share]").forEach(function (box) {
+    var text = box.querySelector("textarea").value;
+    var sheet = box.querySelector("[data-share-sheet]");
+    var copy = box.querySelector("[data-copy]");
+    if (navigator.share) {
+      sheet.hidden = false;
+      sheet.addEventListener("click", function () {
+        navigator.share({ text: text }).catch(function () {});
+      });
+    }
+    if (navigator.clipboard) {
+      copy.hidden = false;
+      copy.addEventListener("click", function () {
+        navigator.clipboard.writeText(text).then(function () {
+          copy.textContent = "Copied";
+        });
+      });
+    }
+  });
+</script>`;
+
+/**
  * Progressive enhancement only: suggest the browser's own zone for a new event, poll or
  * thread. One fixed script, so the CSP allows it by hash (csp.ts).
  */

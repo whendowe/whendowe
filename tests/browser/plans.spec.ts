@@ -137,8 +137,41 @@ test("the organizer sees a guest as not confirmed, with Remove", async ({ page }
   expect(errors).toEqual([]);
 });
 
+test("a new shared link is a message to paste, with Copy where the browser can", async ({
+  page,
+  context,
+}) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  const errors = await open(page, "plan-thread-shared");
+  const box = page.getByRole("textbox", { name: "Message to paste" });
+  await expect(box).toHaveValue(/^Thursday Table: which of these work for you\? https:\/\/\S+$/);
+  // Share… is the phone's share sheet: shown only where the browser has one.
+  const hasSheet = await page.evaluate(() => "share" in navigator);
+  await expect(page.getByRole("button", { name: "Share…" })).toBeVisible({ visible: hasSheet });
+  const copy = page.locator("[data-copy]");
+  await expect(copy).toHaveText("Copy");
+  // The link's token is new on every render; mask it, not the page.
+  await expect(page.locator("#share")).toHaveScreenshot("plan-thread-shared.png", {
+    mask: [box],
+  });
+  await copy.click();
+  await expect(copy).toHaveText("Copied");
+  const copied = z.string().parse(await page.evaluate("navigator.clipboard.readText()"));
+  expect(copied).toBe(await box.inputValue());
+  expect(errors).toEqual([]);
+});
+
 test.describe("without JavaScript", () => {
   test.use({ javaScriptEnabled: false });
+
+  test("a new shared link is still there to select, with no buttons that can't work", async ({
+    page,
+  }) => {
+    await open(page, "plan-thread-shared");
+    await expect(page.getByRole("textbox", { name: "Message to paste" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Copy" })).toBeHidden();
+    await expect(page.getByRole("button", { name: "Share…" })).toBeHidden();
+  });
 
   test("the editor shows only the fields for its kind, and every action is a form", async ({
     page,

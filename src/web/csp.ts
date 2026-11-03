@@ -4,12 +4,13 @@ import type { MiddlewareHandler } from "hono";
 // Security headers on every response (DESIGN §13 rc21).
 //
 // Scripts are allowed by HASH, never 'unsafe-inline': the pages' inline scripts are
-// fixed strings (picker.ts, plan-editor.ts, layout.ts ZONE_GUESS), so their hashes are
+// fixed strings (picker.ts, plan-editor.ts, layout.ts ZONE_GUESS and SHARE_BUTTONS), so their hashes are
 // constants. An injected <script> — the day an escaping bug slips through — matches none
 // of them and does not run. tests/unit/csp.test.ts recomputes these from the shipped
 // scripts and fails, naming the new values, whenever a script changes.
 export const SCRIPT_HASHES: readonly string[] = [
   "sha256-hy1CT6orc1H1ttOry9+3LGLyKv9lFZDPcMIK/nQvAJo=",
+  "sha256-Ut9HYEA7WCEd+RNydfR65LQ8AkGLkHN9+rpxVaTPi2c=",
   "sha256-thOP9cofq68135/BNxIx19zBU2Nd3F8xNvN0xZ1hJoc=",
   "sha256-to6JPZkUfWfQiXrrmnVXATfIzIPJqlnSwh2dzCjuWAM=",
 ];

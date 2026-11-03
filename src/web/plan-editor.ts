@@ -28,6 +28,9 @@ export const PLAN_STYLE = html`<style>
   .pl .primary { background: var(--accent); color: var(--on); border-color: transparent; font-weight: 700; }
   .pl .link { background: none; border: 0; padding: 0; text-decoration: underline; }
   .pl button:disabled { opacity: .5; cursor: default; }
+  /* Share… and Copy stay hidden until the script finds the browser can do them. */
+  .pl .share-box [hidden] { display: none; }
+  .pl .share-box { display: grid; gap: 8px; }
   .pl input, .pl textarea, .pl select { font: inherit; padding: .35rem .4rem; color: var(--fg); background: var(--card);
     border: 1px solid var(--line); border-radius: 6px; }
   .pl textarea, .pl .wide { width: 100%; box-sizing: border-box; }
