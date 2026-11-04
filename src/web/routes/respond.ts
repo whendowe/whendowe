@@ -31,6 +31,7 @@ import { memberName, type ThreadAccess } from "../../plans/thread.js";
 import { type IssuedVoteLink, resolveVoteLink, VOTE_LINK_TTL_MS } from "../../plans/vote-link.js";
 import { dayLabel, spanText, whenText } from "../../plans/weeks.js";
 import { type Html, html, type Preview, renderPage } from "../layout.js";
+import { PLAN_STYLE } from "../plan-editor.js";
 import type { AppEnv } from "../session.js";
 import { BUSY_LABEL, describeRRule, formatWhen } from "./events.js";
 
@@ -261,7 +262,7 @@ function votePlan(
   chosen: ReadonlyMap<string, Answer> = new Map(),
 ): Html {
   const mine = mineOf(access, p, chosen);
-  return html`<li style="margin-bottom:.8em">${planSummary(access, p)}<br />
+  return html`<li>${planSummary(access, p)}<br />
 ${answerSchema.options.map(
   (a) =>
     html`<label style="margin-right:.8em"><input type="radio" name="plan_${p.id}" value="${a}" ${mine === a ? html`checked` : ""} /> ${ANSWER_LABEL[a]}</label>`,
@@ -284,17 +285,17 @@ export function answerPart(
   const [only] = onTable;
   if (only === undefined || oneTime(onTable) === null)
     return html`<h2>Which of these work for you?</h2>
-  <ul style="list-style:none;padding-left:0">${onTable.map((p) => votePlan(voter, p, chosen))}</ul>
+  <ul class="stack" style="list-style:none;padding:0;margin:0">${onTable.map((p) => votePlan(voter, p, chosen))}</ul>
   ${note}
   <p>${send}</p>`;
   const mine = mineOf(voter, only, chosen);
   return html`<h2>Does this work for you?</h2>
   <p>${planSummary(voter, only)}</p>
   ${note}
-  <p style="display:flex;gap:.6em;flex-wrap:wrap"><button type="submit" disabled hidden></button>${answerSchema.options.map(
+  <div class="seg" role="group" aria-label="Your answer"><button type="submit" disabled hidden></button>${answerSchema.options.map(
     (a) =>
       html`<button type="submit" name="plan_${only.id}" value="${a}" aria-pressed="${String(mine === a)}">${ANSWER_LABEL[a]}</button>`,
-  )}</p>
+  )}</div>
   ${mine === null ? "" : html`<p class="muted">You said ${ANSWER_LABEL[mine]}. Tap another to change it.</p>`}`;
 }
 
@@ -311,22 +312,23 @@ async function votePage(
   const body =
     onTable.length === 0
       ? html`<p><strong>There's nothing to vote on any more.</strong> Whatever was agreed is in the calendars of everyone in it.</p>`
-      : html`<form method="post" action="${VOTE_PATH}">
+      : html`<form class="stack" method="post" action="${VOTE_PATH}">
   <input type="hidden" name="t" value="${token}" />
   ${answerPart(
     access,
     onTable,
     html`<p><label>Anything to add? <span class="muted">(optional — everyone in it sees it, e.g. "Thursday's bad next week")</span><br />
-  <textarea name="note" rows="2" maxlength="500" style="width:100%"></textarea></label></p>`,
+  <textarea name="note" rows="2" maxlength="500" class="wide"></textarea></label></p>`,
     html`<button type="submit">Send my answer</button>`,
   )}
 </form>`;
   return linkPage(
     "Your vote",
-    html`${notice}<h1>${access.thread.name}</h1>
+    // The plan pages' look (rc19), so a link page and a plan page answer alike.
+    html`${PLAN_STYLE}<div class="pl">${notice}<h1>${access.thread.name}</h1>
 ${body}
 ${notes === "" ? "" : html`<h2>Notes</h2>${notes}`}
-<p class="muted">This link is just for you — please don't forward it. No account needed.</p>`,
+<p class="muted">This link is just for you — please don't forward it. No account needed.</p></div>`,
     questionPreview(access.thread.name, onTable),
   );
 }

@@ -24,6 +24,7 @@ import {
   type ThreadMember,
 } from "../../plans/thread.js";
 import { type Html, html, PLANS_PATH } from "../layout.js";
+import { PLAN_STYLE } from "../plan-editor.js";
 import { type AppEnv, page, rejectedPage, type SignedIn, verifyFormCsrf } from "../session.js";
 import { type AuthDeps, notSent, sendSignInLink } from "./auth.js";
 import {
@@ -190,7 +191,7 @@ async function sharePage(
         : "";
   const body = !q.open
     ? html`<p><strong>This is decided.</strong> There's nothing to vote on any more.</p>`
-    : html`${lead}<form method="post" action="${SHARE_PATH}">
+    : html`${lead}<form class="stack" method="post" action="${SHARE_PATH}">
   <input type="hidden" name="t" value="${token}" />${claimField}
   ${who.kind === "account" ? html`<input type="hidden" name="csrf" value="${who.me.csrfToken}" />` : ""}
   ${
@@ -203,7 +204,7 @@ async function sharePage(
     voter,
     s.onTable,
     html`<p><label>Anything to add? <span class="muted">(optional — everyone in it sees it)</span><br />
-  <textarea name="note" rows="2" maxlength="500" style="width:100%"></textarea></label></p>`,
+  <textarea name="note" rows="2" maxlength="500" class="wide"></textarea></label></p>`,
     html`<button class="primary" type="submit">Send my answer</button>`,
     typed.votes,
   )}
@@ -212,7 +213,7 @@ async function sharePage(
   const keep =
     who.kind === "claim" && q.open
       ? html`<h2>Keep your answer</h2>
-<form method="post" action="${SHARE_PATH}/confirm">
+<form class="stack" method="post" action="${SHARE_PATH}/confirm">
   <input type="hidden" name="t" value="${token}" />${claimField}
   <p><label>Your email <span class="muted">(nobody in it sees this)</span><br />
   <input name="email" type="email" autocomplete="email" required /></label></p>
@@ -224,18 +225,19 @@ async function sharePage(
   const move =
     who.kind === "account" && who.held !== null
       ? html`<h2>${claimedName(who.held.access)}'s answers</h2>
-<form method="post" action="${SHARE_PATH}/move">
+<form class="stack" method="post" action="${SHARE_PATH}/move">
   <input type="hidden" name="t" value="${token}" />${claimField}
   <input type="hidden" name="csrf" value="${who.me.csrfToken}" />
   <p>This browser answered as <strong>${claimedName(who.held.access)}</strong> before you signed in.</p>
   <p><button type="submit">Move ${claimedName(who.held.access)}'s answers to your account</button></p>
 </form>`
       : "";
-  const content = html`${notice}<h1>${q.thread.name}</h1>
+  // The plan pages' look (rc19), so a link page and a plan page answer alike.
+  const content = html`${PLAN_STYLE}<div class="pl">${notice}<h1>${q.thread.name}</h1>
 ${move}${body}
 ${keep}
 ${s.notes === "" ? "" : html`<h2>Notes</h2>${s.notes}`}
-<p class="muted">Anyone with this link can answer${who.kind === "account" ? "" : ", no account needed"}.</p>`;
+<p class="muted">Anyone with this link can answer${who.kind === "account" ? "" : ", no account needed"}.</p></div>`;
   // Signed in, the page acts as the account: its header says which (§13 rc18).
   return who.kind === "account"
     ? page(c, q.thread.name, content)
@@ -393,9 +395,9 @@ export function registerShareRoutes(app: Hono<AppEnv>, deps: ShareRouteDeps): vo
         q,
         token,
         { kind: "claim", access },
-        html`<div class="notice"><p><strong>Thanks — your answer is saved.</strong> This phone remembers you're ${claimedName(access)}.</p>
+        html`<div class="notice stack"><p><strong>Thanks — your answer is saved.</strong> This phone remembers you're ${claimedName(access)}.</p>
 <p><label>To change it from anywhere else, keep this link — it's yours, so don't share it:<br />
-<input readonly value="${keepLink(deps, token, claimedNow)}" style="width:100%" /></label></p></div>`,
+<input readonly value="${keepLink(deps, token, claimedNow)}" class="wide" /></label></p></div>`,
       ),
     );
   });

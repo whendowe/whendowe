@@ -28,8 +28,9 @@ export const PLAN_STYLE = html`<style>
   .pl .primary { background: var(--accent); color: var(--on); border-color: transparent; font-weight: 700; }
   .pl .link { background: none; border: 0; padding: 0; text-decoration: underline; }
   .pl button:disabled { opacity: .5; cursor: default; }
-  /* Share… and Copy stay hidden until the script finds the browser can do them. */
-  .pl .share-box [hidden] { display: none; }
+  /* The button rules above set display; hidden must still hide: Share… and Copy until the
+     script finds the browser can do them, and the shared pages' Enter guard. */
+  .pl [hidden] { display: none !important; }
   .pl .share-box { display: grid; gap: 8px; }
   .pl input, .pl textarea, .pl select { font: inherit; padding: .35rem .4rem; color: var(--fg); background: var(--card);
     border: 1px solid var(--line); border-radius: 6px; }
@@ -37,6 +38,7 @@ export const PLAN_STYLE = html`<style>
   .pl form { margin: 0; }
   .pl .muted { color: var(--muted); opacity: 1; }
   .pl .small { font-size: .85rem; }
+  .pl .stack { display: grid; gap: 12px; }
   .pl .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
   .pl .spread { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
   .pl .notice { padding: 8px 10px; border-radius: 8px; background: var(--accent-soft); }
