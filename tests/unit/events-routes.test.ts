@@ -406,17 +406,22 @@ it("a poll shows its options in time order, not a placeholder time, and no edit 
   expect((await get(h, `${poll}/edit`, dm)).status).toBe(409);
 });
 
-it("refuses a poll with one option, keeping what was typed", async () => {
+it("refuses a poll with no time, keeping what was typed; one time is a poll (rc33)", async () => {
   const h = await harness();
   const { dm, group } = await setup(h);
   const res = await h.app.request(
     `${group}/polls`,
-    post({ csrf: dm.csrf, ...POLL, start_1: "", end_1: "" }, dm.cookie),
+    post({ csrf: dm.csrf, ...POLL, start_0: "", end_0: "", start_1: "", end_1: "" }, dm.cookie),
   );
   expect(res.status).toBe(400);
   const body = await res.text();
-  expect(body).toContain("at least 2");
-  expect(body).toContain('value="2101-10-22T18:00"');
+  expect(body).toContain("Offer a time.");
+  expect(body).toContain(`value="${POLL.title}"`);
+  const one = await h.app.request(
+    `${group}/polls`,
+    post({ csrf: dm.csrf, ...POLL, start_1: "", end_1: "" }, dm.cookie),
+  );
+  expect(one.status).toBe(303);
 });
 
 it("the form makes a thread: who sees what the group plans votes, busy-only members don't", async () => {

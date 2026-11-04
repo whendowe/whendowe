@@ -233,7 +233,14 @@ export function runPollPlansContract(makePort: () => Promise<StoragePort>): void
           people,
           now: T0,
         });
-      await expect(poll(TIMES.slice(0, 1), [david.id])).rejects.toBeInstanceOf(PollInputError);
+      // rc33: one time is a question; none is not. Ten is the most, eleven too many.
+      await expect(poll([], [david.id])).rejects.toBeInstanceOf(PollInputError);
+      const days = (n: number) =>
+        Array.from({ length: n }, (_, i) => ({
+          startLocal: `2101-12-${String(i + 1).padStart(2, "0")}`,
+          endLocal: `2101-12-${String(i + 2).padStart(2, "0")}`,
+        }));
+      await expect(poll(days(11), [david.id])).rejects.toBeInstanceOf(PollInputError);
       // rc29: nobody else is allowed (a poll made to be shared); too many is not.
       const crowd = await Promise.all(
         Array.from({ length: MAX_MEMBERS }, (_, i) => person(port, `crowd${i}`, "d")),
@@ -245,6 +252,43 @@ export function runPollPlansContract(makePort: () => Promise<StoragePort>): void
         ),
       ).rejects.toBeInstanceOf(ThreadInputError);
       expect(await count()).toBe(0);
+      expect((await poll(days(10), [david.id])).planIds).toHaveLength(10);
+    });
+
+    it("one time is a question: between two, a yes agrees it; a no leaves the way to another time (rc33)", async () => {
+      const port = await makePort();
+      const mara = await person(port, "mara", "o1");
+      const david = await person(port, "david", "o1");
+      const ana = await person(port, "ana", "o1");
+      const one = (people: string[]) =>
+        createPollThread(port, {
+          creatorId: mara.id,
+          group: null,
+          fields: FIELDS,
+          candidates: TIMES.slice(0, 1),
+          people,
+          now: T0,
+        });
+      const yes = await one([david.id]);
+      const [only = ""] = yes.planIds;
+      expect(yes.planIds).toHaveLength(1);
+      const asDavid = await gate(port, yes.threadId, david.id);
+      expect(await castVote(port, asDavid, { planId: only, answer: "yes", now: T1 })).toEqual({
+        kind: "accepted",
+        replaced: [],
+      });
+      // David can't make it: nothing is decided, and he suggests another time instead.
+      const no = await one([ana.id]);
+      const [first = ""] = no.planIds;
+      const asAna = await gate(port, no.threadId, ana.id);
+      expect((await castVote(port, asAna, { planId: first, answer: "no", now: T1 })).kind).toBe(
+        "recorded",
+      );
+      const sunday = { startLocal: "2101-11-22", endLocal: "2101-11-23" };
+      expect((await suggestTime(port, asAna, { planId: first, ...sunday, now: T2 })).kind).toBe(
+        "suggested",
+      );
+      expect((await listPlans(port, asAna)).map((p) => p.status)).toEqual(["on_table", "on_table"]);
     });
 
     it("a poll of one is made to be shared: its creator's own yes agrees nothing (rc29)", async () => {

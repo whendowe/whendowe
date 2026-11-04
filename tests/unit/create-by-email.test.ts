@@ -95,12 +95,13 @@ it("a refused form keeps what was typed and creates no one", async () => {
     expect(text).toContain('value="good@example.org"');
     expect(await findPersonByEmail(b.storage, "good@example.org")).toBeNull();
   }
-  // A poll with one option is refused the same way.
+  // A poll whose time ends before it starts is refused the same way. (One time is a
+  // poll since rc33, so that's no longer the refusal to use.)
   const poll = await create(b, POLLS_PATH, {
     title: "When?",
     tzid: "Europe/Prague",
     start_0: "2101-11-10T19:00",
-    end_0: "2101-11-10T22:00",
+    end_0: "2101-11-10T18:00",
     email_0: "good@example.org",
   });
   expect(poll.status).toBe(400);
