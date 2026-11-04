@@ -51,7 +51,12 @@ async function maraPoll(b: Browser) {
 }
 
 /** Mara shares the poll from its page; the link it shows once. */
-async function share(b: Browser, threadId: string) {
+async function share(
+  b: Browser,
+  threadId: string,
+  /** What the message to paste asks, before the link (rc33: one time is one question). */
+  ask = "which of these work for you?",
+) {
   const { csrf } = await home(b);
   const res = await b.request(`${PLANS_PATH}/${threadId}/share`, post({ csrf }));
   expect(res.status).toBe(200);
@@ -62,9 +67,11 @@ async function share(b: Browser, threadId: string) {
   // The page that made the link already knows the thread is shared: Mara decides (rc29).
   expect(text).toContain("You decide, after the votes are in");
   // The link ends the message to paste (rc25): "Picnic: which of these work for you? <link>".
+  const at = text.indexOf(`${ask} https://whendowe.example/s?t=`);
+  expect(at).toBeGreaterThan(-1);
   const url =
-    /which of these work for you\? (https:\/\/whendowe\.example\/s\?t=[^\s<]+)<\/textarea>/.exec(
-      text,
+    /^ (https:\/\/whendowe\.example\/s\?t=[^\s<]+)<\/textarea>/.exec(
+      text.slice(at + ask.length),
     )?.[1] ?? "";
   expect(url).not.toBe("");
   const u = new URL(url.replaceAll("&amp;", "&"));
@@ -479,7 +486,11 @@ describe("one time on the shared page (rc33)", () => {
       now: NOW,
     });
     const [only] = planIds;
-    const { path } = await share(org, threadId);
+    const { path } = await share(
+      org,
+      threadId,
+      "Pizza, Mon 21 Nov, all day: does this work for you?",
+    );
     const phone = org.another();
     const page = await (await phone.request(path)).text();
     expect(page).toContain("Does this work for you?");
