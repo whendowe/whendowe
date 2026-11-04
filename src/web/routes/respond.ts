@@ -20,7 +20,13 @@ import {
 } from "../../events/response.js";
 import type { MailPort } from "../../mail/port.js";
 import { addVoteNote, listNotes, type PlanNote } from "../../plans/note.js";
-import { castVote, listPlans, type Plan, PlanInputError } from "../../plans/plan.js";
+import {
+  castVote,
+  listPlans,
+  type Plan,
+  type PlanEvent,
+  PlanInputError,
+} from "../../plans/plan.js";
 import { memberName, type ThreadAccess } from "../../plans/thread.js";
 import { type IssuedVoteLink, resolveVoteLink, VOTE_LINK_TTL_MS } from "../../plans/vote-link.js";
 import { dayLabel, spanText, whenText } from "../../plans/weeks.js";
@@ -77,8 +83,20 @@ const PREVIEW_TIMES = 3;
  * A question's card in a chat (§10 rc25): its name and the times on the table. A plan of
  * several events is its count and span, not its name, which may name a person.
  */
+/**
+ * The one time on the table, when that is all there is: one plan of one event (rc33).
+ * The vote form, the chat's card and the email all ask about it as one question.
+ */
+export function oneTime(onTable: readonly Plan[]): PlanEvent | null {
+  const [only, ...others] = onTable;
+  const [e, ...more] = only?.events ?? [];
+  return others.length === 0 && more.length === 0 ? (e ?? null) : null;
+}
+
 export function questionPreview(name: string, onTable: readonly Plan[]): Preview {
   if (onTable.length === 0) return { title: name, description: "Nothing to vote on any more." };
+  const one = oneTime(onTable);
+  if (one !== null) return { title: name, description: `Does this work for you? ${whenText(one)}` };
   const times = onTable.map((p) => {
     const [e, ...more] = p.events;
     return e !== undefined && more.length === 0
@@ -263,8 +281,8 @@ export function answerPart(
   send: Html,
   chosen: ReadonlyMap<string, Answer> = new Map(),
 ): Html {
-  const [only, ...others] = onTable;
-  if (only === undefined || others.length > 0 || only.events.length !== 1)
+  const [only] = onTable;
+  if (only === undefined || oneTime(onTable) === null)
     return html`<h2>Which of these work for you?</h2>
   <ul style="list-style:none;padding-left:0">${onTable.map((p) => votePlan(voter, p, chosen))}</ul>
   ${note}
@@ -583,16 +601,19 @@ export async function sendVoteLink(
     readonly access: ThreadAccess;
     readonly from: string;
     readonly publicBaseUrl: string;
+    /** What the link asks about: one time is asked as one question (rc33). */
+    readonly onTable: readonly Plan[];
   },
 ): Promise<void> {
   const { link, access, from } = input;
+  const one = oneTime(input.onTable);
   const url = new URL(VOTE_PATH, input.publicBaseUrl);
   url.searchParams.set("t", link.token);
   const name = access.thread.name;
   const days = VOTE_LINK_TTL_MS / (24 * 60 * 60 * 1000);
   await mail.send({
     to: link.email,
-    subject: `When can you make "${name}"?`,
+    subject: one === null ? `When can you make "${name}"?` : `Can you make "${name}"?`,
     cause: {
       kind: "from",
       senderId: access.personId,
@@ -600,7 +621,9 @@ export async function sendVoteLink(
       why: `${from} added this address to a plan on WhenDoWe`,
     },
     text: [
-      `${from} is finding a time for "${name}" and would like to know which times work for you.`,
+      one === null
+        ? `${from} is finding a time for "${name}" and would like to know which times work for you.`
+        : `${from} would like to know whether you can make "${name}" on ${whenText(one)}.`,
       "",
       "Vote here — no account, nothing to install:",
       url.toString(),

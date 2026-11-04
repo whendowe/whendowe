@@ -1219,6 +1219,9 @@ export function registerPlanRoutes(app: Hono<AppEnv>, deps: PlanRouteDeps): void
       return renderThread(c, r.access, r.me, "Nothing is on the table to vote on.", 409);
     const me = r.access.members.find((m) => m.personId === r.access.personId);
     const from = me === undefined ? "Someone" : memberName(me);
+    const onTable = (await listPlans(deps.storage, r.access)).filter(
+      (p) => p.status === "on_table",
+    );
     let sent = 0;
     let failed = 0;
     let capped = false;
@@ -1230,6 +1233,7 @@ export function registerPlanRoutes(app: Hono<AppEnv>, deps: PlanRouteDeps): void
             access: r.access,
             from,
             publicBaseUrl: deps.publicBaseUrl,
+            onTable,
           });
           sent += 1;
           continue;

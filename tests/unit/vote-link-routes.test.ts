@@ -250,9 +250,13 @@ it("decided meanwhile, or left: the link says so", async () => {
 
 // --- the organizer emails them (P6c part 2) ------------------------------------------
 
-async function signedInPoll(b: Browser, names: readonly string[]) {
+async function signedInPoll(
+  b: Browser,
+  names: readonly string[],
+  candidates?: Parameters<typeof pollWith>[4],
+) {
   await addAccount(b, "mara@example.org");
-  const f = await pollWith(b, names);
+  const f = await pollWith(b, names, undefined, undefined, candidates);
   // pollWith issued links for the tests above; here the organizer sends the first ones.
   await b.storage.batch([
     { sql: "DELETE FROM plan_vote_token WHERE thread_id = ?", params: [f.threadId] },
@@ -291,6 +295,28 @@ it("the organizer emails each member their own link, in the thread's name for th
 
   const again = await sendLinks(b, f.thread);
   expect(await again.text()).toContain("Sent to 0 people. 2 already got a link in the last hour.");
+});
+
+it("one time is asked as one question: on the card and in the email (rc33)", async () => {
+  const b = await browser({ now: () => NOW });
+  const f = await signedInPoll(
+    b,
+    ["david", "ana"],
+    [{ startLocal: "2101-11-21", endLocal: "2101-11-22" }],
+  );
+  await sendLinks(b, f.thread);
+  const mails = b.sent.filter((m) => m.subject === 'Can you make "Picnic"?');
+  expect(mails.map((m) => m.to).sort()).toEqual(["ana@example.org", "david@example.org"]);
+  const mara = guestName(f.threadId, f.mara.id);
+  const david = mails.find((m) => m.to === "david@example.org");
+  expect(david?.text).toContain(
+    `${mara} would like to know whether you can make "Picnic" on Mon 21 Nov, all day.\n\nVote here`,
+  );
+  expect(david?.text).not.toContain("which times");
+  const url = /https:\/\/whendowe\.example(\/vote\?t=\S+)/.exec(david?.text ?? "")?.[1] ?? "";
+  const page = await (await b.request(url)).text();
+  expect(page).toContain("Does this work for you?");
+  expect(og(page).description).toBe("Does this work for you? Mon 21 Nov, all day");
 });
 
 it("only the organizer, with CSRF, while something is on the table", async () => {
