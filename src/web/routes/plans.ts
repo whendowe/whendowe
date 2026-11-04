@@ -83,7 +83,7 @@ import {
 } from "../session.js";
 import { appearanceSection, saveAppearance } from "./account.js";
 import { EVENTS_PATH } from "./events.js";
-import { noteList, sendVoteLink, sensitive } from "./respond.js";
+import { noteList, oneTime, sendVoteLink, sensitive } from "./respond.js";
 import { SHARE_PATH } from "./share.js";
 
 // Plan pages (DESIGN §10 rc19, slices P2–P3): a thread, a plan, and your draft. Every read
@@ -381,6 +381,17 @@ ${opts.rest ? html`<input type="hidden" name="rest" value="1" />` : ""}
 }
 
 /**
+ * The message to paste with a shared link. One time is asked as one question (rc33), with
+ * the time in words: not every chat draws the link's card. The link stays last.
+ */
+function pasteMessage(v: View, url: string): Html {
+  const one = oneTime(v.plans.filter((p) => p.status === "on_table"));
+  return one === null
+    ? html`${v.access.thread.name}: which of these work for you? ${url}`
+    : html`${v.access.thread.name}, ${whenText(one)}: does this work for you? ${url}`;
+}
+
+/**
  * The organizer's shared link (rc25, rc29): make one, see until when it works, replace it
  * or turn it off. A new link is shown once, on the page that made it; only its hash is kept.
  */
@@ -391,7 +402,7 @@ function shareSection(v: View): Html {
     v.sharedUrl === null
       ? ""
       : html`<p>Paste this into your group chat:</p>
-${shareBox("Message to paste", html`${v.access.thread.name}: which of these work for you? ${v.sharedUrl}`)}${SHARE_BUTTONS}
+${shareBox("Message to paste", pasteMessage(v, v.sharedUrl))}${SHARE_BUTTONS}
 <p class="muted small">It's shown only now. Lost it? Make a new one — the old one then stops working.</p>`;
   const live =
     v.shareUntil === null
