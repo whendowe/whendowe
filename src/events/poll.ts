@@ -50,9 +50,13 @@ export interface CandidateTimeInput {
 export function validateCandidates(
   fields: Omit<EventFieldsInput, "startLocal" | "endLocal">,
   times: readonly CandidateTimeInput[],
+  /** A poll that is a thread may offer one time (rc33); an event-poll, two. */
+  min: number = MIN_CANDIDATES,
 ): Omit<Candidate, "slotIndex">[] {
-  if (times.length < MIN_CANDIDATES)
-    throw new PollInputError(`Offer at least ${MIN_CANDIDATES} times to choose from.`);
+  if (times.length < min)
+    throw new PollInputError(
+      min === 1 ? "Offer a time." : `Offer at least ${min} times to choose from.`,
+    );
   if (times.length > MAX_CANDIDATES)
     throw new PollInputError(`Offer at most ${MAX_CANDIDATES} times.`);
   const parsed = times.map((t) => eventFieldsSchema.parse({ ...fields, ...t }));

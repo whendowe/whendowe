@@ -28,6 +28,7 @@ import { type AppEnv, page, rejectedPage, type SignedIn, verifyFormCsrf } from "
 import { type AuthDeps, notSent, sendSignInLink } from "./auth.js";
 import {
   type Answers,
+  answerPart,
   applyAnswers,
   deadLink,
   linkPage,
@@ -36,7 +37,6 @@ import {
   readAnswers,
   readToken,
   sensitive,
-  votePlan,
 } from "./respond.js";
 
 // The shared link's page (DESIGN §10 rc25, rc29; slice L1): one link for a question, pasted
@@ -199,11 +199,14 @@ async function sharePage(
   <input name="name" value="${typed.name}" maxlength="40" autocomplete="nickname" required /></label></p>`
       : ""
   }
-  <h2>Which of these work for you?</h2>
-  <ul style="list-style:none;padding-left:0">${s.onTable.map((p) => votePlan(voter, p, typed.votes))}</ul>
-  <p><label>Anything to add? <span class="muted">(optional — everyone in it sees it)</span><br />
-  <textarea name="note" rows="2" maxlength="500" style="width:100%"></textarea></label></p>
-  <p><button class="primary" type="submit">Send my answer</button></p>
+  ${answerPart(
+    voter,
+    s.onTable,
+    html`<p><label>Anything to add? <span class="muted">(optional — everyone in it sees it)</span><br />
+  <textarea name="note" rows="2" maxlength="500" style="width:100%"></textarea></label></p>`,
+    html`<button class="primary" type="submit">Send my answer</button>`,
+    typed.votes,
+  )}
 </form>`;
   // A guest's answer is kept by this browser only; the page offers to keep it for good.
   const keep =

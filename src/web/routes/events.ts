@@ -79,7 +79,7 @@ import {
   visibilitySchema,
 } from "../../people/invite.js";
 import { appearanceIn, normalizeEmail } from "../../people/person.js";
-import { createPollThread } from "../../plans/plan.js";
+import { createPollThread, MIN_POLL_TIMES } from "../../plans/plan.js";
 import {
   findThreadForMember,
   listThreadsFor,
@@ -877,7 +877,7 @@ function pollForm(
   <h2>Options</h2>
   <div data-picker-plain>
   <p><label><input type="checkbox" name="allDay" ${v.allDay ? html`checked` : ""} /> All-day options</label></p>
-  <p class="muted">Offer at least two. Leave the rows you don't need empty. For all-day options, "ends" is the last day.</p>
+  <p class="muted">One time asks who's in; a few let people choose. Leave the rows you don't need empty. For all-day options, "ends" is the last day.</p>
   ${slots.map(
     (
       slot,
@@ -1402,7 +1402,7 @@ ${pollForm(`/groups/${membership.group.id}/polls`, csrf, values, error, peopleFi
     if (bad.length > 0) return again(badPeople(bad));
     try {
       const input = toPollInput(values);
-      validateCandidates(input.fields, input.candidates); // as above: valid before anyone is created
+      validateCandidates(input.fields, input.candidates, MIN_POLL_TIMES); // as above: valid before anyone is created
       const { people } = await invitees(deps, rows, {
         senderId: me.personId,
         groupId: membership?.group.id ?? null,

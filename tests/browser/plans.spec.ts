@@ -105,6 +105,30 @@ test("the shared link, on a phone with no account: a name and the votes, one for
   expect(errors).toEqual([]);
 });
 
+test("one time on the shared page: each answer is a button; Enter in the name picks none", async ({
+  page,
+}) => {
+  const errors = await open(page, "share-one-time");
+  await expect(page.getByRole("heading", { name: "Does this work for you?" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Send my answer" })).toHaveCount(0);
+  await expect(page.getByRole("radio")).toHaveCount(0);
+  for (const name of ["Yes", "If need be", "No"])
+    await expect(page.getByRole("button", { name, exact: true })).toBeVisible();
+  await expect(page).toHaveScreenshot("share-one-time.png");
+  // Enter after typing a name ("Go" on a phone) must not vote. Then a tap on "If need be".
+  // Every submit is recorded (and stopped) in the page: the one there is is the tap's.
+  await page.evaluate(`window.submits = [];
+    document.querySelector('form[action="/s"]').addEventListener("submit", (e) => {
+      e.preventDefault();
+      window.submits.push(e.submitter ? e.submitter.value : "implicit");
+    });`);
+  await page.getByLabel("Your name").fill("Kestrel");
+  await page.getByLabel("Your name").press("Enter");
+  await page.getByRole("button", { name: "If need be" }).click();
+  expect(z.array(z.string()).parse(await page.evaluate("window.submits"))).toEqual(["ifneedbe"]);
+  expect(errors).toEqual([]);
+});
+
 test("just claimed a name: the claim link, once, and confirming by email", async ({ page }) => {
   const errors = await open(page, "share-claimed");
   await expect(page.getByText("your answer is saved")).toBeVisible();

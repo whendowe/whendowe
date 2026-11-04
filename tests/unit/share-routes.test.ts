@@ -462,6 +462,44 @@ async function kestrel(org: Browser, f: Awaited<ReturnType<typeof maraPoll>>, pa
   };
 }
 
+describe("one time on the shared page (rc33)", () => {
+  it("a guest names themselves and answers in one tap; Enter in the name picks nothing", async () => {
+    const org = await browser({ now: () => NOW });
+    await addAccount(org, "mara@example.org");
+    await nameActive(org, "mara@example.org");
+    const mara = await findOrCreatePerson(org.storage, "mara@example.org", { now: NOW });
+    const { threadId, planIds } = await createPollThread(org.storage, {
+      creatorId: mara.id,
+      group: null,
+      fields: { title: "Pizza", description: null, location: null, allDay: true, tzid: null },
+      candidates: [{ startLocal: "2101-11-21", endLocal: "2101-11-22" }],
+      people: [],
+      now: NOW,
+    });
+    const [only] = planIds;
+    const { path } = await share(org, threadId);
+    const phone = org.another();
+    const page = await (await phone.request(path)).text();
+    expect(page).toContain("Does this work for you?");
+    expect(page).not.toContain('type="radio"');
+    const guard = page.indexOf('<button type="submit" disabled hidden></button>');
+    expect(guard).toBeGreaterThan(page.indexOf('name="name"'));
+    expect(guard).toBeLessThan(page.indexOf(`name="plan_${only}" value="yes"`));
+    // The tap is the whole answer: the name and the button's own value.
+    const res = await phone.request(
+      SHARE_PATH,
+      post({ t: tokenOf(path), name: "Kestrel", [`plan_${only}`]: "yes" }),
+    );
+    expect(res.status).toBe(200);
+    const after = await res.text();
+    expect(after).toContain(`value="yes" aria-pressed="true">Yes</button>`);
+    expect(after).toContain("You said Yes.");
+    expect(await votesOf(org, threadId, await guestIdIn(org, threadId, "Kestrel"))).toEqual([
+      "yes",
+    ]);
+  });
+});
+
 describe("keeping a guest's answer (rc30)", () => {
   it("the claim link opens the question as that name on another device, which then remembers it", async () => {
     const org = await browser({ now: () => NOW });

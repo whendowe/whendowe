@@ -9,6 +9,7 @@ import {
   sendDraft,
   startDraft,
   suggestTime,
+  withdrawPlan,
 } from "../../src/plans/plan.js";
 import { findThreadForMember, leaveThread } from "../../src/plans/thread.js";
 import { issueVoteLinks } from "../../src/plans/vote-link.js";
@@ -29,6 +30,10 @@ async function pollWith(
     location: "<b>The park</b>",
     description: "Bring a cake",
   },
+  candidates: readonly { readonly startLocal: string; readonly endLocal: string }[] = [
+    { startLocal: "2101-11-21", endLocal: "2101-11-22" },
+    { startLocal: "2101-11-14", endLocal: "2101-11-15" },
+  ],
 ) {
   const people = [];
   for (const n of ["mara", ...names])
@@ -39,10 +44,7 @@ async function pollWith(
     creatorId: mara.id,
     group: null,
     fields: { title, ...place, allDay: true, tzid: null },
-    candidates: [
-      { startLocal: "2101-11-21", endLocal: "2101-11-22" },
-      { startLocal: "2101-11-14", endLocal: "2101-11-15" },
-    ],
+    candidates,
     people: rest.map((p) => p.id),
     now: NOW,
   });
@@ -172,6 +174,64 @@ it("a plan of several events is shown by its name and span", async () => {
   expect(card).toMatch(/^Which of these work for you\? (.+, all day · ){2}2 events, \S/);
   expect(card).not.toContain("Plan C");
   expect(card).not.toContain("more");
+});
+
+const NO_PLACE = { location: null, description: null };
+const SATURDAY = [{ startLocal: "2101-11-21", endLocal: "2101-11-22" }];
+/** The hidden, disabled first submit button: Enter in a field submits nothing (rc33). */
+const ENTER_GUARD = '<button type="submit" disabled hidden></button>';
+
+it("one time is one tap: each answer its own button, the note going with it (rc33)", async () => {
+  const b = await browser({ now: () => NOW });
+  const f = await pollWith(b, ["david", "ana"], "Pizza", NO_PLACE, SATURDAY);
+  const [only] = f.planIds;
+  const page = await (await b.request(f.link(0))).text();
+  expect(page).toContain("Does this work for you?");
+  expect(page).not.toContain('type="radio"');
+  expect(page).not.toContain("Send my answer");
+  for (const a of ["yes", "ifneedbe", "no"])
+    expect(page).toContain(`name="plan_${only}" value="${a}" aria-pressed="false"`);
+  const guard = page.indexOf(ENTER_GUARD);
+  expect(guard).toBeGreaterThan(-1);
+  expect(guard).toBeLessThan(page.indexOf(`name="plan_${only}"`));
+  // The note sits above the buttons, so the tap sends it.
+  expect(page.indexOf('name="note"')).toBeLessThan(guard);
+  expect(page).not.toContain("You said");
+
+  const res = await vote(b, f.token(0), { [`plan_${only}`]: "ifneedbe", note: "Late by ten" });
+  expect(res.status).toBe(303);
+  const after = await (await b.request(res.headers.get("location") ?? "")).text();
+  expect(after).toContain(`value="ifneedbe" aria-pressed="true">If need be</button>`);
+  expect(after).toContain(`value="yes" aria-pressed="false">Yes</button>`);
+  expect(after).toContain("You said If need be. Tap another to change it.");
+  expect(after).toContain("Late by ten");
+});
+
+it("one plan of several events alone on the table keeps a mark and a send (rc33)", async () => {
+  const b = await browser({ now: () => NOW });
+  const f = await pollWith(b, ["david", "ana"], "Picnic", NO_PLACE, SATURDAY);
+  const mara = await f.as(f.mara.id);
+  await withdrawPlan(b.storage, mara, { planId: f.planIds[0] ?? "", now: NOW });
+  await startDraft(b.storage, mara, { fromId: null, rest: false, replace: false, now: NOW });
+  for (const [startLocal, endLocal] of [
+    ["2101-12-01", "2101-12-02"],
+    ["2101-12-08", "2101-12-09"],
+  ] as const)
+    await addDraftEvent(b.storage, mara, {
+      title: "Two",
+      allDay: true,
+      startLocal,
+      endLocal,
+      who: [],
+      now: NOW,
+    });
+  await sendDraft(b.storage, mara, { now: NOW });
+  const text = await (await b.request(f.link(0))).text();
+  expect(text).toMatch(/ · 2 events, /);
+  expect(text).toContain("Which of these work for you?");
+  expect(text).toContain('type="radio"');
+  expect(text).toContain("Send my answer");
+  expect(text).not.toContain(ENTER_GUARD);
 });
 
 it("decided meanwhile, or left: the link says so", async () => {

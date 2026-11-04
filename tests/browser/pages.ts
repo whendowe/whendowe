@@ -290,6 +290,31 @@ const over = await app.request(`${shareUrl.pathname}${shareUrl.search}`, {
 if (over.status !== 200) throw new Error(`the shared link, signed in, answered ${over.status}`);
 writeFileSync(new URL("share-over-claim.html", OUT), await over.text());
 
+// A poll of one time, shared (rc33): "who's in?" is answered in one tap.
+const pizza = await app.request(
+  "/polls",
+  asPost(
+    {
+      csrf: await csrfOf(cookie),
+      title: "Pizza at Ann's",
+      tzid: "Europe/Prague",
+      start_0: "2026-11-05T19:00",
+      end_0: "2026-11-05T22:00",
+    },
+    cookie,
+  ),
+);
+const pizzaThread = must(pizza.headers.get("location"), "pizza poll").split("#")[0] ?? "";
+const pizzaShared = await (
+  await app.request(`${pizzaThread}/share`, asPost({ csrf: await csrfOf(cookie) }, cookie))
+).text();
+const pizzaUrl = new URL(
+  must(/value="(https:\/\/whendowe\.example\/s\?t=[^"]+)"/.exec(pizzaShared)?.[1], "pizza link"),
+);
+const pizzaGuest = await app.request(`${pizzaUrl.pathname}${pizzaUrl.search}`);
+if (pizzaGuest.status !== 200) throw new Error(`the pizza link answered ${pizzaGuest.status}`);
+writeFileSync(new URL("share-one-time.html", OUT), await pizzaGuest.text());
+
 // Back on the DM's thread page (rc30): Kestrel is marked "not confirmed", with Remove.
 const withGuest = await app.request(table, { headers: { cookie } });
 if (withGuest.status !== 200) throw new Error(`${table} with a guest answered ${withGuest.status}`);

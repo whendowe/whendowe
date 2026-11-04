@@ -216,15 +216,15 @@ export function noteList(
  * One plan on the table, as the link's person votes on it: a card, then the choices.
  * `personId` is "" for someone not in the thread yet (a shared link, rc25).
  */
-export function votePlan(
-  access: Pick<ThreadAccess, "members" | "personId">,
-  p: Plan,
-  /** What the form had chosen, when it comes back with a problem. */
-  chosen: ReadonlyMap<string, Answer> = new Map(),
-): Html {
+type Voter = Pick<ThreadAccess, "members" | "personId">;
+
+function mineOf(voter: Voter, p: Plan, chosen: ReadonlyMap<string, Answer>): Answer | null {
+  return chosen.get(p.id) ?? p.votes.find((v) => v.personId === voter.personId)?.answer ?? null;
+}
+
+/** A plan on the table: when, or its name and span, then who suggested it and the counts. */
+function planSummary(access: Voter, p: Plan): Html {
   const [e, ...more] = p.events;
-  const mine =
-    chosen.get(p.id) ?? p.votes.find((v) => v.personId === access.personId)?.answer ?? null;
   const author = access.members.find((m) => m.personId === p.authorId);
   const n = (a: Answer) => p.votes.filter((v) => v.answer === a).length;
   const what =
@@ -233,11 +233,51 @@ export function votePlan(
           e.description === null ? "" : html`<br /><span class="muted">${e.description}</span>`
         }`
       : html`<strong>${p.name}</strong> · ${p.events.length} events, ${spanText(p.events)}`;
-  return html`<li style="margin-bottom:.8em">${what}<br /><span class="muted">${author === undefined ? "" : `from ${memberName(author)} · `}${n("yes")} yes · ${n("ifneedbe")} if need be · ${n("no")} no</span><br />
+  return html`${what}<br /><span class="muted">${author === undefined ? "" : `from ${memberName(author)} · `}${n("yes")} yes · ${n("ifneedbe")} if need be · ${n("no")} no</span>`;
+}
+
+function votePlan(
+  access: Voter,
+  p: Plan,
+  /** What the form had chosen, when it comes back with a problem. */
+  chosen: ReadonlyMap<string, Answer> = new Map(),
+): Html {
+  const mine = mineOf(access, p, chosen);
+  return html`<li style="margin-bottom:.8em">${planSummary(access, p)}<br />
 ${answerSchema.options.map(
   (a) =>
     html`<label style="margin-right:.8em"><input type="radio" name="plan_${p.id}" value="${a}" ${mine === a ? html`checked` : ""} /> ${ANSWER_LABEL[a]}</label>`,
 )}</li>`;
+}
+
+/**
+ * The answer part of a vote form, after any name. One time on the table (one plan of one
+ * event) is an easy decision, so it is one tap (rc31): each answer is its own submit button, sending the
+ * note with it. More than one is a mark each and a send. The first submit button is a
+ * disabled, hidden one, so Enter in a field submits nothing rather than picking "Yes".
+ */
+export function answerPart(
+  voter: Voter,
+  onTable: readonly Plan[],
+  note: Html,
+  send: Html,
+  chosen: ReadonlyMap<string, Answer> = new Map(),
+): Html {
+  const [only, ...others] = onTable;
+  if (only === undefined || others.length > 0 || only.events.length !== 1)
+    return html`<h2>Which of these work for you?</h2>
+  <ul style="list-style:none;padding-left:0">${onTable.map((p) => votePlan(voter, p, chosen))}</ul>
+  ${note}
+  <p>${send}</p>`;
+  const mine = mineOf(voter, only, chosen);
+  return html`<h2>Does this work for you?</h2>
+  <p>${planSummary(voter, only)}</p>
+  ${note}
+  <p style="display:flex;gap:.6em;flex-wrap:wrap"><button type="submit" disabled hidden></button>${answerSchema.options.map(
+    (a) =>
+      html`<button type="submit" name="plan_${only.id}" value="${a}" aria-pressed="${String(mine === a)}">${ANSWER_LABEL[a]}</button>`,
+  )}</p>
+  ${mine === null ? "" : html`<p class="muted">You said ${ANSWER_LABEL[mine]}. Tap another to change it.</p>`}`;
 }
 
 async function votePage(
@@ -255,11 +295,13 @@ async function votePage(
       ? html`<p><strong>There's nothing to vote on any more.</strong> Whatever was agreed is in the calendars of everyone in it.</p>`
       : html`<form method="post" action="${VOTE_PATH}">
   <input type="hidden" name="t" value="${token}" />
-  <h2>Which of these work for you?</h2>
-  <ul style="list-style:none;padding-left:0">${onTable.map((p) => votePlan(access, p))}</ul>
-  <p><label>Anything to add? <span class="muted">(optional — everyone in it sees it, e.g. "Thursday's bad next week")</span><br />
-  <textarea name="note" rows="2" maxlength="500" style="width:100%"></textarea></label></p>
-  <p><button type="submit">Send my answer</button></p>
+  ${answerPart(
+    access,
+    onTable,
+    html`<p><label>Anything to add? <span class="muted">(optional — everyone in it sees it, e.g. "Thursday's bad next week")</span><br />
+  <textarea name="note" rows="2" maxlength="500" style="width:100%"></textarea></label></p>`,
+    html`<button type="submit">Send my answer</button>`,
+  )}
 </form>`;
   return linkPage(
     "Your vote",
