@@ -309,7 +309,11 @@ const pizzaShared = await (
   await app.request(`${pizzaThread}/share`, asPost({ csrf: await csrfOf(cookie) }, cookie))
 ).text();
 const pizzaUrl = new URL(
-  must(/value="(https:\/\/whendowe\.example\/s\?t=[^"]+)"/.exec(pizzaShared)?.[1], "pizza link"),
+  // The link ends the message to paste (rc25), whatever the message asks.
+  must(
+    / (https:\/\/whendowe\.example\/s\?t=[^\s<]+)<\/textarea>/.exec(pizzaShared)?.[1],
+    "pizza link",
+  ),
 );
 const pizzaGuest = await app.request(`${pizzaUrl.pathname}${pizzaUrl.search}`);
 if (pizzaGuest.status !== 200) throw new Error(`the pizza link answered ${pizzaGuest.status}`);
