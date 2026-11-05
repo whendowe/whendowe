@@ -401,6 +401,27 @@ export function runProposalsContract(makePort: () => Promise<StoragePort>): void
       );
     });
 
+    it("the proposer sees their pending proposal, even when an older one sorts after it", async () => {
+      // Two proposals in one millisecond tie on created_at, and a UUIDv7's random tail can
+      // put the newer id first: "mine" must still be the pending one, not the withdrawn.
+      const port = await makePort();
+      const f = await dinner(port, "tie");
+      for (const [title, id] of [
+        ["First", "0190a000-0000-7000-8000-00000000000f"],
+        ["Second", "0190a000-0000-7000-8000-000000000001"],
+      ] as const) {
+        const r = await proposeChange(port, await access(port, f.eventId, f.david), {
+          fields: { ...DINNER, title },
+          now: T1,
+          newId: () => id,
+        });
+        expect(r.kind).toBe("proposed");
+      }
+      const mine = (await listProposals(port, await access(port, f.eventId, f.david))).mine;
+      expect(mine?.status).toBe("pending");
+      expect(mine?.fields.title).toBe("Second");
+    });
+
     it(`one person can make at most ${PROPOSAL_CEILING} proposals on an event`, async () => {
       const port = await makePort();
       const f = await dinner(port, "ceiling");

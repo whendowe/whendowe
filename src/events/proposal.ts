@@ -353,7 +353,7 @@ export async function listProposals(
   const own = await storage.query({
     sql: `SELECT ${PROPOSAL_COLUMNS} FROM ${PROPOSAL_FROM}
           WHERE ecp.canonical_event_id = ? AND ecp.proposed_by = ?
-          ORDER BY ecp.created_at DESC, ecp.id DESC LIMIT 1`,
+          ORDER BY ecp.status = 'pending' DESC, ecp.created_at DESC, ecp.id DESC LIMIT 1`,
     params: [event.id, participation.personId],
   });
   return { pending, mine: own[0] === undefined ? null : toProposal(own[0], access) };
