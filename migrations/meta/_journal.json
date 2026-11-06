@@ -162,6 +162,13 @@
       "when": 1793715941964,
       "tag": "0022_guest_confirm",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "6",
+      "when": 1793960232838,
+      "tag": "0023_withdraw_event_polls",
+      "breakpoints": true
     }
   ]
 }

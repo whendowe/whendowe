@@ -1042,9 +1042,6 @@ export async function suggestTime(
 
 // --- polls (rc26) ---------------------------------------------------------------------
 
-/** One time is a question too (rc33): "Pizza Thursday at 7, who's in?" */
-export const MIN_POLL_TIMES = 1;
-
 /**
  * "Find a time" (DESIGN §10 rc26 *Polls are one-event plans*): a thread named for the
  * poll, one plan per offered time — all on the table in one question, sent by the creator
@@ -1068,7 +1065,7 @@ export async function createPollThread(
   },
 ): Promise<{ readonly threadId: string; readonly planIds: readonly string[] }> {
   const newId = input.newId ?? (() => uuidv7());
-  const times = validateCandidates(input.fields, input.candidates, MIN_POLL_TIMES);
+  const times = validateCandidates(input.fields, input.candidates);
   const first = times[0];
   if (first === undefined) throw new PollInputError("Offer at least one time.");
   const f = eventFieldsSchema.parse({

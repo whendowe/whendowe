@@ -259,52 +259,22 @@ export async function createEvent(
      * Ids that aren't taking part (or are the creator) are ignored.
      */
     readonly requests?: ReadonlyMap<string, "accept" | "ack">;
-    /** People named directly, by email (DESIGN rc15); see createEventWith. */
-    readonly people?: readonly GroupDefault[];
-  },
-): Promise<CanonicalEvent> {
-  const members = (await takingPart(storage, input)).map((m) => m.personId);
-  const requests = new Map(
-    [...(input.requests ?? new Map<string, "accept" | "ack">())].filter(
-      ([id]) => id !== input.creatorId && members.includes(id),
-    ),
-  );
-  const needsAgreement = [...requests.values()].includes("accept");
-  return createEventWith(
-    storage,
-    { ...input, status: needsAgreement ? "proposed" : "scheduled", responseKind: "none", requests },
-    () => [],
-  );
-}
-
-/**
- * createEvent for sibling modules in src/events (poll.ts): a lifecycle status, the
- * response everyone is asked for, and further rows written IN THE SAME BATCH — a poll
- * without its candidates must never exist, even briefly.
- */
-export async function createEventWith(
-  storage: StoragePort,
-  input: {
-    readonly creatorId: string;
-    readonly group: GroupMembership | null;
-    readonly fields: EventFieldsInput;
-    readonly status: EventStatus;
-    readonly responseKind: "none" | "slot_vote";
-    readonly requests?: ReadonlyMap<string, "accept" | "ack">;
     /**
      * People named directly, at their own tiers (DESIGN rc15). With a group, they join its
      * members, and where someone is both, the terms named here win.
      */
     readonly people?: readonly GroupDefault[];
-    readonly now: string;
-    readonly newId?: () => string;
   },
-  extra: (eventId: string) => SqlStatement[],
 ): Promise<CanonicalEvent> {
+  const others = await takingPart(storage, input);
+  const requests = new Map(
+    [...(input.requests ?? new Map<string, "accept" | "ack">())].filter(
+      ([id]) => others.some((m) => m.personId === id), // takingPart leaves the creator out
+    ),
+  );
+  const status: EventStatus = [...requests.values()].includes("accept") ? "proposed" : "scheduled";
   const fields = eventFieldsSchema.parse(input.fields);
   const id = (input.newId ?? (() => uuidv7()))();
-  const status = input.status;
-  const others = await takingPart(storage, input);
 
   await storage.batch([
     {
@@ -334,11 +304,11 @@ export async function createEventWith(
     },
     {
       sql: `INSERT INTO event_participation (canonical_event_id, person_id, edit_tier, visibility, response_kind, created_at)
-            VALUES (?, ?, 'edit', 'FULL', ?, ?)`,
-      params: [id, input.creatorId, input.responseKind, input.now],
+            VALUES (?, ?, 'edit', 'FULL', 'none', ?)`,
+      params: [id, input.creatorId, input.now],
     },
     ...others.map((m) => {
-      const requested = input.requests?.get(m.personId);
+      const requested = requests.get(m.personId);
       return {
         sql: `INSERT INTO event_participation
                 (canonical_event_id, person_id, edit_tier, visibility, response_kind, response_state, created_at)
@@ -348,14 +318,13 @@ export async function createEventWith(
           m.personId,
           m.editTier,
           m.visibility,
-          requested ?? input.responseKind,
+          requested ?? "none",
           requested === undefined ? null : "pending",
           input.now,
         ],
       };
     }),
     ...(input.group === null ? [] : [copyAppearance(id, input.group.group.id)]),
-    ...extra(id),
     logRow(id, 1, input.creatorId, diff({}, { ...flatten(fields), status }), input.now),
   ]);
 

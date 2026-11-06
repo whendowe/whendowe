@@ -241,7 +241,6 @@ export async function addParticipant(
   const person = await findOrCreatePerson(storage, input.email, { now: input.now, newId });
   const eventId = access.event.id;
   const changeId = newId();
-  const kind = access.participation.responseKind === "slot_vote" ? "slot_vote" : "none";
   // The change row is the reservation: inserted only if this person isn't taking part
   // and the day's adds are under the bound, in ONE statement, so concurrent adds can't
   // each see room. The participation follows only if the change row was written.
@@ -267,9 +266,9 @@ export async function addParticipant(
     },
     {
       sql: `INSERT INTO event_participation (canonical_event_id, person_id, edit_tier, visibility, response_kind, created_at)
-            SELECT ?, ?, ?, ?, ?, ?
+            SELECT ?, ?, ?, ?, 'none', ?
             WHERE EXISTS (SELECT 1 FROM event_participant_change WHERE id = ?)`,
-      params: [eventId, person.id, input.editTier, input.visibility, kind, input.now, changeId],
+      params: [eventId, person.id, input.editTier, input.visibility, input.now, changeId],
     },
   ]);
   const written = await storage.query({

@@ -37,17 +37,7 @@ import {
   TAKES_PEOPLE,
   UnreachableAddressError,
 } from "../../events/participation.js";
-import {
-  type Answer,
-  answerSchema,
-  confirmCandidate,
-  MAX_CANDIDATES,
-  PollInputError,
-  type PollResults,
-  pollResults,
-  validateCandidates,
-  vote,
-} from "../../events/poll.js";
+import { MAX_CANDIDATES, PollInputError, validateCandidates } from "../../events/poll.js";
 import {
   type ChangeProposal,
   decideProposal,
@@ -79,7 +69,7 @@ import {
   visibilitySchema,
 } from "../../people/invite.js";
 import { appearanceIn, normalizeEmail } from "../../people/person.js";
-import { createPollThread, MIN_POLL_TIMES } from "../../plans/plan.js";
+import { createPollThread } from "../../plans/plan.js";
 import {
   findThreadForMember,
   listThreadsFor,
@@ -163,22 +153,13 @@ export function formatWhen(
   return `${startDate} ${startTime.slice(0, 5)} – ${end} · ${e.tzid ?? ""}`;
 }
 
-/**
- * A poll is the one kind of proposal whose own time is a placeholder. Everyone in a
- * poll — its creator included — takes part as `slot_vote` (poll.ts), so the viewer's
- * own row says which kind this is without another query.
- */
-function isPoll(access: EventAccess): boolean {
-  return access.participation.responseKind === "slot_vote";
-}
-
 /** "(cancelled)", "(waiting for agreement)", … — empty for an ordinary scheduled event. */
 function statusBadge(access: EventAccess): Html | string {
   const label: Record<string, string> = {
     cancelled: "cancelled",
     declined: "declined",
     withdrawn: "withdrawn",
-    proposed: isPoll(access) ? "" : "waiting for agreement",
+    proposed: "waiting for agreement",
   };
   const text = label[access.event.status] ?? "";
   return text === "" ? "" : html` <span class="muted">(${text})</span>`;
@@ -257,9 +238,7 @@ function nextDates(event: CanonicalEvent, now: string, count: number): string[] 
 export function eventSummary(access: EventAccess): Html {
   const { event, participation } = access;
   const title = canSee(participation.visibility, "title") ? event.title : BUSY_LABEL;
-  // An open poll's own time is only a placeholder: never show it as "the" time.
-  const when =
-    isPoll(access) && event.status === "proposed" ? "voting on a time" : formatWhen(event);
+  const when = formatWhen(event);
   const repeats = event.rrule === null ? "" : ` · ↻ ${describeRRule(event.rrule)}`;
   return html`<a href="${EVENTS_PATH}/${event.id}">${title}</a>${statusBadge(access)} <span class="muted">· ${when}${repeats}</span>`;
 }
@@ -275,8 +254,8 @@ function threadSummary(t: ThreadSummary): Html {
 
 /**
  * Home for a signed-in person: Your events (DESIGN rc15). Everything still being decided
- * first, in ONE list (rc28) — threads waiting for this person's vote, event-polls, then
- * threads waiting for others — then what's coming up, soonest first, then the past,
+ * first, in ONE list (rc28) — threads waiting for this person's vote, then threads
+ * waiting for others — then what's coming up, soonest first, then the past,
  * folded away. Every event line at the viewer's own tier (eventSummary → canSee).
  */
 export async function yourEvents(
@@ -285,16 +264,13 @@ export async function yourEvents(
   now: string,
 ): Promise<Html> {
   const all = await listEventsFor(storage, personId);
-  const voting = all.filter((a) => isPoll(a) && a.event.status === "proposed");
   const open = (await listThreadsFor(storage, personId)).filter((t) => t.onTable > 0);
   const deciding = [
     ...open.filter((t) => t.waiting > 0).map(threadSummary),
-    ...voting.map(eventSummary),
     ...open.filter((t) => t.waiting === 0).map(threadSummary),
   ];
-  const rest = all.filter((a) => !voting.includes(a));
-  const upcoming = rest.filter((a) => !isOver(a.event, now));
-  const past = rest.filter((a) => isOver(a.event, now)).reverse();
+  const upcoming = all.filter((a) => !isOver(a.event, now));
+  const past = all.filter((a) => isOver(a.event, now)).reverse();
   const list = (items: readonly EventAccess[]) =>
     html`<ul>${items.map((a) => html`<li>${eventSummary(a)}</li>`)}</ul>`;
   return html`<h1>Your events</h1>
@@ -640,59 +616,6 @@ const EMPTY: FormValues = {
   until: "",
 };
 
-// --- Time polls (slice 2C) ----------------------------------------------------------
-
-const ANSWER_LABEL: Record<Answer, string> = { yes: "Yes", ifneedbe: "If need be", no: "No" };
-
-/**
- * Candidates with this person's answers as one form, tallies, and — for editors — a
- * confirm button per candidate. Names next to answers only for tiers that see the
- * participant list; everyone sees the counts.
- */
-function pollSection(
-  access: EventAccess,
-  poll: PollResults,
-  csrf: string,
-  showNames: boolean,
-): Html {
-  const { event, participation } = access;
-  const editor = participation.editTier === "edit";
-  const rows = poll.candidates.map((c) => {
-    const radios = answerSchema.options.map(
-      (a) =>
-        html`<label style="margin-right:.8em"><input type="radio" name="slot_${c.slotIndex}" value="${a}" ${c.mine === a ? html`checked` : ""} /> ${ANSWER_LABEL[a]}</label>`,
-    );
-    const names = showNames
-      ? html`<br /><span class="muted">${c.voters.map((v) => `${v.shown.name}: ${ANSWER_LABEL[v.answer]}`).join(" · ")}</span>`
-      : "";
-    const everyone = poll.everyoneYes.includes(c.slotIndex)
-      ? html` <strong>· works for everyone</strong>`
-      : "";
-    return html`<li style="margin-bottom:.8em"><strong>${formatWhen(c)}</strong>${everyone}<br />
-${radios}<br /><span class="muted">${c.yes} yes · ${c.ifNeedBe} if need be · ${c.no} no</span>${names}</li>`;
-  });
-  const confirms = editor
-    ? html`<h3>Pick the time</h3><p class="muted">Confirming schedules the event at that time and closes voting.</p>
-${poll.candidates.map(
-  (
-    c,
-  ) => html`<form method="post" action="${EVENTS_PATH}/${event.id}/confirm" style="display:inline-block;margin:0 .5em .5em 0">
-  <input type="hidden" name="csrf" value="${csrf}" />
-  <input type="hidden" name="revision" value="${event.revision}" />
-  <input type="hidden" name="slot" value="${c.slotIndex}" />
-  <button type="submit">Confirm ${formatWhen(c)}</button>
-</form>`,
-)}`
-    : "";
-  return html`<p><strong>Voting on a time.</strong> ${poll.electorate} ${poll.electorate === 1 ? "person" : "people"} can answer.</p>
-<form method="post" action="${EVENTS_PATH}/${event.id}/votes">
-  <input type="hidden" name="csrf" value="${csrf}" />
-  <ul style="list-style:none;padding-left:0">${rows}</ul>
-  <p><button type="submit">Save my answers</button></p>
-</form>
-${confirms}`;
-}
-
 // --- Attendance & notes (slice 2D) -------------------------------------------------
 
 const ATTENDANCE_LABEL: Record<Attendance, string> = {
@@ -749,7 +672,7 @@ async function responsesSection(
     participation.editTier === "edit" && action !== null
       ? html`<form method="post" action="${EVENTS_PATH}/${event.id}/links">
   <input type="hidden" name="csrf" value="${csrf}" />
-  <p><button type="submit">${action === "attend" ? "Email everyone a link to say if they're coming" : isPoll(access) ? "Email everyone a link to vote" : "Email a link to agree or decline"}</button>
+  <p><button type="submit">${action === "attend" ? "Email everyone a link to say if they're coming" : "Email a link to agree or decline"}</button>
   <span class="muted">No account needed to answer.</span></p>
 </form>`
       : "";
@@ -812,14 +735,7 @@ ${button(event.id, "acknowledge", csrf, again ? "I've seen the change" : "Seen i
   }
   const organizer: Html[] = [];
   if (event.status === "proposed" && event.ownerId === me) {
-    organizer.push(
-      button(
-        event.id,
-        "withdraw",
-        csrf,
-        isPoll(access) ? "Withdraw the poll" : "Withdraw the proposal",
-      ),
-    );
+    organizer.push(button(event.id, "withdraw", csrf, "Withdraw the proposal"));
   }
   if (participation.editTier === "edit" && event.status === "scheduled") {
     organizer.push(button(event.id, "cancel", csrf, "Cancel the event"));
@@ -1084,9 +1000,6 @@ async function eventPage(
   const { event, participation } = access;
   const vis = participation.visibility;
   const see = (part: Parameters<typeof canSee>[1]) => canSee(vis, part);
-  const voting = event.status === "proposed" && isPoll(access);
-  const poll = voting ? await pollResults(deps.storage, access) : null;
-
   const people = see("participants") ? await listParticipants(deps.storage, event.id) : [];
   const edits = (await listHistory(deps.storage, access))
     .map((entry) => ({
@@ -1118,7 +1031,7 @@ async function eventPage(
     html`<p>${event.groupId === null ? html`<a href="/">← Your events</a>` : html`<a href="/groups/${event.groupId}">← Back to the group</a>`}</p>
 <h1>${see("title") ? event.title : BUSY_LABEL}${statusBadge(access)}</h1>
 ${notice === null ? "" : html`<p class="error">${notice}</p>`}
-${poll === null ? html`<p>${formatWhen(event)}</p>` : pollSection(access, poll, csrf, see("participants"))}
+<p>${formatWhen(event)}</p>
 ${seriesSection(event, deps.now())}
 ${see("location") && event.location !== null ? html`<p>📍 ${event.location}</p>` : ""}
 ${see("description") && event.description !== null ? html`<p style="white-space:pre-wrap">${event.description}</p>` : ""}
@@ -1273,8 +1186,8 @@ ${eventForm(`/groups/${membership.group.id}/events`, csrf, form.values, "", erro
       return c.html(
         page(
           c,
-          "Voting open",
-          html`<h1>Voting is still open</h1><p>Its time is chosen by confirming one of the options. <a href="${EVENTS_PATH}/${access.event.id}">Back to the poll</a></p>`,
+          "Not now",
+          html`<h1>This is waiting for agreement</h1><p>It can be changed once it's settled. <a href="${EVENTS_PATH}/${access.event.id}">Back to it</a></p>`,
         ),
         409,
       );
@@ -1402,12 +1315,12 @@ ${pollForm(`/groups/${membership.group.id}/polls`, csrf, values, error, peopleFi
     if (bad.length > 0) return again(badPeople(bad));
     try {
       const input = toPollInput(values);
-      validateCandidates(input.fields, input.candidates, MIN_POLL_TIMES); // as above: valid before anyone is created
+      validateCandidates(input.fields, input.candidates); // as above: valid before anyone is created
       const { people } = await invitees(deps, rows, {
         senderId: me.personId,
         groupId: membership?.group.id ?? null,
       });
-      // A poll is a thread of one-event plans (rc26); event-polls made before run on.
+      // A poll is a thread of one-event plans (rc26).
       const { threadId } = await createPollThread(deps.storage, {
         creatorId: me.personId,
         group: membership,
@@ -1444,102 +1357,6 @@ ${pollForm(`/groups/${membership.group.id}/polls`, csrf, values, error, peopleFi
   });
 
   app.post("/groups/:groupId/polls", (c) => createPollFrom(c, c.req.param("groupId")));
-
-  app.post(`${EVENTS_PATH}/:id/votes`, async (c) => {
-    const me = requireSignedIn(c);
-    if (me instanceof Response) return me;
-    const form = await c.req.parseBody();
-    if (!(await verifyFormCsrf(me, form))) return rejectedPage(c, form);
-    const access = await findEventForParticipant(deps.storage, c.req.param("id"), me.personId);
-    if (access === null || access.participation.visibility === "HIDDEN")
-      return c.html(notFound(c), 404);
-
-    const answers = new Map<number, Answer>();
-    for (const [key, value] of Object.entries(form)) {
-      const slot = /^slot_(\d{1,2})$/.exec(key)?.[1];
-      const answer = answerSchema.safeParse(value);
-      if (slot !== undefined && answer.success) answers.set(Number.parseInt(slot, 10), answer.data);
-    }
-    const result = await vote(deps.storage, access, { answers, now: deps.now() });
-    switch (result.kind) {
-      case "recorded":
-        return c.redirect(`${EVENTS_PATH}/${access.event.id}`, 303);
-      case "invalid":
-        return c.html(
-          await eventPage(
-            c,
-            deps,
-            access,
-            me.csrfToken,
-            "Pick an answer for at least one of the options.",
-          ),
-          400,
-        );
-      case "closed": {
-        const fresh =
-          (await findEventForParticipant(deps.storage, access.event.id, me.personId)) ?? access;
-        return c.html(
-          await eventPage(
-            c,
-            deps,
-            fresh,
-            me.csrfToken,
-            "Voting has closed — a time was already picked.",
-          ),
-          409,
-        );
-      }
-      case "forbidden":
-        return c.html(notFound(c), 404);
-    }
-  });
-
-  app.post(`${EVENTS_PATH}/:id/confirm`, async (c) => {
-    const me = requireSignedIn(c);
-    if (me instanceof Response) return me;
-    const form = await c.req.parseBody();
-    if (!(await verifyFormCsrf(me, form))) return rejectedPage(c, form);
-    const access = await findEventForParticipant(deps.storage, c.req.param("id"), me.personId);
-    if (access === null || access.participation.visibility === "HIDDEN")
-      return c.html(notFound(c), 404);
-    const seen = Number.parseInt(str(form, "revision"), 10);
-    const slot = Number.parseInt(str(form, "slot"), 10);
-    const result = await confirmCandidate(deps.storage, access, {
-      slotIndex: Number.isInteger(slot) ? slot : -1,
-      // The revision the editor SAW: if the poll changed since, they decide again.
-      expectedRevision: Number.isInteger(seen) ? seen : -1,
-      actorId: me.personId,
-      now: deps.now(),
-    });
-    const fresh = async () =>
-      (await findEventForParticipant(deps.storage, access.event.id, me.personId)) ?? access;
-    switch (result.kind) {
-      case "confirmed":
-        return c.redirect(`${EVENTS_PATH}/${access.event.id}`, 303);
-      case "forbidden":
-        return c.html(
-          page(c, "Not allowed", html`<h1>Only the organizers can pick the time</h1>`),
-          403,
-        );
-      case "invalid":
-        return c.html(
-          await eventPage(c, deps, access, me.csrfToken, "That option doesn't exist."),
-          400,
-        );
-      case "closed":
-      case "conflict":
-        return c.html(
-          await eventPage(
-            c,
-            deps,
-            await fresh(),
-            me.csrfToken,
-            "The poll changed while you were looking — here it is as it stands now.",
-          ),
-          409,
-        );
-    }
-  });
 
   // Leaving and deleting (DESIGN §10 rc21). GET says what will happen; POST does it.
   const visible = async (c: Context<AppEnv>, personId: string) => {

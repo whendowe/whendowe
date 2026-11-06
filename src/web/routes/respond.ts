@@ -4,7 +4,7 @@ import { z } from "zod";
 import type { StoragePort } from "../../db/port.js";
 import type { EventAccess } from "../../events/event.js";
 import { canSee } from "../../events/participation.js";
-import { type Answer, answerSchema, pollResults, vote } from "../../events/poll.js";
+import { type Answer, answerSchema } from "../../events/poll.js";
 import {
   type Attendance,
   acknowledge,
@@ -124,12 +124,9 @@ export function deadLink(): string {
 function header(access: EventAccess): Html {
   const { event, participation } = access;
   const title = canSee(participation.visibility, "title") ? event.title : BUSY_LABEL;
-  const when =
-    event.status === "proposed" && participation.responseKind === "slot_vote"
-      ? html`<p>Voting on a time.</p>`
-      : html`<p>${formatWhen(event)}${event.status === "cancelled" ? " — cancelled" : ""}</p>${
-          event.rrule === null ? "" : html`<p>↻ ${describeRRule(event.rrule)}</p>`
-        }`;
+  const when = html`<p>${formatWhen(event)}${event.status === "cancelled" ? " — cancelled" : ""}</p>${
+    event.rrule === null ? "" : html`<p>↻ ${describeRRule(event.rrule)}</p>`
+  }`;
   const where =
     canSee(participation.visibility, "location") && event.location !== null
       ? html`<p>📍 ${event.location}</p>`
@@ -137,20 +134,16 @@ function header(access: EventAccess): Html {
   return html`<h1>${title}</h1>${when}${where}`;
 }
 
-async function respondPage(
-  storage: StoragePort,
-  link: ResolvedLink,
-  token: string,
-  notice: Html | string,
-): Promise<string> {
+function respondPage(link: ResolvedLink, token: string, notice: Html | string): string {
   const { access, action } = link;
   const { event, participation } = access;
+  // A vote link is a consent proposal's (rc13); an event-poll's links closed with it (rc35).
   const open =
-    (action === "vote" && event.status === "proposed") ||
+    (action === "vote" && event.status === "proposed" && participation.responseKind === "accept") ||
     (action === "attend" && event.status === "scheduled");
 
   let question: Html | string = "";
-  if (action === "vote" && open && participation.responseKind === "accept") {
+  if (action === "vote" && open) {
     // A consent proposal (DESIGN §10 rc13): one time, agree or decline.
     const current = participation.responseState;
     question = html`<h2>Do you agree?</h2>
@@ -162,16 +155,6 @@ async function respondPage(
         html`<label style="margin-right:.8em"><input type="radio" name="decision" value="${String(value)}" ${checked === true ? html`checked` : ""} /> ${String(label)}</label>`,
     )}</p>
 <p class="muted">It goes ahead only when everyone asked agrees; one "no" turns it down.</p>`;
-  } else if (action === "vote" && open) {
-    const poll = await pollResults(storage, access);
-    question = html`<h2>Which times work for you?</h2>
-<ul style="list-style:none;padding-left:0">${poll.candidates.map(
-      (c) => html`<li style="margin-bottom:.8em"><strong>${formatWhen(c)}</strong><br />
-${answerSchema.options.map(
-  (a) =>
-    html`<label style="margin-right:.8em"><input type="radio" name="slot_${c.slotIndex}" value="${a}" ${c.mine === a ? html`checked` : ""} /> ${ANSWER_LABEL[a]}</label>`,
-)}<br /><span class="muted">${c.yes} yes · ${c.ifNeedBe} if need be · ${c.no} no</span></li>`,
-    )}</ul>`;
   } else if (action === "attend" && open) {
     question = html`<h2>Are you coming?</h2>
 <p>${attendanceSchema.options.map(
@@ -407,7 +390,7 @@ export function registerRespondRoutes(app: Hono<AppEnv>, deps: RespondRouteDeps)
       c.req.query("saved") === "1"
         ? html`<p><strong>Thanks — your answer is saved.</strong> You can change it any time with this link.</p>`
         : "";
-    return c.html(await respondPage(deps.storage, link, token, notice));
+    return c.html(respondPage(link, token, notice));
   });
 
   app.post(RESPOND_PATH, async (c) => {
@@ -421,7 +404,7 @@ export function registerRespondRoutes(app: Hono<AppEnv>, deps: RespondRouteDeps)
     if (token === null || link === null) return c.html(deadLink(), 404);
     const { access, action } = link;
     const problem = (message: string, status: 400 | 409) =>
-      c.html(respondPage(deps.storage, link, token, html`<p class="error">${message}</p>`), status);
+      c.html(respondPage(link, token, html`<p class="error">${message}</p>`), status);
 
     let answered = false;
     if (action === "vote" && access.participation.responseKind === "accept") {
@@ -431,22 +414,6 @@ export function registerRespondRoutes(app: Hono<AppEnv>, deps: RespondRouteDeps)
         answered = true;
         const result = await answerProposal(deps.storage, access, { answer: decision, now });
         if (result.kind !== "recorded") return problem("This has already been settled.", 409);
-      }
-    } else if (action === "vote") {
-      const answers = new Map<number, Answer>();
-      for (const [key, value] of Object.entries(form)) {
-        const slot = /^slot_(\d{1,2})$/.exec(key)?.[1];
-        const answer = answerSchema.safeParse(value);
-        if (slot !== undefined && answer.success)
-          answers.set(Number.parseInt(slot, 10), answer.data);
-      }
-      if (answers.size > 0) {
-        answered = true;
-        const result = await vote(deps.storage, access, { answers, now });
-        if (result.kind === "closed")
-          return problem("Voting has closed — a time was already picked.", 409);
-        if (result.kind !== "recorded")
-          return problem("Please pick an answer for the times shown.", 400);
       }
     } else {
       const attendance = attendanceSchema.safeParse(form.attendance);
@@ -539,36 +506,27 @@ export async function sendResponseLink(
   const titled = canSee(link.visibility, "title");
   const title = access.event.title;
   const days = RESPONSE_TOKEN_TTL_MS / (24 * 60 * 60 * 1000);
-  const consent = link.action === "vote" && access.participation.responseKind !== "slot_vote";
   const when = formatWhen(access.event);
-  const [subject, ask] = consent
-    ? titled
-      ? [
-          `${from} asks you to agree: "${title}"`,
-          `${from} proposes "${title}" (${when}) and asks whether you agree.`,
-        ]
-      : [
-          `${from} asks you to agree (${when})`,
-          `${from} proposes something for ${when} and asks whether you agree.`,
-        ]
-    : link.action === "vote"
+  // A vote link asks to agree (rc13): an event-poll's vote links went with them (rc35).
+  const [subject, ask] =
+    link.action === "vote"
       ? titled
         ? [
-            `When can you make "${title}"?`,
-            `${from} is finding a time for "${title}" and would like to know which times work for you.`,
+            `${from} asks you to agree: "${title}"`,
+            `${from} proposes "${title}" (${when}) and asks whether you agree.`,
           ]
         : [
-            `${from} is finding a time`,
-            `${from} is finding a time for something you're part of and would like to know which times work for you.`,
+            `${from} asks you to agree (${when})`,
+            `${from} proposes something for ${when} and asks whether you agree.`,
           ]
       : titled
         ? [
             `Are you coming to "${title}"?`,
-            `${from} would like to know whether you're coming to "${title}" (${formatWhen(access.event)}).`,
+            `${from} would like to know whether you're coming to "${title}" (${when}).`,
           ]
         : [
-            `Are you coming? (${formatWhen(access.event)})`,
-            `${from} would like to know whether you're coming (${formatWhen(access.event)}).`,
+            `Are you coming? (${when})`,
+            `${from} would like to know whether you're coming (${when}).`,
           ];
   await mail.send({
     to: link.email,

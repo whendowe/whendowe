@@ -7,7 +7,7 @@ import { findThreadForMember, type ThreadAccess } from "./thread.js";
 
 // Voting without an account (DESIGN §10 rc26; WORKFLOWS §2): one link per person per
 // thread, emailed by the organizer. The link shows the plans on the table and records
-// votes; it never signs anyone in. Like the event-poll links (events/response.ts), only
+// votes; it never signs anyone in. Like the response links (events/response.ts), only
 // the hash is stored, re-issuing replaces the old link, and the person's membership is
 // re-checked on every use, never cached in the link.
 
