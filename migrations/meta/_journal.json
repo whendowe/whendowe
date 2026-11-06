@@ -169,6 +169,13 @@
       "when": 1793960232838,
       "tag": "0023_withdraw_event_polls",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "6",
+      "when": 1793986726186,
+      "tag": "0024_feed_tokens",
+      "breakpoints": true
     }
   ]
 }

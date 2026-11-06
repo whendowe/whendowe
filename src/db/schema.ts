@@ -782,3 +782,26 @@ export const guestClaim = sqliteTable(
   },
   (t) => [index("guest_claim_thread_idx").on(t.threadId, t.createdAt)],
 );
+
+// rc34 (DESIGN §10 *Calendar feeds*): one secret link per person, per feed — their own
+// (group_id NULL) or a group's. The hash is the lookup; the encrypted token is there only
+// so its owner can be shown it again. Making a new link replaces the row.
+export const feedToken = sqliteTable(
+  "feed_token",
+  {
+    tokenHash: text("token_hash").primaryKey(),
+    tokenEnc: text("token_enc").notNull(),
+    personId: text("person_id")
+      .notNull()
+      .references(() => person.id, { onDelete: "cascade" }),
+    groupId: text("group_id").references(() => personGroup.id, { onDelete: "cascade" }),
+    createdAt: text("created_at").notNull(),
+  },
+  (t) => [
+    // NULLs are distinct in a UNIQUE constraint, so your own feed has an index of its own.
+    uniqueIndex("feed_token_group_uq")
+      .on(t.personId, t.groupId)
+      .where(sql`${t.groupId} IS NOT NULL`),
+    uniqueIndex("feed_token_own_uq").on(t.personId).where(sql`${t.groupId} IS NULL`),
+  ],
+);
