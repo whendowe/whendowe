@@ -9,6 +9,7 @@ import { ACCOUNT_PATH, html } from "./layout.js";
 import { registerAccountRoutes } from "./routes/account.js";
 import { type AuthDeps, registerAuthRoutes, SIGN_IN_PATH } from "./routes/auth.js";
 import { EVENTS_PATH, POLLS_PATH, registerEventRoutes, yourEvents } from "./routes/events.js";
+import { registerFeedRoutes } from "./routes/feeds.js";
 import { GROUPS_PATH, registerGroupRoutes } from "./routes/groups.js";
 import { CONNECT_PATH, type OAuthRouteDeps, registerOAuthRoutes } from "./routes/oauth.js";
 import { PLANS_PATH, registerPlanRoutes } from "./routes/plans.js";
@@ -127,6 +128,7 @@ ${connect}`,
     registerPlanRoutes(app, auth);
     registerRespondRoutes(app, auth);
     registerShareRoutes(app, auth);
+    registerFeedRoutes(app, auth);
   }
   if (oauth !== undefined) registerOAuthRoutes(app, oauth, auth);
 

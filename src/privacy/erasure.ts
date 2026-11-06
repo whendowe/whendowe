@@ -331,6 +331,7 @@ export async function eraseAccount(
 
   await storage.batch([
     { sql: "DELETE FROM session WHERE person_id = ?", params: [p] },
+    { sql: "DELETE FROM feed_token WHERE person_id = ?", params: [p] },
     { sql: "DELETE FROM login_token WHERE email = ?", params: [email] },
     { sql: "DELETE FROM group_invite WHERE email = ?", params: [email] },
     {

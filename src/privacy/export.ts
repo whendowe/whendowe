@@ -2,6 +2,7 @@
 import { z } from "zod";
 import type { StoragePort } from "../db/port.js";
 import { canSee } from "../events/participation.js";
+import { listFeeds } from "../feeds/feed.js";
 import { visibilitySchema } from "../people/invite.js";
 
 // "Download your data" (DESIGN §10 rc21, GDPR Art. 15 and 20): one JSON document of the
@@ -215,5 +216,10 @@ export async function exportPerson(storage: StoragePort, personId: string, now: 
         })),
     })),
     calendar_connections: connections,
+    // Which calendar feeds you have (rc34), never their secret links.
+    calendar_feeds: (await listFeeds(storage, personId)).map((f) => ({
+      feed: f.group === null ? "your events" : `events from ${f.group}`,
+      made_at: f.createdAt,
+    })),
   };
 }

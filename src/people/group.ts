@@ -193,6 +193,11 @@ export async function leaveGroup(
       sql: "DELETE FROM group_member WHERE group_id = ? AND person_id = ?",
       params: [groupId, personId],
     },
+    // Their link to the group's feed goes with them (rc34).
+    {
+      sql: "DELETE FROM feed_token WHERE group_id = ? AND person_id = ?",
+      params: [groupId, personId],
+    },
   ]);
   const gone = await collect(storage, { groups: [groupId] }, now);
   return { deleted: gone.groups.length > 0 };
