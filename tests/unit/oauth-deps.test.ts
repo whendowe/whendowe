@@ -74,7 +74,7 @@ it("reports no Google configuration for a bare environment", () => {
   expect(anyGoogleOAuthConfigured(loadConfig({}))).toBe(false);
 });
 
-it("reports configuration when any single key is present", () => {
+it("reports configuration when any single Google key is present; the key alone is not Google", () => {
   // Each arm matters: the adapters use this to choose between "run without the
   // connect flow" and "fail loudly", so a missed arm would silently disable OAuth.
   expect(anyGoogleOAuthConfigured(loadConfig({ GOOGLE_CLIENT_ID: "x" }))).toBe(true);
@@ -82,6 +82,7 @@ it("reports configuration when any single key is present", () => {
   expect(
     anyGoogleOAuthConfigured(loadConfig({ GOOGLE_REDIRECT_URI: "https://example.com/cb" })),
   ).toBe(true);
-  expect(anyGoogleOAuthConfigured(loadConfig({ TOKEN_ENCRYPTION_KEY: KEY }))).toBe(true);
+  // The key alone is not Google (rc34): calendar feeds use it too.
+  expect(anyGoogleOAuthConfigured(loadConfig({ TOKEN_ENCRYPTION_KEY: KEY }))).toBe(false);
   expect(anyGoogleOAuthConfigured(loadConfig(GOOGLE_ENV))).toBe(true);
 });
