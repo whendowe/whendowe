@@ -68,6 +68,10 @@ export const ACCOUNT_PATH = "/account";
 export const KEEP_ACCOUNT_PATH = "/account/keep";
 /** Plans (src/web/routes/plans.ts); here so routes that only link to it needn't import it. */
 export const PLANS_PATH = "/plans";
+/** Groups (src/web/routes/groups.ts); here for the same reason. */
+export const GROUPS_PATH = "/groups";
+/** Events (src/web/routes/events.ts); here for the same reason. */
+export const EVENTS_PATH = "/events";
 
 /** The day an account goes, as pages and mail say it: "2101-11-08 10:00 UTC". */
 export function deletionDay(iso: string): string {
@@ -194,9 +198,15 @@ export function retentionSection(v: RetentionView): Html {
  * and Copy, each shown only where the browser has it. Without them, or without JavaScript,
  * the text is there to select. Follow it with SHARE_BUTTONS once per page.
  */
-export function shareBox(label: string, text: Html | string, rows = 2): Html {
+export function shareBox(
+  label: string,
+  text: Html | string,
+  rows = 2,
+  /** False for a secret only its owner should hold, like a feed link: Copy, no Share… */
+  share = true,
+): Html {
   return html`<div class="share-box" data-share><textarea class="paste wide" rows="${String(rows)}" readonly aria-label="${label}">${text}</textarea>
-<div class="row"><button type="button" data-share-sheet hidden>Share…</button><button type="button" data-copy hidden>Copy</button></div></div>`;
+<div class="row">${share ? html`<button type="button" data-share-sheet hidden>Share…</button>` : ""}<button type="button" data-copy hidden>Copy</button></div></div>`;
 }
 
 /** Wires every shareBox on the page. One fixed script, so the CSP allows it by hash. */
@@ -205,7 +215,7 @@ export const SHARE_BUTTONS = html`<script>
     var text = box.querySelector("textarea").value;
     var sheet = box.querySelector("[data-share-sheet]");
     var copy = box.querySelector("[data-copy]");
-    if (navigator.share) {
+    if (sheet && navigator.share) {
       sheet.hidden = false;
       sheet.addEventListener("click", function () {
         navigator.share({ text: text }).catch(function () {});

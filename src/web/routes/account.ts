@@ -50,6 +50,7 @@ import {
   writeAccountsCookie,
 } from "../session.js";
 import type { AuthDeps } from "./auth.js";
+import { feedSection } from "./feeds.js";
 
 // Your account (DESIGN §10 rc21 *Privacy basics*): the handle others see by default,
 // your data, and deleting the account.
@@ -136,6 +137,7 @@ function accountForm(
   handle: string,
   error: string | null,
   optOuts: readonly OptOutView[],
+  feed: Html | string,
 ) {
   return html`<h1>Your name</h1>
 <p class="muted">This is the name people see in your groups, events and plans. Nobody sees your email address unless you choose to show it, one group, event or plan at a time.</p>
@@ -145,6 +147,7 @@ ${error === null ? "" : html`<p class="error">${error}</p>`}
   <p><label>Your name<br /><input name="handle" maxlength="40" required value="${handle}" /></label></p>
   <p><button type="submit">Save</button></p>
 </form>
+${feed}
 <h2>Your data</h2>
 <p><a href="${EXPORT_PATH}">Download everything about you</a> <span class="muted">(one file: your groups, events, plans and what you said in them)</span></p>
 <p><a href="${DELETE_ACCOUNT_PATH}">Delete your account</a></p>
@@ -486,6 +489,7 @@ ${button("delete", "Delete everything about this address")}`
           person?.displayName ?? "",
           null,
           await optOutsOf(deps.storage, me.email),
+          await feedSection(deps, { personId: me.personId, groupId: null }, me.csrfToken),
         ),
       ),
     );
@@ -508,6 +512,7 @@ ${button("delete", "Delete everything about this address")}`
             raw.slice(0, 40),
             reason(parsed.error),
             await optOutsOf(deps.storage, me.email),
+            await feedSection(deps, { personId: me.personId, groupId: null }, me.csrfToken),
           ),
         ),
         400,

@@ -13,7 +13,7 @@ import { retentionPass } from "../../src/privacy/purge.js";
 import { isRetentionMinute } from "../../src/privacy/retention.js";
 import { calendarRevoker, createApp } from "../../src/web/app.js";
 import type { OAuthRouteDeps } from "../../src/web/routes/oauth.js";
-import { buildOAuthDeps } from "../../src/web/routes/oauth-deps.js";
+import { buildOAuthDeps, tokenCipherFor } from "../../src/web/routes/oauth-deps.js";
 
 // Node entry (DESIGN.md §8): the same Hono app object as the Cloudflare worker,
 // served by @hono/node-server, with an in-process scheduler as the Node twin of the
@@ -70,6 +70,11 @@ const app = createApp({
     publicBaseUrl: config.PUBLIC_BASE_URL,
     secureCookies: new URL(config.PUBLIC_BASE_URL).protocol === "https:",
     now,
+    // Calendar feed links (rc34): only with a key to keep them under.
+    feedCipher:
+      config.TOKEN_ENCRYPTION_KEY === undefined
+        ? undefined
+        : await tokenCipherFor(config.TOKEN_ENCRYPTION_KEY),
   },
   oauth,
 });

@@ -34,6 +34,8 @@ const app = createApp({
     publicBaseUrl: "https://whendowe.example",
     secureCookies: false,
     now: () => NOW,
+    // Calendar feed links (rc34). A fixed test key: example data only.
+    feedCipher: await createTokenCipher([{ id: 1, material: `${"A".repeat(43)}=` }], 1),
   },
 });
 
@@ -244,7 +246,11 @@ const pages: Record<string, string> = {
   "event-new": `${group}/events/new`,
   "event-edit": `${event}/edit`,
   "poll-new": `${group}/polls/new`,
+  "account-feed": `${ACCOUNT_PATH}#feed`,
 };
+// The account page with a calendar feed link made (rc34): the link is random, the
+// screenshot masks it.
+await app.request(`${ACCOUNT_PATH}/feed`, post({ csrf }, cookie));
 mkdirSync(OUT, { recursive: true });
 for (const [name, path] of Object.entries(pages)) {
   const res = await app.request(path, { headers: { cookie } });

@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+
 import { createClient } from "@libsql/client";
+import type { TokenCipher } from "../../src/crypto/tokens.js";
 import type { SqlStatement, StoragePort } from "../../src/db/port.js";
 import { sqliteStoragePort } from "../../src/db/sqlite.js";
 import type { MailMessage } from "../../src/mail/port.js";
@@ -34,6 +36,8 @@ export async function browser(
     now?: () => string;
     /** A send that fails: the error to throw for it, or null to deliver. */
     mailFails?: (m: MailMessage) => Error | null;
+    /** The instance's token cipher, for calendar feed links (rc34); none by default. */
+    feedCipher?: TokenCipher;
   } = {},
 ): Promise<Browser> {
   const client = createClient({ url: ":memory:" });
@@ -65,6 +69,7 @@ export async function browser(
       publicBaseUrl: "https://whendowe.example",
       secureCookies: true,
       now: options.now ?? (() => new Date().toISOString()),
+      ...(options.feedCipher === undefined ? {} : { feedCipher: options.feedCipher }),
     },
   });
   const open = (): Browser => {

@@ -24,7 +24,7 @@ import {
 } from "../../people/invite.js";
 import { appearanceIn, normalizeEmail } from "../../people/person.js";
 import { retainDaysSchema } from "../../privacy/retention.js";
-import { html, retentionSection, who } from "../layout.js";
+import { GROUPS_PATH, html, retentionSection, who } from "../layout.js";
 import {
   type AppEnv,
   notVisible,
@@ -36,13 +36,14 @@ import {
 } from "../session.js";
 import { appearanceSection, saveAppearance } from "./account.js";
 import { eventSummary } from "./events.js";
+import { feedSection } from "./feeds.js";
 
 // Groups (MVP-1 slice D1). Every route needs a signed-in person; every group page
 // goes through findGroupForMember, which is the only way to read a group at all, so
 // a non-member gets the same 404 as a group that does not exist (§13: no IDOR, and
 // no confirming that a group exists to someone outside it).
 
-export const GROUPS_PATH = "/groups";
+export { GROUPS_PATH };
 export const INVITE_PATH = "/invite";
 
 export interface GroupDeps {
@@ -197,6 +198,7 @@ ${events.length === 0 ? html`<p class="muted">Nothing planned yet.</p>` : html`<
           (m) =>
             html`<li>${who(m.shown)}${m.personId === me.personId ? " (you)" : ""}${m.role === "organizer" ? html` <span class="muted">· organizer</span>` : ""}</li>`,
         )}</ul>
+${await feedSection(deps, { personId: me.personId, groupId: membership.group.id }, me.csrfToken)}
 ${await appearanceSection(deps.storage, { kind: "group", id: membership.group.id }, me, `${GROUPS_PATH}/${membership.group.id}/me`, "group")}
 ${membership.role === "organizer" ? inviteForm(membership, me.csrfToken, null) : ""}
 ${retentionSection({

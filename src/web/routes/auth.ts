@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import type { Context, Hono } from "hono";
 import { z } from "zod";
+import type { TokenCipher } from "../../crypto/tokens.js";
 import type { StoragePort } from "../../db/port.js";
 import { MailCapReachedError } from "../../mail/capped.js";
 import type { MailPort } from "../../mail/port.js";
@@ -69,6 +70,12 @@ export interface AuthDeps {
   readonly publicBaseUrl: string;
   readonly secureCookies: boolean;
   readonly now: () => string;
+  /**
+   * The token cipher, for calendar feed links (§10 rc34): they are kept encrypted so their
+   * owner can be shown them again. Absent on an instance with no TOKEN_ENCRYPTION_KEY,
+   * which then offers no feeds.
+   */
+  readonly feedCipher?: TokenCipher;
 }
 
 const tokenSchema = z.string().min(1).max(256);

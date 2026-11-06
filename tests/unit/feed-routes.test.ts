@@ -5,8 +5,9 @@ import { createEvent } from "../../src/events/event.js";
 import { issueFeedLink } from "../../src/feeds/feed.js";
 import { createGroup } from "../../src/people/group.js";
 import { findOrCreatePerson } from "../../src/people/person.js";
-import { feedPath } from "../../src/web/routes/feeds.js";
-import { browser } from "../property/one-browser.js";
+import { ACCOUNT_FEED_PATH, feedPath } from "../../src/web/routes/feeds.js";
+import { GROUPS_PATH } from "../../src/web/routes/groups.js";
+import { addAccount, browser, home, post } from "../property/one-browser.js";
 
 // GET /feed/<token>.ics (DESIGN §10 rc34): the link is the key, so it works with no
 // cookie at all, never sets one and writes nothing; an unchanged feed answers 304.
@@ -76,7 +77,13 @@ it("an unchanged feed answers 304 to its ETag; a changed one doesn't", async () 
 
 it("an unknown or malformed link is 404 and cached by nobody (replaced: feeds.suite)", async () => {
   const { b, path } = await withFeed();
-  for (const bad of ["/feed/nope.ics", `${path}x`, path.replace(".ics", ""), "/feed/"]) {
+  for (const bad of [
+    "/feed/nope.ics",
+    `${path}x`,
+    path.replace("/feed/", "/feed/A"),
+    path.replace(".ics", ""),
+    "/feed/",
+  ]) {
     const res = await b.request(bad);
     expect(res.status, bad).toBe(404);
   }
@@ -98,4 +105,89 @@ it("a group's feed is named for the group", async () => {
   });
   const body = await (await b.request(feedPath(token ?? ""))).text();
   expect(body).toContain("X-WR-CALNAME:WhenDoWe · Rope jam");
+});
+
+// --- The pages that offer a link (F3) ---------------------------------------------------
+
+const linkIn = (page: string) =>
+  /https:\/\/whendowe\.example\/feed\/([A-Za-z0-9_-]{43})\.ics/.exec(page)?.[0] ?? null;
+
+it("your account page makes a link on POST, shows it again, and replaces it", async () => {
+  const cipher = await createTokenCipher([{ id: 1, material: KEY }], 1);
+  const b = await browser({ now: () => NOW, feedCipher: cipher });
+  await addAccount(b, "ann@example.org");
+  const before = b.writes;
+  const empty = await (await b.request("/account")).text();
+  expect(b.writes).toBe(before); // looking makes nothing
+  expect(empty).toContain("Your calendar feed");
+  expect(empty).toContain(`action="${ACCOUNT_FEED_PATH}"`);
+  expect(linkIn(empty)).toBeNull();
+  expect(empty).toContain("Make a feed link");
+  expect(empty).not.toContain("Make a new link");
+  expect(empty).toContain("Every event you&#39;re in, in your own calendar app");
+
+  const { csrf } = await home(b);
+  expect((await b.request(ACCOUNT_FEED_PATH, post({}))).status).toBe(403); // no CSRF, no link
+  const signedOut = b.another();
+  const out = await signedOut.request(ACCOUNT_FEED_PATH, post({ csrf }));
+  expect(out.headers.get("location") ?? "").not.toBe("/account#feed"); // to sign-in instead
+  const made = await b.request(ACCOUNT_FEED_PATH, post({ csrf }));
+  expect(made.status).toBe(303);
+  expect(made.headers.get("location")).toBe("/account#feed");
+  const page = await (await b.request("/account")).text();
+  const link = linkIn(page);
+  expect(link).not.toBeNull();
+  expect(page).toContain(`href="${link?.replace("https:", "webcal:")}"`);
+  expect(page).toContain(
+    `https://calendar.google.com/calendar/r?cid=${encodeURIComponent(link?.replace("https:", "webcal:") ?? "")}`,
+  );
+  expect(page).toContain("Google Calendar checks a feed every few hours");
+  expect(page).toContain("data-copy");
+  expect(page).toContain('aria-label="Feed link"');
+  expect(page).toContain("Make a new link");
+  expect(page).not.toContain('<button type="button" data-share-sheet'); // a secret: Copy, never Share…
+  expect((await b.request(new URL(link ?? "").pathname)).status).toBe(200);
+  expect(await (await b.request("/account")).text()).toContain(link ?? "?"); // shown again
+
+  await b.request(ACCOUNT_FEED_PATH, post({ csrf }));
+  const replaced = linkIn(await (await b.request("/account")).text());
+  expect(replaced).not.toBe(link);
+  expect((await b.request(new URL(link ?? "").pathname)).status).toBe(404);
+});
+
+it("a group's page offers its feed to members; a stranger can't make one", async () => {
+  const cipher = await createTokenCipher([{ id: 1, material: KEY }], 1);
+  const b = await browser({ now: () => NOW, feedCipher: cipher });
+  await addAccount(b, "ann@example.org");
+  const res = await b.request(GROUPS_PATH, post({ csrf: (await home(b)).csrf, name: "Rope jam" }));
+  const group = res.headers.get("location") ?? "";
+  const groupPage = await (await b.request(group)).text();
+  expect(groupPage).toContain(`action="${group}/feed"`);
+  expect(groupPage).toContain("These events in your calendar");
+  expect(groupPage).toContain("The events made in this group that you&#39;re in");
+  expect((await b.request(`${group}/feed`, post({}))).status).toBe(403); // no CSRF
+  const made = await b.request(`${group}/feed`, post({ csrf: (await home(b)).csrf }));
+  expect(made.headers.get("location")).toBe(`${group}#feed`);
+  const link = linkIn(await (await b.request(group)).text());
+  const body = await (await b.request(new URL(link ?? "").pathname)).text();
+  expect(body).toContain("X-WR-CALNAME:WhenDoWe · Rope jam");
+
+  const stranger = b.another();
+  await addAccount(stranger, "eve@example.org");
+  const refused = await stranger.request(
+    `${group}/feed`,
+    post({ csrf: (await home(stranger)).csrf }),
+  );
+  expect(refused.status).toBe(404);
+});
+
+it("without a key the pages say feeds aren't set up, and there is nothing to POST to", async () => {
+  const b = await browser({ now: () => NOW });
+  await addAccount(b, "ann@example.org");
+  const page = await (await b.request("/account")).text();
+  expect(page).toContain("Calendar feeds aren't set up on this server.");
+  expect(page).not.toContain(`action="${ACCOUNT_FEED_PATH}"`);
+  expect((await b.request(ACCOUNT_FEED_PATH, post({ csrf: (await home(b)).csrf }))).status).toBe(
+    404,
+  );
 });

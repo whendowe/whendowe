@@ -11,7 +11,7 @@ import { eraseDue, type RevokeCalendars } from "../../src/privacy/erasure.js";
 import { retentionPass } from "../../src/privacy/purge.js";
 import { isRetentionMinute } from "../../src/privacy/retention.js";
 import { calendarRevoker, createApp } from "../../src/web/app.js";
-import { buildOAuthDeps } from "../../src/web/routes/oauth-deps.js";
+import { buildOAuthDeps, tokenCipherFor } from "../../src/web/routes/oauth-deps.js";
 import type { AppEnv } from "../../src/web/session.js";
 
 export { ConnectionDO } from "./connection-do.js";
@@ -107,6 +107,11 @@ async function build(env: Env): Promise<Built> {
       publicBaseUrl: config.PUBLIC_BASE_URL,
       secureCookies: new URL(config.PUBLIC_BASE_URL).protocol === "https:",
       now,
+      // Calendar feed links (rc34): only with a key to keep them under.
+      feedCipher:
+        config.TOKEN_ENCRYPTION_KEY === undefined
+          ? undefined
+          : await tokenCipherFor(config.TOKEN_ENCRYPTION_KEY),
     },
     oauth,
   });

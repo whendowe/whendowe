@@ -10,7 +10,7 @@ import type { MiddlewareHandler } from "hono";
 // scripts and fails, naming the new values, whenever a script changes.
 export const SCRIPT_HASHES: readonly string[] = [
   "sha256-hy1CT6orc1H1ttOry9+3LGLyKv9lFZDPcMIK/nQvAJo=",
-  "sha256-Ut9HYEA7WCEd+RNydfR65LQ8AkGLkHN9+rpxVaTPi2c=",
+  "sha256-ifuKO1T8Vg/qO2twwUmviNp1akRXwgQk4DZcpWtVKDE=",
   "sha256-thOP9cofq68135/BNxIx19zBU2Nd3F8xNvN0xZ1hJoc=",
   "sha256-to6JPZkUfWfQiXrrmnVXATfIzIPJqlnSwh2dzCjuWAM=",
 ];

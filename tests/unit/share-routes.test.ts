@@ -66,6 +66,8 @@ async function share(
   expect(text).toContain("Paste this into your group chat");
   // The page that made the link already knows the thread is shared: Mara decides (rc29).
   expect(text).toContain("You decide, after the votes are in");
+  // A message for a chat may go to the phone's share sheet, where there is one (L3b).
+  expect(text).toContain('<button type="button" data-share-sheet hidden>Share…</button>');
   // The link ends the message to paste (rc25): "Picnic: which of these work for you? <link>".
   const at = text.indexOf(`${ask} https://whendowe.example/s?t=`);
   expect(at).toBeGreaterThan(-1);

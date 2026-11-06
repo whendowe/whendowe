@@ -29,7 +29,9 @@ const httpUrlSchema = z.string().refine(
   { message: "must be an http(s) URL" },
 );
 
-// Google OAuth (§12) + the AES-256-GCM key wrapping the token columns (§13).
+// Google OAuth (§12) + the AES-256-GCM key wrapping the token columns (§13). The key
+// also wraps calendar feed links (rc34), so it may be set without Google; Google may
+// not be set without it.
 // Declared once, then spread into configSchema as optional: the M0 hello-page
 // targets and the test suites boot without Google credentials, and an instance
 // with no calendar connected yet is a legitimate state. The key is length-checked
@@ -98,11 +100,12 @@ export type GoogleOAuthConfig = z.infer<typeof googleOAuthSchema>;
  * a mode.
  */
 export function anyGoogleOAuthConfigured(config: Config): boolean {
+  // Not TOKEN_ENCRYPTION_KEY: Google needs it, but so do calendar feeds (rc34), so an
+  // instance with the key and no Google is a mode of its own, not half a Google setup.
   return (
     config.GOOGLE_CLIENT_ID !== undefined ||
     config.GOOGLE_CLIENT_SECRET !== undefined ||
-    config.GOOGLE_REDIRECT_URI !== undefined ||
-    config.TOKEN_ENCRYPTION_KEY !== undefined
+    config.GOOGLE_REDIRECT_URI !== undefined
   );
 }
 

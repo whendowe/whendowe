@@ -83,7 +83,7 @@ import {
   type RRuleSubset,
   upcomingOccurrences,
 } from "../../recurrence.js";
-import { type Html, html, retentionSection, who, ZONE_GUESS } from "../layout.js";
+import { EVENTS_PATH, type Html, html, retentionSection, who, ZONE_GUESS } from "../layout.js";
 import { pickerAssets } from "../picker.js";
 import {
   type AppEnv,
@@ -103,7 +103,7 @@ import { sendResponseLink } from "./respond.js";
 // what each visibility tier may see — INCLUDING the change history, where a diff of a
 // hidden field would leak it (WORKFLOWS US-6).
 
-export const EVENTS_PATH = "/events";
+export { EVENTS_PATH };
 
 export interface EventRouteDeps {
   readonly storage: StoragePort;

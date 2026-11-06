@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { type Config, requireGoogleOAuth } from "../../config.js";
-import { createTokenCipher } from "../../crypto/tokens.js";
+import { createTokenCipher, type TokenCipher } from "../../crypto/tokens.js";
 import type { StoragePort } from "../../db/port.js";
 import type { OAuthRouteDeps } from "./oauth.js";
 
@@ -17,6 +17,11 @@ import type { OAuthRouteDeps } from "./oauth.js";
  */
 const CURRENT_TOKEN_KEY_ID = 1;
 
+/** The token cipher over this instance's one key (refresh tokens, feed links). */
+export function tokenCipherFor(key: string): Promise<TokenCipher> {
+  return createTokenCipher([{ id: CURRENT_TOKEN_KEY_ID, material: key }], CURRENT_TOKEN_KEY_ID);
+}
+
 export async function buildOAuthDeps(
   config: Config,
   storage: StoragePort,
@@ -24,10 +29,7 @@ export async function buildOAuthDeps(
   // Throws, naming every missing key, if the instance is only half configured.
   const google = requireGoogleOAuth(config);
 
-  const cipher = await createTokenCipher(
-    [{ id: CURRENT_TOKEN_KEY_ID, material: google.TOKEN_ENCRYPTION_KEY }],
-    CURRENT_TOKEN_KEY_ID,
-  );
+  const cipher = await tokenCipherFor(google.TOKEN_ENCRYPTION_KEY);
 
   return {
     storage,
