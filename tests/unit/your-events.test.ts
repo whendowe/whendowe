@@ -1,12 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { expect, it } from "vitest";
-import { createPoll } from "../../src/events/poll.js";
-import { findGroupForMember } from "../../src/people/group.js";
 import { findOrCreatePerson } from "../../src/people/person.js";
 import { castVote, createPollThread } from "../../src/plans/plan.js";
 import { findThreadForMember } from "../../src/plans/thread.js";
 import { SWITCH_PATH } from "../../src/web/routes/auth.js";
-import { pollInputFromForm } from "../../src/web/routes/events.js";
 import { GROUPS_PATH } from "../../src/web/routes/groups.js";
 import { addAccount, type Browser, browser, home, post } from "../property/one-browser.js";
 
@@ -45,27 +42,30 @@ it("someone with nothing yet is told where events come from", async () => {
   expect(text).not.toContain("Finding a time");
 });
 
-it("lists polls first, then what's coming soonest first, then the past folded away", async () => {
+it("lists what is being decided first, then what's coming soonest first, then the past folded away", async () => {
   const b = await browser({ now: () => NOW });
   await addAccount(b, "ann@example.org");
   const group = await make(b, GROUPS_PATH, { name: "Table" });
   await make(b, `${group}/events`, at("Later", "2101-12-01T19:00", "2101-12-01T22:00"));
   await make(b, `${group}/events`, at("Sooner", "2101-11-05T19:00", "2101-11-05T22:00"));
   await make(b, `${group}/events`, at("Long ago", "2101-10-01T19:00", "2101-10-01T22:00"));
-  // An event-poll made before rc26 (the form makes a thread now): still listed first.
+  // A question being decided is listed first.
   const ann = await findOrCreatePerson(b.storage, "ann@example.org", { now: NOW });
-  const input = pollInputFromForm({
-    title: "When next?",
-    tzid: "Europe/Prague",
-    start_0: "2101-11-10T19:00",
-    end_0: "2101-11-10T22:00",
-    start_1: "2101-11-11T19:00",
-    end_1: "2101-11-11T22:00",
-  });
-  await createPoll(b.storage, {
+  await createPollThread(b.storage, {
     creatorId: ann.id,
-    group: await findGroupForMember(b.storage, group.split("/").at(-1) ?? "", ann.id),
-    ...input,
+    group: null,
+    fields: {
+      title: "When next?",
+      description: null,
+      location: null,
+      allDay: false,
+      tzid: "Europe/Prague",
+    },
+    candidates: [
+      { startLocal: "2101-11-10T19:00", endLocal: "2101-11-10T22:00" },
+      { startLocal: "2101-11-11T19:00", endLocal: "2101-11-11T22:00" },
+    ],
+    people: [],
     now: NOW,
   });
 
@@ -122,10 +122,9 @@ it("an event you were added to directly is yours, at your tier, until you are re
   expect(text).not.toContain(">Open</a>");
 });
 
-it("one list of what is being decided: threads waiting for you, polls, then the rest (rc28)", async () => {
+it("one list of what is being decided: threads waiting for you, then the rest (rc28)", async () => {
   const b = await browser({ now: () => NOW });
   await addAccount(b, "ann@example.org");
-  const group = await make(b, GROUPS_PATH, { name: "Table" });
   const [ann, bob] = await Promise.all(
     ["ann@example.org", "bob@example.org"].map((e) =>
       findOrCreatePerson(b.storage, e, { now: NOW }),
@@ -152,26 +151,12 @@ it("one list of what is being decided: threads waiting for you, polls, then the 
   const asAnn = await findThreadForMember(b.storage, done.threadId, ann?.id ?? "");
   if (asAnn === null) throw new Error("member");
   await castVote(b.storage, asAnn, { planId: done.planIds[0] ?? "", answer: "yes", now: NOW });
-  await createPoll(b.storage, {
-    creatorId: ann?.id ?? "",
-    group: await findGroupForMember(b.storage, group.split("/").at(-1) ?? "", ann?.id ?? ""),
-    ...pollInputFromForm({
-      title: "Old poll",
-      tzid: "Europe/Prague",
-      start_0: "2101-11-10T19:00",
-      end_0: "2101-11-10T22:00",
-      start_1: "2101-11-11T19:00",
-      end_1: "2101-11-11T22:00",
-    }),
-    now: NOW,
-  });
-
   const text = (await home(b)).text;
   const finding = text.slice(
     text.indexOf("<h2>Finding a time</h2>"),
     text.indexOf("</ul>", text.indexOf("<h2>Finding a time</h2>")),
   );
-  const order = ["His", "2 waiting for your vote", "Old poll", "Hers", "2 on the table"];
+  const order = ["His", "2 waiting for your vote", "Hers", "2 on the table"];
   const positions = order.map((s) => finding.indexOf(s));
   expect(
     positions.every((p) => p >= 0),

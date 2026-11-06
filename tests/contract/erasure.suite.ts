@@ -9,7 +9,6 @@ import {
   listHistory,
 } from "../../src/events/event.js";
 import { addParticipant, listParticipants } from "../../src/events/participation.js";
-import { createPoll, vote } from "../../src/events/poll.js";
 import { proposeChange } from "../../src/events/proposal.js";
 import { addFeedback, issueResponseLinks } from "../../src/events/response.js";
 import { createGroup, findGroupForMember } from "../../src/people/group.js";
@@ -32,6 +31,7 @@ import {
   reapplyErasures,
   requestDeletion,
 } from "../../src/privacy/erasure.js";
+import { leftoverPollVotes } from "./legacy-event-poll.js";
 
 // Deleting an account (DESIGN §10 rc21, WORKFLOWS US-20) on BOTH drivers. The test that
 // matters scans EVERY table afterwards: not one row anywhere may still hold the person's
@@ -124,28 +124,20 @@ async function busyTom(port: StoragePort, tag: string) {
     visibility: "FULL",
     now: T0,
   });
-  // A poll Tom voted in.
-  const poll = await createPoll(port, {
+  // An event with a vote Tom left on it as an event-poll, before rc35 removed them.
+  const poll = await createEvent(port, {
     creatorId: mara.id,
     group: null,
-    fields: {
-      title: "When?",
-      description: null,
-      location: null,
-      allDay: false,
-      tzid: "Europe/Prague",
-    },
-    candidates: [
-      { startLocal: "2101-11-21T18:00", endLocal: "2101-11-21T20:00" },
-      { startLocal: "2101-11-22T18:00", endLocal: "2101-11-22T20:00" },
-    ],
-    people: [{ personId: tom.id, editTier: "view", visibility: "FULL" }],
+    fields: { ...DINNER, title: "When?" },
     now: T0,
   });
-  await vote(port, await access(port, poll.id, tom.id), {
-    answers: new Map([[0, "yes"]]),
+  await addParticipant(port, await access(port, poll.id, mara.id), {
+    email: tom.email,
+    editTier: "view",
+    visibility: "FULL",
     now: T0,
   });
+  await leftoverPollVotes(port, poll.id, [{ personId: tom.id, answer: "yes" }], T0);
 
   // A group Tom organizes with Lena in it, and a pending invite he sent.
   const group = await createGroup(port, { name: "Jam crew", creatorId: tom.id, now: T0 });

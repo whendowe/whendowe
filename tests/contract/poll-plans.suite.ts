@@ -241,6 +241,11 @@ export function runPollPlansContract(makePort: () => Promise<StoragePort>): void
           endLocal: `2101-12-${String(i + 2).padStart(2, "0")}`,
         }));
       await expect(poll(days(11), [david.id])).rejects.toBeInstanceOf(PollInputError);
+      // Each time is checked as an event's own time is, and the same time twice is refused.
+      await expect(poll([...days(1), ...days(1)], [david.id])).rejects.toThrow(/same/);
+      await expect(
+        poll([{ startLocal: "2101-12-02", endLocal: "2101-12-01" }], [david.id]),
+      ).rejects.toThrow(/end after/);
       // rc29: nobody else is allowed (a poll made to be shared); too many is not.
       const crowd = await Promise.all(
         Array.from({ length: MAX_MEMBERS }, (_, i) => person(port, `crowd${i}`, "d")),

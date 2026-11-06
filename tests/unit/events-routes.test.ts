@@ -2,15 +2,11 @@
 import { createClient } from "@libsql/client";
 import { expect, it } from "vitest";
 import { sqliteStoragePort } from "../../src/db/sqlite.js";
-import { createPoll } from "../../src/events/poll.js";
 import { MailCapReachedError } from "../../src/mail/capped.js";
 import type { MailMessage } from "../../src/mail/port.js";
-import { findGroupForMember } from "../../src/people/group.js";
-import { findOrCreatePerson } from "../../src/people/person.js";
 import { createApp } from "../../src/web/app.js";
 import { ACCOUNT_PATH } from "../../src/web/layout.js";
 import { CONFIRM_PATH, SIGN_IN_PATH } from "../../src/web/routes/auth.js";
-import { pollInputFromForm } from "../../src/web/routes/events.js";
 import { GROUPS_PATH, INVITE_PATH } from "../../src/web/routes/groups.js";
 import { loadMigrationSql } from "../conftest.js";
 
@@ -369,43 +365,6 @@ const POLL = {
   end_1: "2101-10-20T23:00",
 };
 
-/**
- * An event-poll, as "Find a time" made before rc26. The form now makes a thread of plans
- * (tests/unit/vote-link-routes.test.ts); event-polls already open run on until P6d, so
- * their pages are still tested — made through the domain, from the same form fields.
- */
-async function startPoll(h: H, _dm: Who, group: string, fields: Record<string, string> = POLL) {
-  const dm = await findOrCreatePerson(h.storage, "dm@example.org", {
-    now: new Date().toISOString(),
-  });
-  const membership = await findGroupForMember(h.storage, group.split("/").at(-1) ?? "", dm.id);
-  const input = pollInputFromForm(fields);
-  const event = await createPoll(h.storage, {
-    creatorId: dm.id,
-    group: membership,
-    fields: input.fields,
-    candidates: input.candidates,
-    now: new Date().toISOString(),
-  });
-  return `/events/${event.id}`;
-}
-
-async function revisionOnPage(h: H, event: string, who: Who): Promise<string> {
-  return /name="revision" value="(\d+)"/.exec(await text(h, event, who))?.[1] ?? "";
-}
-
-it("a poll shows its options in time order, not a placeholder time, and no edit link", async () => {
-  const h = await harness();
-  const { dm, group } = await setup(h);
-  const poll = await startPoll(h, dm, group);
-  const page = await text(h, poll, dm);
-  expect(page).toContain("Voting on a time.");
-  expect(page.indexOf("2101-10-20 19:00")).toBeLessThan(page.indexOf("2101-10-22 18:00"));
-  expect(page).not.toContain(`${poll}/edit`);
-  expect(await text(h, group, dm)).toContain("voting on a time");
-  expect((await get(h, `${poll}/edit`, dm)).status).toBe(409);
-});
-
 it("refuses a poll with no time, keeping what was typed; one time is a poll (rc33)", async () => {
   const h = await harness();
   const { dm, group } = await setup(h);
@@ -462,135 +421,14 @@ it("a poll with nobody to ask is a poll of one, opened on sharing it (rc29)", as
   expect(page).not.toContain("Email vote links");
 });
 
-it("players vote, change their mind, and the DM sees who said what", async () => {
+it("starting a poll requires CSRF and membership", async () => {
   const h = await harness();
   const { dm, group } = await setup(h);
-  const ann = await join(h, dm, group, "ann@example.org", "view", "FULL");
-  const poll = await startPoll(h, dm, group);
-  expect(
-    (
-      await h.app.request(
-        `${poll}/votes`,
-        post({ csrf: ann.csrf, slot_0: "no", slot_1: "yes" }, ann.cookie),
-      )
-    ).status,
-  ).toBe(303);
-  expect(
-    (await h.app.request(`${poll}/votes`, post({ csrf: ann.csrf, slot_0: "ifneedbe" }, ann.cookie)))
-      .status,
-  ).toBe(303);
-  expect(
-    (
-      await h.app.request(
-        `${poll}/votes`,
-        post({ csrf: dm.csrf, slot_0: "yes", slot_1: "yes" }, dm.cookie),
-      )
-    ).status,
-  ).toBe(303);
-
-  const page = await text(h, poll, dm);
-  expect(page).toContain("ann: If need be"); // replaced, not duplicated
-  expect(page).not.toContain("ann: No");
-  expect(page).toContain("2 yes · 0 if need be · 0 no");
-  expect(page).toContain("works for everyone"); // Thursday: both said yes
-  // Ann's own answers come back checked.
-  const annPage = await text(h, poll, ann);
-  expect(annPage).toMatch(/name="slot_1" value="yes" checked/);
-});
-
-it("a DETAILS player sees the counts but not who voted what", async () => {
-  const h = await harness();
-  const { dm, group } = await setup(h);
-  const petra = await join(h, dm, group, "petra@example.org", "view", "DETAILS");
-  const poll = await startPoll(h, dm, group);
-  await h.app.request(`${poll}/votes`, post({ csrf: dm.csrf, slot_0: "yes" }, dm.cookie));
-  const page = await text(h, poll, petra);
-  expect(page).toContain("1 yes · 0 if need be · 0 no");
-  // No voter names. The organizer is named as the history's author — attribution — by
-  // handle; their address appears nowhere (DESIGN §10 rc21).
-  expect(page).not.toContain("dm: Yes");
-  expect(page).not.toContain("dm@example.org");
-  expect(page).toContain("dm created it");
-});
-
-it("the DM confirms; the event is scheduled at that time, logged, and voting is closed", async () => {
-  const h = await harness();
-  const { dm, group } = await setup(h);
-  const ann = await join(h, dm, group, "ann@example.org", "view", "FULL");
-  const poll = await startPoll(h, dm, group);
-  const revision = await revisionOnPage(h, poll, dm);
-  // Slot 1 in time order is Saturday the 22nd.
-  const res = await h.app.request(
-    `${poll}/confirm`,
-    post({ csrf: dm.csrf, revision, slot: "1" }, dm.cookie),
-  );
-  expect(res.status).toBe(303);
-
-  const page = await text(h, poll, ann);
-  expect(page).toContain("2101-10-22 18:00 – 22:00 · Europe/Prague");
-  expect(page).not.toContain("Voting on a time.");
-  expect(page).toContain("status: proposed → scheduled");
-  const late = await h.app.request(
-    `${poll}/votes`,
-    post({ csrf: ann.csrf, slot_0: "yes" }, ann.cookie),
-  );
-  expect(late.status).toBe(409);
-  expect(await late.text()).toContain("Voting has closed");
-});
-
-it("only an editor can confirm; a stale confirm button is refused", async () => {
-  const h = await harness();
-  const { dm, group } = await setup(h);
-  const ann = await join(h, dm, group, "ann@example.org", "view", "FULL");
-  const poll = await startPoll(h, dm, group);
-  expect(await text(h, poll, ann)).not.toContain("/confirm");
-  expect(
-    (
-      await h.app.request(
-        `${poll}/confirm`,
-        post({ csrf: ann.csrf, revision: "1", slot: "0" }, ann.cookie),
-      )
-    ).status,
-  ).toBe(403);
-
-  // Two tabs: the first confirms Thursday, the second (same page) tries Saturday.
-  const revision = await revisionOnPage(h, poll, dm);
-  await h.app.request(`${poll}/confirm`, post({ csrf: dm.csrf, revision, slot: "0" }, dm.cookie));
-  const second = await h.app.request(
-    `${poll}/confirm`,
-    post({ csrf: dm.csrf, revision, slot: "1" }, dm.cookie),
-  );
-  expect(second.status).toBe(409);
-  expect(await text(h, poll, dm)).toContain("2101-10-20 19:00");
-});
-
-it("poll actions require CSRF and membership", async () => {
-  const h = await harness();
-  const { dm, group } = await setup(h);
-  const poll = await startPoll(h, dm, group);
   const stranger = await signIn(h, "stranger@example.org");
   expect((await h.app.request(`${group}/polls`, post({ ...POLL }, dm.cookie))).status).toBe(403);
-  expect((await h.app.request(`${poll}/votes`, post({ slot_0: "yes" }, dm.cookie))).status).toBe(
-    403,
-  );
   expect(
-    (await h.app.request(`${poll}/confirm`, post({ revision: "1", slot: "0" }, dm.cookie))).status,
-  ).toBe(403);
-  expect(
-    (
-      await h.app.request(
-        `${poll}/votes`,
-        post({ csrf: stranger.csrf, slot_0: "yes" }, stranger.cookie),
-      )
-    ).status,
-  ).toBe(404);
-  expect(
-    (
-      await h.app.request(
-        `${poll}/confirm`,
-        post({ csrf: stranger.csrf, revision: "1", slot: "0" }, stranger.cookie),
-      )
-    ).status,
+    (await h.app.request(`${group}/polls`, post({ csrf: stranger.csrf, ...POLL }, stranger.cookie)))
+      .status,
   ).toBe(404);
   expect((await get(h, `${group}/polls/new`, stranger)).status).toBe(404);
 });
@@ -612,22 +450,29 @@ async function sendLinks(h: H, dm: Who, event: string) {
   return h.app.request(`${event}/links`, post({ csrf: dm.csrf }, dm.cookie));
 }
 
-it("an organizer emails vote links: everyone but themself, and no title in a BUSY inbox", async () => {
+it("an organizer emails answer links: everyone but themself, and no title in a BUSY inbox", async () => {
   const h = await harness();
   const { dm, group } = await setup(h);
   await join(h, dm, group, "ann@example.org", "view", "FULL");
   await join(h, dm, group, "grandma@example.org", "view", "BUSY");
-  const poll = await startPoll(h, dm, group);
+  const event = await createVia(h, dm, group, { ...NIGHT, title: "Session 13" });
   const before = h.sent.length;
-  const res = await sendLinks(h, dm, poll);
+  const res = await sendLinks(h, dm, event);
   expect(res.status).toBe(200);
   expect(await res.text()).toContain("Sent to 2 people.");
   const mails = h.sent.slice(before);
   expect(mails.map((m) => m.to).sort()).toEqual(["ann@example.org", "grandma@example.org"]);
   const ann = mails.find((m) => m.to === "ann@example.org");
   const grandma = mails.find((m) => m.to === "grandma@example.org");
-  expect(ann?.subject).toContain("Session 13");
+  expect(ann?.subject).toBe('Are you coming to "Session 13"?');
+  expect(ann?.text).toContain(
+    'dm would like to know whether you\'re coming to "Session 13" (2101-10-20 19:00 – 23:00 · Europe/Prague).',
+  );
   expect(`${grandma?.subject} ${grandma?.text}`).not.toContain("Session 13");
+  expect(grandma?.subject).toBe("Are you coming? (2101-10-20 19:00 – 23:00 · Europe/Prague)");
+  expect(grandma?.text).toContain(
+    "dm would like to know whether you're coming (2101-10-20 19:00 – 23:00 · Europe/Prague).",
+  );
   // It came through the group, so its opt-out link can stop the group's mail (rc24).
   const t =
     new URL(
@@ -636,12 +481,12 @@ it("an organizer emails vote links: everyone but themself, and no title in a BUS
   expect(await text(h, `/opt-out?t=${t}`)).toContain("Stop emails through “Thursday Table”");
 });
 
-it("a player votes from the link with no account: GET changes nothing, POST saves, nobody is signed in", async () => {
+it("a player answers from the link with no account: GET changes nothing, POST saves, nobody is signed in", async () => {
   const h = await harness();
   const { dm, group } = await setup(h);
   await join(h, dm, group, "ann@example.org", "view", "FULL");
-  const poll = await startPoll(h, dm, group);
-  await sendLinks(h, dm, poll);
+  const event = await createVia(h, dm, group);
+  await sendLinks(h, dm, event);
   const link = linkFor(h, "ann@example.org");
 
   // No cookie at all: the link is the identity. Opening it (twice, like a mail
@@ -652,58 +497,53 @@ it("a player votes from the link with no account: GET changes nothing, POST save
     expect(page.headers.get("set-cookie")).toBeNull();
     expect(page.headers.get("referrer-policy")).toBe("no-referrer");
     expect(page.headers.get("cache-control")).toBe("no-store");
-    expect(await page.text()).toContain("Which times work for you?");
+    expect(await page.text()).toContain("Are you coming?");
   }
-  expect(await text(h, poll, dm)).toContain("0 yes · 0 if need be · 0 no");
+  expect(await text(h, event, dm)).toContain("0 going · 0 maybe · 0 can't make it");
 
-  const res = await h.app.request(
-    "/respond",
-    post({ t: tokenOf(link), slot_0: "yes", slot_1: "no", note: "Thursday's bad for me" }),
-  );
+  const res = await h.app.request("/respond", post({ t: tokenOf(link), attendance: "going" }));
   expect(res.status).toBe(303);
   expect(res.headers.get("set-cookie")).toBeNull();
   expect(await (await h.app.request(res.headers.get("location") ?? "")).text()).toContain(
     "your answer is saved",
   );
-
-  const dmPage = await text(h, poll, dm);
-  expect(dmPage).toContain("ann: Yes");
-  // The note is user text: escaped, inside its own element.
-  expect(dmPage).toMatch(/ann: <span[^>]*>Thursday&#39;s bad for me<\/span>/);
+  expect(await text(h, event, dm)).toContain("ann: Going");
 });
 
 it("a response link answers only for its own event and person — and a dead link says so", async () => {
   const h = await harness();
   const { dm, group } = await setup(h);
   await join(h, dm, group, "ann@example.org", "view", "FULL");
-  const poll = await startPoll(h, dm, group);
-  await sendLinks(h, dm, poll);
+  const event = await createVia(h, dm, group);
+  await sendLinks(h, dm, event);
   const t = tokenOf(linkFor(h, "ann@example.org"));
   // The link can't be turned on another event by path or body: there is no event id to send.
-  const other = await startPoll(h, dm, group, { ...POLL, title: "Another" });
-  await h.app.request("/respond", post({ t, slot_0: "yes" }));
-  expect(await text(h, other, dm)).toContain("0 yes · 0 if need be · 0 no");
+  const other = await createVia(h, dm, group, { ...NIGHT, title: "Another" });
+  await h.app.request("/respond", post({ t, attendance: "going" }));
+  expect(await text(h, other, dm)).toContain("0 going · 0 maybe · 0 can't make it");
+  expect(await text(h, event, dm)).toContain("1 going");
   for (const bad of ["/respond?t=not-a-token", "/respond", `/respond?t=${t}x`]) {
     const res = await h.app.request(bad);
     expect(res.status).toBe(404);
     expect(await res.text()).toContain("This link no longer works");
   }
-  expect((await h.app.request("/respond", post({ t: "nope", slot_0: "yes" }))).status).toBe(404);
+  expect((await h.app.request("/respond", post({ t: "nope", attendance: "going" }))).status).toBe(
+    404,
+  );
 });
 
-it("after the time is picked, a vote link says so and refuses a late vote", async () => {
+it("once an event is cancelled, its link says so and refuses a late answer", async () => {
   const h = await harness();
   const { dm, group } = await setup(h);
   await join(h, dm, group, "ann@example.org", "view", "FULL");
-  const poll = await startPoll(h, dm, group);
-  await sendLinks(h, dm, poll);
+  const event = await createVia(h, dm, group);
+  await sendLinks(h, dm, event);
   const link = linkFor(h, "ann@example.org");
-  const revision = await revisionOnPage(h, poll, dm);
-  await h.app.request(`${poll}/confirm`, post({ csrf: dm.csrf, revision, slot: "0" }, dm.cookie));
-  expect(await (await h.app.request(link)).text()).toContain("Voting has closed.");
-  expect((await h.app.request("/respond", post({ t: tokenOf(link), slot_0: "no" }))).status).toBe(
-    409,
-  );
+  await h.app.request(`${event}/cancel`, post({ csrf: dm.csrf }, dm.cookie));
+  expect(await (await h.app.request(link)).text()).toContain("nothing to answer here any more");
+  expect(
+    (await h.app.request("/respond", post({ t: tokenOf(link), attendance: "going" }))).status,
+  ).toBe(409);
 });
 
 it("attendance and notes by link; a DETAILS member sees the counts but not who or their notes", async () => {
@@ -959,6 +799,9 @@ it("by emailed link: David agrees with no account; acknowledgment by link too", 
   expect(h.sent.slice(before).map((m) => [m.to, m.subject])).toEqual([
     ["david@example.org", 'dm asks you to agree: "Session 12: the Sunken Keep"'],
   ]);
+  expect(h.sent.at(-1)?.text).toContain(
+    'dm proposes "Session 12: the Sunken Keep" (2101-10-20 19:00 – 23:00 · Europe/Prague) and asks whether you agree.',
+  );
   const link = linkFor(h, "david@example.org");
   expect(await (await h.app.request(link)).text()).toContain("Do you agree?");
   expect(

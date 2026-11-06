@@ -18,7 +18,6 @@ import {
   removeParticipant,
   resolveInvitees,
 } from "../../src/events/participation.js";
-import { createPoll, pollResults, vote } from "../../src/events/poll.js";
 import { issueResponseLinks } from "../../src/events/response.js";
 import { createGroup, findGroupForMember } from "../../src/people/group.js";
 import { acceptInvite, createInvite } from "../../src/people/invite.js";
@@ -29,6 +28,7 @@ import {
   guestName,
   setAppearance,
 } from "../../src/people/person.js";
+import { leftoverPollVotes } from "./legacy-event-poll.js";
 
 // People added to and removed from an existing event (DESIGN rc15, slice 2F) on BOTH
 // drivers. Each change is a reservation row that the participation write is gated on,
@@ -330,41 +330,31 @@ export function runParticipantsContract(makePort: () => Promise<StoragePort>): v
 
     it("removing takes their participation, links and votes; their trail stays", async () => {
       const port = await makePort();
-      const mara = await findOrCreatePerson(port, "pp-mara-rm@example.org", { now: T0 });
-      const poll = await createPoll(port, {
-        creatorId: mara.id,
-        group: null,
-        fields: { ...DINNER },
-        candidates: [
-          { startLocal: "2101-11-20T18:00", endLocal: "2101-11-20T20:00" },
-          { startLocal: "2101-11-21T18:00", endLocal: "2101-11-21T20:00" },
-        ],
-        now: T0,
-      });
-      const bob = await added(port, poll.id, mara.id, "pp-bob-rm@example.org");
-      const asBob = await access(port, poll.id, bob);
-      expect(asBob.participation.responseKind).toBe("slot_vote"); // a poll's new person votes
-      expect((await vote(port, asBob, { answers: new Map([[0, "yes"]]), now: T1 })).kind).not.toBe(
-        "forbidden",
-      );
-      const links = await issueResponseLinks(port, await access(port, poll.id, mara.id), {
+      const d = await dinner(port, "rm");
+      const bob = await added(port, d.eventId, d.mara, "pp-bob-rm@example.org");
+      // A vote left from an event-poll (rc35 removed them; the rows stay until purged).
+      await leftoverPollVotes(port, d.eventId, [{ personId: bob, answer: "yes" }], T1);
+      const links = await issueResponseLinks(port, await access(port, d.eventId, d.mara), {
         now: T1,
         only: bob,
       });
       expect(links.kind === "issued" && links.links.map((l) => l.personId)).toEqual([bob]);
 
-      const asMara = await access(port, poll.id, mara.id);
+      const asMara = await access(port, d.eventId, d.mara);
       expect((await removeParticipant(port, asMara, { personId: bob, now: T1 })).kind).toBe(
         "removed",
       );
-      expect(await findEventForParticipant(port, poll.id, bob)).toBeNull();
+      expect(await findEventForParticipant(port, d.eventId, bob)).toBeNull();
       const tokens = await port.query({
         sql: "SELECT 1 AS present FROM response_token WHERE canonical_event_id = ? AND person_id = ?",
-        params: [poll.id, bob],
+        params: [d.eventId, bob],
       });
       expect(tokens).toEqual([]);
-      const results = await pollResults(port, asMara);
-      expect(results.candidates.flatMap((c) => c.voters)).toEqual([]);
+      const votes = await port.query({
+        sql: "SELECT 1 AS present FROM slot_response WHERE canonical_event_id = ? AND person_id = ?",
+        params: [d.eventId, bob],
+      });
+      expect(votes).toEqual([]);
       expect((await listParticipantChanges(port, asMara)).map((c) => c.action)).toEqual([
         "removed",
         "added",

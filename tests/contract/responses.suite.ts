@@ -2,9 +2,9 @@
 import { describe, expect, it } from "vitest";
 import type { StoragePort } from "../../src/db/port.js";
 import { createEvent, type EventAccess, findEventForParticipant } from "../../src/events/event.js";
-import { createPoll, pollResults, vote } from "../../src/events/poll.js";
 import {
   addFeedback,
+  answerProposal,
   FEEDBACK_PER_PERSON_PER_EVENT,
   issueResponseLinks,
   listResponses,
@@ -105,20 +105,12 @@ export function runResponsesContract(makePort: () => Promise<StoragePort>): void
         ).kind,
       ).toBe("forbidden");
 
-      const poll = await createPoll(port, {
+      // Waiting for agreement (rc13): not scheduled yet, so nobody says if they're coming.
+      const poll = await createEvent(port, {
         creatorId: dm.id,
         group: membership,
-        fields: {
-          title: "When?",
-          description: null,
-          location: null,
-          allDay: false,
-          tzid: "Europe/Prague",
-        },
-        candidates: [
-          { startLocal: "2101-10-20T19:00", endLocal: "2101-10-20T23:00" },
-          { startLocal: "2101-10-21T19:00", endLocal: "2101-10-21T23:00" },
-        ],
+        fields: SESSION,
+        requests: new Map([[ann, "accept"]]),
         now: T0,
       });
       expect(
@@ -187,23 +179,14 @@ export function runResponsesContract(makePort: () => Promise<StoragePort>): void
       expect((await listResponses(port, a)).feedback).toHaveLength(FEEDBACK_PER_PERSON_PER_EVENT);
     });
 
-    it("an organizer issues vote links to everyone who can see the poll — not themself, not HIDDEN", async () => {
+    it("an organizer issues vote links to everyone asked to agree — not themself, not the others", async () => {
       const port = await makePort();
       const { dm, membership, ann, bob } = await table(port, "issue");
-      const poll = await createPoll(port, {
+      const poll = await createEvent(port, {
         creatorId: dm.id,
         group: membership,
-        fields: {
-          title: "When?",
-          description: null,
-          location: null,
-          allDay: false,
-          tzid: "Europe/Prague",
-        },
-        candidates: [
-          { startLocal: "2101-10-20T19:00", endLocal: "2101-10-20T23:00" },
-          { startLocal: "2101-10-21T19:00", endLocal: "2101-10-21T23:00" },
-        ],
+        fields: SESSION,
+        requests: new Map([[ann, "accept"]]),
         now: T0,
       });
       const issued = await issueResponseLinks(port, await access(port, poll.id, dm.id), {
@@ -211,9 +194,17 @@ export function runResponsesContract(makePort: () => Promise<StoragePort>): void
       });
       if (issued.kind !== "issued") throw new Error(issued.kind);
       expect(issued.action).toBe("vote");
-      expect(issued.links.map((l) => l.personId).sort()).toEqual([ann, bob].sort());
+      // Bob sees it but isn't asked: until it's agreed, it isn't his to answer (PARTY_RULE).
+      expect(issued.links.map((l) => l.personId)).toEqual([ann]);
+      expect((await access(port, poll.id, ann)).participation.responseState).toBe("pending");
+      expect(
+        await port.query({
+          sql: "SELECT response_kind, response_state FROM event_participation WHERE canonical_event_id = ? AND person_id = ?",
+          params: [poll.id, bob],
+        }),
+      ).toEqual([{ response_kind: "none", response_state: null }]);
 
-      // The link IS Ann: it resolves to her access, and voting through it is attributed to her.
+      // The link IS Ann: it resolves to her access, and answering through it is attributed to her.
       const annLink = issued.links.find((l) => l.personId === ann);
       const resolved = await resolveResponseLink(port, annLink?.token ?? "", T0);
       expect(resolved).toMatchObject({
@@ -222,13 +213,9 @@ export function runResponsesContract(makePort: () => Promise<StoragePort>): void
       });
       if (resolved === null) throw new Error("expected link");
       expect(
-        (await vote(port, resolved.access, { answers: new Map([[0, "yes"]]), now: T0 })).kind,
+        (await answerProposal(port, resolved.access, { answer: "accept", now: T0 })).kind,
       ).toBe("recorded");
-      expect(
-        (await pollResults(port, await access(port, poll.id, dm.id))).candidates[0]?.voters.map(
-          (v) => v.personId,
-        ),
-      ).toEqual([ann]);
+      expect((await access(port, poll.id, ann)).participation.responseState).toBe("accepted");
 
       // Only hashes are stored.
       const stored = await port.query({

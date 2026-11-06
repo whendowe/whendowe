@@ -211,7 +211,7 @@ describe("polls and the numbered rows", () => {
     hegel.test((tc) => {
       const poll = drawPoll(tc);
       const rows = picker.pollRows(poll);
-      tc.assume(rows.length >= 2); // the server's minimum; one option is not a poll
+      tc.assume(rows.length >= 1); // the server's minimum: one time is a question too (rc33)
       const allDay = poll.kind === "days";
       const slots: Record<string, string> = {};
       rows.forEach((r, i) => {
