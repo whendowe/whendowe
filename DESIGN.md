@@ -175,7 +175,7 @@ whendowe/
     events/                    # MVP-2 (§15): events, who takes part, polls and responses
       event.ts                 # canonical events: create/edit with optimistic revision + change_log; lifecycle
       participation.ts         # who takes part, per event: added by email or copied from a group (rc15)
-      poll.ts                  # candidate times + votes (yes / if-need-be / no) + confirm (WORKFLOWS US-13)
+      poll.ts                  # what a poll asks: answers (yes / if-need-be / no) and validating the times offered; (rc35) the event-poll path is gone
       proposal.ts              # propose tier: a pending change an editor accepts or rejects (MVP-2, rc13)
       response.ts              # accept / acknowledge / attendance / feedback, incl. account-less token links
     plans/                     # Plans (§10 rc19): several events proposed and accepted as one
