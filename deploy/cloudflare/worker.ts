@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import type { Hono } from "hono";
-import { anyGoogleOAuthConfigured, type Config, loadConfig } from "../../src/config.js";
+import { anyGoogleOAuthConfigured, type Config, loadConfig, mailCapOf } from "../../src/config.js";
 import { d1StoragePort } from "../../src/db/d1.js";
 import type { StoragePort } from "../../src/db/port.js";
 import { cappedMailPort } from "../../src/mail/capped.js";
@@ -37,6 +37,10 @@ export interface Env {
   MAIL_FROM_NAME?: string;
   MAIL_DAILY_CAP?: string;
   MAIL_MONTHLY_CAP?: string;
+  MAIL_SENDER_DAILY_CAP?: string;
+  MAIL_SENDER_MONTHLY_CAP?: string;
+  MAIL_NEW_SENDER_DAILY_CAP?: string;
+  MAIL_NEW_SENDER_DAYS?: string;
   EMAIL?: EmailBindingLike;
 }
 
@@ -76,7 +80,7 @@ function buildMail(c: Config, env: Env, s: StoragePort): MailPort {
       break;
   }
   return cappedMailPort(inner, s, {
-    cap: { daily: c.MAIL_DAILY_CAP, monthly: c.MAIL_MONTHLY_CAP },
+    cap: mailCapOf(c),
     now,
   });
 }
@@ -94,6 +98,10 @@ async function build(env: Env): Promise<Built> {
     MAIL_FROM_NAME: env.MAIL_FROM_NAME,
     MAIL_DAILY_CAP: env.MAIL_DAILY_CAP,
     MAIL_MONTHLY_CAP: env.MAIL_MONTHLY_CAP,
+    MAIL_SENDER_DAILY_CAP: env.MAIL_SENDER_DAILY_CAP,
+    MAIL_SENDER_MONTHLY_CAP: env.MAIL_SENDER_MONTHLY_CAP,
+    MAIL_NEW_SENDER_DAILY_CAP: env.MAIL_NEW_SENDER_DAILY_CAP,
+    MAIL_NEW_SENDER_DAYS: env.MAIL_NEW_SENDER_DAYS,
   });
   const storage = d1StoragePort(env.DB);
   const oauth = anyGoogleOAuthConfigured(config)

@@ -85,6 +85,7 @@ import {
   upcomingOccurrences,
 } from "../../recurrence.js";
 import {
+  cappedText,
   copiedLink,
   EVENTS_PATH,
   type Html,
@@ -1684,7 +1685,7 @@ ${pollForm(`/groups/${membership.group.id}/polls`, csrf, values, error, peopleFi
         from: await nameIn(deps.storage, access, me.personId),
         publicBaseUrl: deps.publicBaseUrl,
       });
-    } catch {
+    } catch (error) {
       // Withdraw the unsent link so "Email everyone a link" isn't throttled for them.
       await revokeUndeliveredLink(deps.storage, link);
       return c.html(
@@ -1693,7 +1694,9 @@ ${pollForm(`/groups/${membership.group.id}/polls`, csrf, values, error, peopleFi
           deps,
           access,
           me.csrfToken,
-          `Added ${added.email}, but couldn't email them. Use "Email everyone a link" to try again later.`,
+          error instanceof MailCapReachedError
+            ? `Added ${added.email}, but couldn't email them. ${cappedText(error, deps.now(), true)}`
+            : `Added ${added.email}, but couldn't email them. Use "Email everyone a link" to try again later.`,
         ),
         503,
       );
@@ -1808,9 +1811,9 @@ ${pollForm(`/groups/${membership.group.id}/polls`, csrf, values, error, peopleFi
 
     let sent = 0;
     let failed = 0;
-    let capped = false;
+    let capped: MailCapReachedError | null = null;
     for (const link of issued.links) {
-      if (capped) {
+      if (capped !== null) {
         // The cap was reached: don't even try, but withdraw the link so a later retry
         // isn't throttled for someone who never got it.
         await revokeUndeliveredLink(deps.storage, link);
@@ -1828,13 +1831,17 @@ ${pollForm(`/groups/${membership.group.id}/polls`, csrf, values, error, peopleFi
       } catch (error) {
         await revokeUndeliveredLink(deps.storage, link);
         failed += 1;
-        if (error instanceof MailCapReachedError) capped = true;
+        if (error instanceof MailCapReachedError) capped = error;
       }
     }
     const parts = [
       `Sent to ${sent} ${sent === 1 ? "person" : "people"}.`,
       issued.throttled > 0 ? `${issued.throttled} already got a link in the last hour.` : "",
-      failed > 0 ? `Couldn't send to ${failed} — please try again later.` : "",
+      failed === 0
+        ? ""
+        : capped === null
+          ? `Couldn't send to ${failed} — please try again later.`
+          : `Couldn't send to ${failed}. ${cappedText(capped, deps.now(), true)}`,
     ].filter((p) => p !== "");
     return c.html(
       await eventPage(c, deps, access, me.csrfToken, parts.join(" ")),

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+import { type MailCapReachedError, SenderShareReachedError } from "../mail/capped.js";
 import { RETAIN_CHOICES, retainLabel } from "../privacy/retention.js";
 import { META_CONTENT_SECURITY_POLICY } from "./csp.js";
 import { escapeHtml } from "./escape.js";
@@ -76,6 +77,27 @@ export const EVENTS_PATH = "/events";
 /** The day an account goes, as pages and mail say it: "2101-11-08 10:00 UTC". */
 export function deletionDay(iso: string): string {
   return `${iso.slice(0, 10)} ${iso.slice(11, 16)} UTC`;
+}
+
+/**
+ * What a page says when mail went unsent because a cap was reached (§13 rc9, rc37, rc39):
+ * the instance's, or this sender's share, and then when it comes back. `copy` adds that the
+ * links can still be copied, where the page offers that (rc36).
+ */
+export function cappedText(error: MailCapReachedError, now: string, copy: boolean): string {
+  if (!(error instanceof SenderShareReachedError))
+    return "We can't send email right now. Please try again later.";
+  const or = copy ? ", or copy their links to send yourself" : "";
+  if (error.period === "month") {
+    const next = new Date(`${now.slice(0, 7)}-01T00:00:00.000Z`);
+    next.setUTCMonth(next.getUTCMonth() + 1);
+    return `You've sent as much email this month as one person can. You can send more from ${next.toISOString().slice(0, 10)}${or}.`;
+  }
+  const first =
+    error.newUntil === null
+      ? "You've sent as much email today as one person can."
+      : `New accounts send less email in their first week, until ${deletionDay(error.newUntil)}.`;
+  return `${first} You can send more tomorrow${or}.`;
 }
 
 /** "Your account will be deleted on …", with a button to keep it (§10 rc22). */

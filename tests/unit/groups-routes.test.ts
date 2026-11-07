@@ -2,28 +2,31 @@
 import { createClient } from "@libsql/client";
 import { expect, it } from "vitest";
 import { sqliteStoragePort } from "../../src/db/sqlite.js";
-import type { MailMessage } from "../../src/mail/port.js";
+import { cappedMailPort, type MailCap } from "../../src/mail/capped.js";
+import type { MailMessage, MailPort } from "../../src/mail/port.js";
 import { createApp } from "../../src/web/app.js";
 import { ACCOUNT_PATH } from "../../src/web/layout.js";
 import { CONFIRM_PATH, SIGN_IN_PATH } from "../../src/web/routes/auth.js";
 import { GROUPS_PATH } from "../../src/web/routes/groups.js";
 import { loadMigrationSql } from "../conftest.js";
 
-async function harness() {
+/** With `cap`, mail goes through the real cap (src/mail/capped.ts), as it does deployed. */
+async function harness(cap?: MailCap) {
   const client = createClient({ url: ":memory:" });
   for (const sql of await loadMigrationSql()) await client.executeMultiple(sql);
   const storage = sqliteStoragePort(client);
   const sent: MailMessage[] = [];
   const now = () => new Date().toISOString();
+  const recording: MailPort = {
+    send: (m) => {
+      sent.push(m);
+      return Promise.resolve();
+    },
+  };
   const app = createApp({
     auth: {
       storage,
-      mail: {
-        send: (m) => {
-          sent.push(m);
-          return Promise.resolve();
-        },
-      },
+      mail: cap === undefined ? recording : cappedMailPort(recording, storage, { cap, now }),
       publicBaseUrl: "https://whendowe.example",
       secureCookies: false,
       now,
@@ -170,6 +173,36 @@ it("an organizer sees the invite form; the invite email links to PUBLIC_BASE_URL
   expect(res.status).toBe(200);
   expect(h.sent.at(-1)?.to).toBe("player@example.org");
   expect(inviteLink(h).origin).toBe("https://whendowe.example");
+});
+
+it("an organizer's invites stop at their share of the mail, and the page says whose (rc37, rc39)", async () => {
+  const h = await harness({ daily: 200, monthly: 2500, senderDaily: 2 });
+  const dm = await signIn(h, "share-dm@example.org"); // a sign-in link: not dm's share
+  const group = await createGroupVia(h, dm, "Thursday Table");
+  expect((await inviteVia(h, dm, group, "a@example.org")).status).toBe(200);
+  expect((await inviteVia(h, dm, group, "b@example.org")).status).toBe(200);
+  const third = await inviteVia(h, dm, group, "c@example.org");
+  expect(third.status).toBe(503);
+  // No "copy their links": an invite has none to copy.
+  expect(await third.text()).toContain(
+    "You&#39;ve sent as much email today as one person can. You can send more tomorrow.</p>",
+  );
+  expect(h.sent.map((m) => m.to)).not.toContain("c@example.org");
+  // Someone else still sends.
+  const ann = await signIn(h, "share-ann@example.org");
+  expect(
+    (await inviteVia(h, ann, await createGroupVia(h, ann, "Jam"), "d@example.org")).status,
+  ).toBe(200);
+
+  const fresh = await harness({ daily: 200, monthly: 2500, senderDaily: 5, newSenderDaily: 1 });
+  const new1 = await signIn(fresh, "share-new@example.org");
+  const g = await createGroupVia(fresh, new1, "Book club");
+  expect((await inviteVia(fresh, new1, g, "e@example.org")).status).toBe(200);
+  const second = await inviteVia(fresh, new1, g, "f@example.org");
+  expect(second.status).toBe(503);
+  expect(await second.text()).toMatch(
+    /New accounts send less email in their first week, until \d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC\. You can send more tomorrow\./,
+  );
 });
 
 it("the invitee joins with one click, is signed in, and sees the group — but cannot invite", async () => {

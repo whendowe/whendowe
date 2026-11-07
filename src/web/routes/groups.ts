@@ -24,7 +24,7 @@ import {
 } from "../../people/invite.js";
 import { appearanceIn, normalizeEmail } from "../../people/person.js";
 import { retainDaysSchema } from "../../privacy/retention.js";
-import { GROUPS_PATH, html, retentionSection, who } from "../layout.js";
+import { cappedText, GROUPS_PATH, html, retentionSection, who } from "../layout.js";
 import {
   type AppEnv,
   notVisible,
@@ -388,10 +388,7 @@ ${inviteForm(membership, me.csrfToken, notice)}`,
       });
     } catch (error) {
       if (error instanceof MailCapReachedError)
-        return reply(
-          503,
-          html`<p class="error">We can't send email right now. Please try again later.</p>`,
-        );
+        return reply(503, html`<p class="error">${cappedText(error, deps.now(), false)}</p>`);
       return reply(
         502,
         html`<p class="error">We couldn't send the invite. Please check the address and try again.</p>`,

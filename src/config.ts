@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { z } from "zod";
+import type { MailCap } from "./mail/capped.js";
 
 // Config comes from env, parsed and validated here (DESIGN.md §13).
 // Platform adapters in deploy/ pass their env source in; domain code never
@@ -71,6 +72,12 @@ export const configSchema = z.object({
   // configuration cannot incur overage. Raising them is a deliberate config change.
   MAIL_DAILY_CAP: z.coerce.number().int().min(0).default(200),
   MAIL_MONTHLY_CAP: z.coerce.number().int().min(0).default(2500),
+  // rc37/rc39: one sender's share of those caps, and a new account's smaller daily share
+  // for its first days. Unset, they follow the caps (src/mail/capped.ts senderShareOf).
+  MAIL_SENDER_DAILY_CAP: z.coerce.number().int().min(0).optional(),
+  MAIL_SENDER_MONTHLY_CAP: z.coerce.number().int().min(0).optional(),
+  MAIL_NEW_SENDER_DAILY_CAP: z.coerce.number().int().min(0).optional(),
+  MAIL_NEW_SENDER_DAYS: z.coerce.number().int().min(0).optional(),
   // REST path only (Node self-host). The hosted Workers instance uses a binding and
   // has no mail credential at all.
   CLOUDFLARE_ACCOUNT_ID: z.string().min(1).optional(),
@@ -121,4 +128,20 @@ export function requireGoogleOAuth(config: Config): GoogleOAuthConfig {
     throw new Error(`Google OAuth is not configured; missing or invalid: ${keys}`);
   }
   return parsed.data;
+}
+
+/** The mail cap and its shares as configured; an unset share follows the caps (rc37, rc39). */
+export function mailCapOf(c: Config): MailCap {
+  return {
+    daily: c.MAIL_DAILY_CAP,
+    monthly: c.MAIL_MONTHLY_CAP,
+    ...(c.MAIL_SENDER_DAILY_CAP === undefined ? {} : { senderDaily: c.MAIL_SENDER_DAILY_CAP }),
+    ...(c.MAIL_SENDER_MONTHLY_CAP === undefined
+      ? {}
+      : { senderMonthly: c.MAIL_SENDER_MONTHLY_CAP }),
+    ...(c.MAIL_NEW_SENDER_DAILY_CAP === undefined
+      ? {}
+      : { newSenderDaily: c.MAIL_NEW_SENDER_DAILY_CAP }),
+    ...(c.MAIL_NEW_SENDER_DAYS === undefined ? {} : { newSenderDays: c.MAIL_NEW_SENDER_DAYS }),
+  };
 }

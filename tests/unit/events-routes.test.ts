@@ -2,7 +2,7 @@
 import { createClient } from "@libsql/client";
 import { expect, it } from "vitest";
 import { sqliteStoragePort } from "../../src/db/sqlite.js";
-import { MailCapReachedError } from "../../src/mail/capped.js";
+import { MailCapReachedError, SenderShareReachedError } from "../../src/mail/capped.js";
 import type { MailMessage } from "../../src/mail/port.js";
 import { createApp } from "../../src/web/app.js";
 import { ACCOUNT_PATH } from "../../src/web/layout.js";
@@ -1187,6 +1187,24 @@ it("a failed mail keeps the person and says so; a resend then works at once", as
   const before = h.sent.length;
   await h.app.request(`${event}/links`, post({ csrf: dm.csrf }, dm.cookie));
   expect(h.sent.slice(before).map((m) => m.to)).toContain("unlucky@example.org");
+});
+
+it("an organizer whose own share of mail is used is told so, not that mail is down (rc37)", async () => {
+  const h = await harness();
+  const { dm, group } = await setup(h);
+  const event = await createVia(h, dm, group);
+  h.mailFailure.error = new SenderShareReachedError({ daily: 1, monthly: 1 }, "day", null);
+  const res = await addVia(h, dm, event, "unlucky@example.org");
+  expect(res.status).toBe(503);
+  expect(await res.text()).toContain(
+    "Added unlucky@example.org, but couldn&#39;t email them. You&#39;ve sent as much email today as one person can. You can send more tomorrow, or copy their links to send yourself.",
+  );
+  await join(h, dm, group, "ann@example.org", "view", "FULL");
+  const bulk = await sendLinks(h, dm, event);
+  expect(bulk.status).toBe(503);
+  expect(await bulk.text()).toMatch(
+    /Sent to 0 people\. Couldn&#39;t send to \d+\. You&#39;ve sent as much email today as one person can\./,
+  );
 });
 
 it("refuses a bad address, someone already there, a hidden tier, and no CSRF", async () => {

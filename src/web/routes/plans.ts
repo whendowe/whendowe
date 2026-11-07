@@ -75,6 +75,7 @@ import {
   whoText,
 } from "../../plans/weeks.js";
 import {
+  cappedText,
   copiedLink,
   type Html,
   html,
@@ -1265,9 +1266,9 @@ export function registerPlanRoutes(app: Hono<AppEnv>, deps: PlanRouteDeps): void
     );
     let sent = 0;
     let failed = 0;
-    let capped = false;
+    let capped: MailCapReachedError | null = null;
     for (const link of issued.links) {
-      if (!capped) {
+      if (capped === null) {
         try {
           await sendVoteLink(deps.mail, {
             link,
@@ -1279,7 +1280,7 @@ export function registerPlanRoutes(app: Hono<AppEnv>, deps: PlanRouteDeps): void
           sent += 1;
           continue;
         } catch (error) {
-          if (error instanceof MailCapReachedError) capped = true;
+          if (error instanceof MailCapReachedError) capped = error;
         }
       }
       // Not delivered: withdraw it, so a retry isn't throttled for someone who never got it.
@@ -1289,7 +1290,11 @@ export function registerPlanRoutes(app: Hono<AppEnv>, deps: PlanRouteDeps): void
     const parts = [
       `Sent to ${sent} ${sent === 1 ? "person" : "people"}.`,
       issued.throttled > 0 ? `${issued.throttled} already got a link in the last hour.` : "",
-      failed > 0 ? `Couldn't send to ${failed} — please try again later.` : "",
+      failed === 0
+        ? ""
+        : capped === null
+          ? `Couldn't send to ${failed} — please try again later.`
+          : `Couldn't send to ${failed}. ${cappedText(capped, deps.now(), true)}`,
     ].filter((p) => p !== "");
     return renderThread(c, r.access, r.me, parts.join(" "), failed > 0 ? 503 : 200);
   });

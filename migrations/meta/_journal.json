@@ -183,6 +183,13 @@
       "when": 1794036381121,
       "tag": "0025_group_calendar_links",
       "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "6",
+      "when": 1794091513324,
+      "tag": "0026_mail_sender_share",
+      "breakpoints": true
     }
   ]
 }

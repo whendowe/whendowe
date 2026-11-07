@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { serve } from "@hono/node-server";
 import { createClient } from "@libsql/client";
-import { anyGoogleOAuthConfigured, type Config, loadConfig } from "../../src/config.js";
+import { anyGoogleOAuthConfigured, type Config, loadConfig, mailCapOf } from "../../src/config.js";
 import type { StoragePort } from "../../src/db/port.js";
 import { sqliteStoragePort } from "../../src/db/sqlite.js";
 import { cappedMailPort } from "../../src/mail/capped.js";
@@ -50,7 +50,7 @@ function buildMail(c: Config, s: StoragePort): MailPort {
       break;
   }
   return cappedMailPort(inner, s, {
-    cap: { daily: c.MAIL_DAILY_CAP, monthly: c.MAIL_MONTHLY_CAP },
+    cap: mailCapOf(c),
     now,
   });
 }

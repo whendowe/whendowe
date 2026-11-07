@@ -237,8 +237,17 @@ export const mailSend = sqliteTable(
     // smaller share of the daily cap of their own (DESIGN §13), so a script asking for
     // links to many addresses can't stop invites and answer links for the day.
     anonymous: integer("anonymous").notNull().default(0),
+    // rc37: who caused it, for mail someone caused to another address; their share of
+    // the cap counts these. Only who and when, never to whom or what; the rows go when
+    // their month is over (privacy/purge.ts), and erasure nulls it at once.
+    senderId: text("sender_id").references(() => person.id, { onDelete: "set null" }),
   },
-  (t) => [index("mail_send_day_idx").on(t.day), index("mail_send_month_idx").on(t.month)],
+  (t) => [
+    index("mail_send_day_idx").on(t.day),
+    index("mail_send_month_idx").on(t.month),
+    index("mail_send_sender_day_idx").on(t.senderId, t.day),
+    index("mail_send_sender_month_idx").on(t.senderId, t.month),
+  ],
 );
 
 // --- Groups (MVP-1 slice D, DESIGN §10 rc7 sketch, refined) -------------------------

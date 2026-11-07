@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+
 import { z } from "zod";
 import type { StoragePort } from "../db/port.js";
 import { canSee } from "../events/participation.js";
 import { listFeeds, listKeptLinks } from "../feeds/feed.js";
+import { sentThisMonth } from "../mail/capped.js";
 import { visibilitySchema } from "../people/invite.js";
 
 // "Download your data" (DESIGN §10 rc21, GDPR Art. 15 and 20): one JSON document of the
@@ -227,5 +229,8 @@ export async function exportPerson(storage: StoragePort, personId: string, now: 
       for: k.label,
       shows: k.tier === "BUSY" ? "busy only" : "details",
     })),
+    // How many emails you caused to other addresses this month (rc37): all the mail cap
+    // keeps about you, and only until the month is over.
+    emails_you_caused_this_month: await sentThisMonth(storage, personId, now),
   };
 }

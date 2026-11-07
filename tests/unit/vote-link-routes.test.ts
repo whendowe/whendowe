@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { expect, it } from "vitest";
-import { MailCapReachedError } from "../../src/mail/capped.js";
+import { MailCapReachedError, SenderShareReachedError } from "../../src/mail/capped.js";
 import { findOrCreatePerson, guestName } from "../../src/people/person.js";
 import {
   acceptPlan,
@@ -380,6 +380,22 @@ it("an undelivered link is withdrawn, and the cap stops the rest from being trie
   });
   expect(left[0]?.n).toBe(0);
   expect(tried).toBe(1); // after the cap, nobody else is tried
+});
+
+it("a sender whose share is used hears whose, and that the links can still be copied (rc37)", async () => {
+  const c = await browser({
+    now: () => NOW,
+    mailFails: (m) =>
+      m.subject.startsWith("When can you make")
+        ? new SenderShareReachedError({ daily: 1, monthly: 1 }, "month", null)
+        : null,
+  });
+  const g = await signedInPoll(c, ["ana", "bob"]);
+  const capped = await sendLinks(c, g.thread);
+  expect(capped.status).toBe(503);
+  expect(await capped.text()).toMatch(
+    /Couldn(&#39;|')t send to 2\. You(&#39;|')ve sent as much email this month as one person can\. You can send more from \d{4}-\d{2}-01, or copy their links to send yourself\./,
+  );
 });
 
 // --- a note with a vote (rc28) -------------------------------------------------------
