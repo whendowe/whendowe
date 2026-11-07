@@ -1490,8 +1490,9 @@ invite-only (specific people by email)". Owner decisions, 2026-11-07:
   - **When its maker stops being an organizer, a link moves** (owner, 2026-11-07). If they leave
     the group or are erased, each of their links moves to the organizer who remains, or who takes
     over (`leaveGroup` hands the role to the longest-standing member), and is capped by that
-    person's view from then on. The group page says "made by Mara, now kept by Petr". If the group
-    is deleted, its links go with it.
+    person's view from then on. The group page says "made by a former member, now kept by Petr":
+    it names only the group's members (rc21), and whoever made it has gone. If the group is
+    deleted, its links go with it.
   - **Nothing about it is findable or previewed.** The page carries `noindex` and
     `Referrer-Policy: no-referrer`. Its link preview (Open Graph, rc25) names only the group, never
     an event, because a preview in a chat is how a link spreads. Sealed groups (to be designed)
