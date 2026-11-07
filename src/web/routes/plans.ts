@@ -51,7 +51,11 @@ import {
   type ThreadAccess,
   ThreadInputError,
 } from "../../plans/thread.js";
-import { issueVoteLinks, revokeUndeliveredVoteLink } from "../../plans/vote-link.js";
+import {
+  issueVoteLinks,
+  revokeUndeliveredVoteLink,
+  VOTE_LINK_TTL_MS,
+} from "../../plans/vote-link.js";
 import {
   addDays,
   type Block,
@@ -70,7 +74,15 @@ import {
   whenText,
   whoText,
 } from "../../plans/weeks.js";
-import { type Html, html, PLANS_PATH, SHARE_BUTTONS, shareBox, ZONE_GUESS } from "../layout.js";
+import {
+  copiedLink,
+  type Html,
+  html,
+  PLANS_PATH,
+  SHARE_BUTTONS,
+  shareBox,
+  ZONE_GUESS,
+} from "../layout.js";
 import { PLAN_STYLE, planAssets } from "../plan-editor.js";
 import {
   type AppEnv,
@@ -83,7 +95,7 @@ import {
 } from "../session.js";
 import { appearanceSection, saveAppearance } from "./account.js";
 import { EVENTS_PATH } from "./events.js";
-import { noteList, oneTime, sendVoteLink, sensitive } from "./respond.js";
+import { noteList, oneTime, sendVoteLink, sensitive, voteUrl } from "./respond.js";
 import { SHARE_PATH } from "./share.js";
 
 // Plan pages (DESIGN §10 rc19, slices P2–P3): a thread, a plan, and your draft. Every read
@@ -433,6 +445,23 @@ ${guests.map(
 )}</section>`;
 }
 
+/**
+ * Each member's own vote link, for the organizer to send in a chat instead of by email
+ * (rc36). Members with an address only: a guest has the shared link and their claim link.
+ */
+function ownLinksSection(v: View): Html | string {
+  const t = v.access.thread;
+  const others = v.access.members.filter((m) => !m.guest && m.personId !== v.access.personId);
+  const open = v.plans.some((p) => p.status === "on_table");
+  if (!open || others.length === 0 || t.organizerId !== v.access.personId) return "";
+  return html`<section class="links" id="links"><h3 class="group-h">Their own links</h3>
+<p class="muted small">Each answers as that person. Copy one to send in a chat instead of by email.</p>
+${others.map(
+  (m) =>
+    html`<div class="row"><span><strong>${memberName(m)}</strong></span><form method="post" action="${threadPath(t.id)}/links/copy"><input type="hidden" name="csrf" value="${v.csrf}" /><input type="hidden" name="person" value="${m.personId}" /><button class="link" type="submit">Copy ${memberName(m)}'s link</button></form></div>`,
+)}</section>`;
+}
+
 function threadPage(v: View, day: string | null, notice: string | null = null): Html {
   const t = v.access.thread;
   const waiting = v.plans.filter(
@@ -494,6 +523,7 @@ ${
 ${notice === null ? "" : html`<p class="notice">${notice}</p>`}
 ${onTable.length > 0 && t.organizerId === v.access.personId ? shareSection(v) : ""}
 ${guestsSection(v)}
+${ownLinksSection(v)}
 ${groups.map(([title, ps]) =>
   ps.length === 0 ? "" : html`<h3 class="group-h">${title}</h3>${ps.map((p) => planRow(v, p))}`,
 )}
@@ -1291,6 +1321,39 @@ export function registerPlanRoutes(app: Hono<AppEnv>, deps: PlanRouteDeps): void
   });
 
   // Removing a guest (rc30): the organizer's, a POST; the name is then free again.
+  // Copy one member's vote link instead of emailing it (rc36): fresh, shown once.
+  app.post(`${PLANS_PATH}/:thread/links/copy`, async (c) => {
+    const r = await posting(c);
+    if (r instanceof Response) return r;
+    const personId = typeof r.form.person === "string" ? r.form.person : "";
+    const issued = await issueVoteLinks(deps.storage, r.access, {
+      now: deps.now(),
+      only: personId,
+      copy: true,
+    });
+    if (issued.kind === "forbidden")
+      return renderThread(c, r.access, r.me, "Only the organizer copies vote links.", 403);
+    if (issued.kind === "closed")
+      return renderThread(c, r.access, r.me, "Nothing is on the table to vote on.", 409);
+    const link = issued.links.find((l) => l.personId === personId);
+    const member = r.access.members.find((m) => m.personId === personId);
+    if (link === undefined || member === undefined)
+      return renderThread(c, r.access, r.me, "They have no link of their own here.", 409);
+    sensitive(c);
+    return c.html(
+      page(
+        c,
+        "Their link",
+        html`${copiedLink(
+          memberName(member),
+          voteUrl(deps.publicBaseUrl, link.token).toString(),
+          VOTE_LINK_TTL_MS / (24 * 60 * 60 * 1000),
+          threadPath(r.access.thread.id),
+        )}${SHARE_BUTTONS}`,
+      ),
+    );
+  });
+
   app.post(`${PLANS_PATH}/:thread/guests/remove`, async (c) => {
     const r = await posting(c);
     if (r instanceof Response) return r;

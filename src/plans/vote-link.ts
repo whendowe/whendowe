@@ -43,7 +43,14 @@ const recipientRowSchema = z.object({ person_id: z.string(), email: z.string() }
 export async function issueVoteLinks(
   storage: StoragePort,
   access: ThreadAccess,
-  input: { readonly now: string; readonly newToken?: typeof issueToken },
+  input: {
+    readonly now: string;
+    readonly newToken?: typeof issueToken;
+    /** Just this member (rc36: copying their link). */
+    readonly only?: string;
+    /** To copy, not to email (rc36): replace their link even within the resend hour. */
+    readonly copy?: boolean;
+  },
 ): Promise<IssueVoteLinksResult> {
   if (access.thread.organizerId !== access.personId) return { kind: "forbidden" };
   const open = await storage.query({
@@ -54,13 +61,15 @@ export async function issueVoteLinks(
 
   const now = Date.parse(input.now);
   const expiresAt = new Date(now + VOTE_LINK_TTL_MS).toISOString();
-  const resendCutoff = new Date(now - RESPONSE_RESEND_INTERVAL_MS).toISOString();
+  const resendCutoff =
+    input.copy === true ? input.now : new Date(now - RESPONSE_RESEND_INTERVAL_MS).toISOString();
   const recipients = (
     await storage.query({
       sql: `SELECT m.person_id, p.email FROM plan_thread_member m JOIN person p ON p.id = m.person_id
             WHERE m.thread_id = ? AND m.person_id <> ? AND p.guest_at IS NULL AND p.erased_at IS NULL
+              AND (? IS NULL OR m.person_id = ?)
             ORDER BY p.email`,
-      params: [access.thread.id, access.personId],
+      params: [access.thread.id, access.personId, input.only ?? null, input.only ?? null],
     })
   ).map((row) => recipientRowSchema.parse(row));
 

@@ -179,6 +179,35 @@ export function runResponsesContract(makePort: () => Promise<StoragePort>): void
       expect((await listResponses(port, a)).feedback).toHaveLength(FEEDBACK_PER_PERSON_PER_EVENT);
     });
 
+    it("copying (rc36): just that person's link, replaced even within the resend hour", async () => {
+      const port = await makePort();
+      const { dm, membership, ann, bob } = await table(port, "copy");
+      const event = await createEvent(port, {
+        creatorId: dm.id,
+        group: membership,
+        fields: SESSION,
+        now: T0,
+      });
+      const asDm = await access(port, event.id, dm.id);
+      const sent = await issueResponseLinks(port, asDm, { now: T0 });
+      if (sent.kind !== "issued") throw new Error(sent.kind);
+      const before = sent.links.find((l) => l.personId === ann)?.token ?? "";
+      expect(await issueResponseLinks(port, asDm, { now: T0, only: ann })).toMatchObject({
+        links: [],
+        throttled: 1,
+      });
+      const copied = await issueResponseLinks(port, asDm, { now: T0, only: ann, copy: true });
+      if (copied.kind !== "issued") throw new Error(copied.kind);
+      expect(copied.links.map((l) => l.personId)).toEqual([ann]);
+      expect(await resolveResponseLink(port, before, T0)).toBeNull();
+      expect(
+        (await resolveResponseLink(port, copied.links[0]?.token ?? "", T0))?.access.participation
+          .personId,
+      ).toBe(ann);
+      const bobs = sent.links.find((l) => l.personId === bob)?.token ?? "";
+      expect(await resolveResponseLink(port, bobs, T0)).not.toBeNull();
+    });
+
     it("an organizer issues vote links to everyone asked to agree — not themself, not the others", async () => {
       const port = await makePort();
       const { dm, membership, ann, bob } = await table(port, "issue");

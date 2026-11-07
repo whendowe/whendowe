@@ -243,6 +243,11 @@ export async function issueResponseLinks(
     readonly newToken?: typeof issueToken;
     /** Just this person — someone an editor has added (DESIGN rc15). */
     readonly only?: string;
+    /**
+     * To copy, not to email (rc36): replace their link even if one went out within the
+     * hour. The resend throttle limits mail; a link handed over by the organizer isn't mail.
+     */
+    readonly copy?: boolean;
   },
 ): Promise<IssueLinksResult> {
   if (access.participation.editTier !== "edit") return { kind: "forbidden" };
@@ -251,7 +256,8 @@ export async function issueResponseLinks(
 
   const now = Date.parse(input.now);
   const expiresAt = new Date(now + RESPONSE_TOKEN_TTL_MS).toISOString();
-  const resendCutoff = new Date(now - RESPONSE_RESEND_INTERVAL_MS).toISOString();
+  const resendCutoff =
+    input.copy === true ? input.now : new Date(now - RESPONSE_RESEND_INTERVAL_MS).toISOString();
   const recipients = (
     await storage.query({
       sql: `SELECT ep.person_id, p.email, p.display_name, ep.visibility

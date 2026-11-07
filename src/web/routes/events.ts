@@ -56,6 +56,7 @@ import {
   listRequests,
   listResponses,
   needsAcknowledgment,
+  RESPONSE_TOKEN_TTL_MS,
   revokeUndeliveredLink,
   setAttendance,
 } from "../../events/response.js";
@@ -83,7 +84,16 @@ import {
   type RRuleSubset,
   upcomingOccurrences,
 } from "../../recurrence.js";
-import { EVENTS_PATH, type Html, html, retentionSection, who, ZONE_GUESS } from "../layout.js";
+import {
+  copiedLink,
+  EVENTS_PATH,
+  type Html,
+  html,
+  retentionSection,
+  SHARE_BUTTONS,
+  who,
+  ZONE_GUESS,
+} from "../layout.js";
 import { pickerAssets } from "../picker.js";
 import {
   type AppEnv,
@@ -96,7 +106,7 @@ import {
 import { appearanceSection, saveAppearance } from "./account.js";
 // A cycle (plans.ts links back to events), safe: both are read only inside handlers.
 import { PLANS_PATH } from "./plans.js";
-import { sendResponseLink } from "./respond.js";
+import { respondUrl, sendResponseLink } from "./respond.js";
 
 // Event pages (MVP-2 slice 2B). Every read goes through findEventForParticipant (no
 // IDOR), and every rendering goes through canSee / canSeeField — the single rule for
@@ -952,11 +962,21 @@ function peopleSection(
     editing &&
     p.personId !== event.ownerId &&
     !(event.status === "proposed" && p.responseKind === "accept");
+  // Their own answer link, to send in a chat instead of by email (rc36).
+  const copyable = (p: ParticipantView) =>
+    editing &&
+    actionFor(access) !== null &&
+    p.personId !== access.participation.personId &&
+    p.visibility !== "HIDDEN";
   return html`<h2>Taking part</h2><ul>${people.map(
     (p) =>
       html`<li>${who(p.shown)}${p.editTier === "edit" ? html` <span class="muted">· can edit</span>` : ""}${
         removable(p)
           ? html` <form method="post" action="${EVENTS_PATH}/${event.id}/people/remove" style="display:inline"><input type="hidden" name="csrf" value="${csrf}" /><input type="hidden" name="person" value="${p.personId}" /><button type="submit">Remove</button></form>`
+          : ""
+      }${
+        copyable(p)
+          ? html` <form method="post" action="${EVENTS_PATH}/${event.id}/people/link" style="display:inline"><input type="hidden" name="csrf" value="${csrf}" /><input type="hidden" name="person" value="${p.personId}" /><button type="submit">Copy their link</button></form>`
           : ""
       }</li>`,
   )}</ul>
@@ -1719,6 +1739,54 @@ ${pollForm(`/groups/${membership.group.id}/polls`, csrf, values, error, peopleFi
       case "not_taking_part":
         return refused("They aren't taking part.", 409);
     }
+  });
+
+  // Copy one person's answer link instead of emailing it (rc36): a fresh link, shown once,
+  // replacing theirs. A POST, so a page that shows it can't be made by looking.
+  app.post(`${EVENTS_PATH}/:id/people/link`, async (c) => {
+    const me = requireSignedIn(c);
+    if (me instanceof Response) return me;
+    const form = await c.req.parseBody();
+    if (!(await verifyFormCsrf(me, form))) return rejectedPage(c, form);
+    const access = await findEventForParticipant(deps.storage, c.req.param("id"), me.personId);
+    if (access === null || access.participation.visibility === "HIDDEN")
+      return c.html(notFound(c), 404);
+    const personId = str(form, "person");
+    const issued = await issueResponseLinks(deps.storage, access, {
+      now: deps.now(),
+      only: personId,
+      copy: true,
+    });
+    if (issued.kind === "forbidden")
+      return c.html(
+        page(c, "Not allowed", html`<h1>Only people who can edit it copy links</h1>`),
+        403,
+      );
+    const link =
+      issued.kind === "issued" ? issued.links.find((l) => l.personId === personId) : undefined;
+    if (link === undefined)
+      return c.html(
+        await eventPage(c, deps, access, me.csrfToken, "They have nothing to answer here."),
+        409,
+      );
+    const shown = (await listParticipants(deps.storage, access.event.id)).find(
+      (p) => p.personId === personId,
+    )?.shown.name;
+    // The link is on this page: keep it out of caches and Referer headers.
+    c.header("Cache-Control", "no-store");
+    c.header("Referrer-Policy", "no-referrer");
+    return c.html(
+      page(
+        c,
+        "Their link",
+        html`${copiedLink(
+          shown ?? "them",
+          respondUrl(deps.publicBaseUrl, link.token).toString(),
+          RESPONSE_TOKEN_TTL_MS / (24 * 60 * 60 * 1000),
+          `${EVENTS_PATH}/${access.event.id}`,
+        )}${SHARE_BUTTONS}`,
+      ),
+    );
   });
 
   app.post(`${EVENTS_PATH}/:id/links`, async (c) => {

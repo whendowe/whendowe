@@ -76,6 +76,27 @@ export function runVoteLinksContract(makePort: () => Promise<StoragePort>): void
       expect(rows.some((row) => row.token_hash === david?.token)).toBe(false);
     });
 
+    it("copying (rc36): just that member's link, replaced even within the resend hour", async () => {
+      const port = await makePort();
+      const f = await poll(port, "copy");
+      const mara = await f.as(f.mara.id);
+      const sent = await issued(port, mara);
+      const before = sent.links.find((l) => l.personId === f.david.id)?.token ?? "";
+      // Within the hour an email resend is throttled…
+      expect((await issued(port, mara, LATER)).links).toEqual([]);
+      // …a copy is not, and it is David's alone.
+      const copied = await issueVoteLinks(port, mara, { now: LATER, only: f.david.id, copy: true });
+      if (copied.kind !== "issued") throw new Error(copied.kind);
+      expect(copied.links.map((l) => l.personId)).toEqual([f.david.id]);
+      expect(await resolveVoteLink(port, before, LATER)).toBeNull();
+      expect((await resolveVoteLink(port, copied.links[0]?.token ?? "", LATER))?.personId).toBe(
+        f.david.id,
+      );
+      // Ana's link is untouched.
+      const ana = sent.links.find((l) => l.personId === f.ana.id)?.token ?? "";
+      expect((await resolveVoteLink(port, ana, LATER))?.personId).toBe(f.ana.id);
+    });
+
     it("only the organizer sends them, and only while something is on the table", async () => {
       const port = await makePort();
       const f = await poll(port, "b");

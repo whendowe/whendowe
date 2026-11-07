@@ -50,6 +50,20 @@ export const RESPOND_PATH = "/respond";
 /** A thread's vote link (rc26): the same rules, for plans. */
 export const VOTE_PATH = "/vote";
 
+/** An event's answer link, as it is emailed or copied (rc36). */
+export function respondUrl(publicBaseUrl: string, token: string): URL {
+  const url = new URL(RESPOND_PATH, publicBaseUrl);
+  url.searchParams.set("t", token);
+  return url;
+}
+
+/** A thread's vote link, as it is emailed or copied (rc36). */
+export function voteUrl(publicBaseUrl: string, token: string): URL {
+  const url = new URL(VOTE_PATH, publicBaseUrl);
+  url.searchParams.set("t", token);
+  return url;
+}
+
 export interface RespondRouteDeps {
   readonly storage: StoragePort;
   readonly now: () => string;
@@ -501,8 +515,7 @@ export async function sendResponseLink(
   },
 ): Promise<void> {
   const { link, access, from } = input;
-  const url = new URL(RESPOND_PATH, input.publicBaseUrl);
-  url.searchParams.set("t", link.token);
+  const url = respondUrl(input.publicBaseUrl, link.token);
   const titled = canSee(link.visibility, "title");
   const title = access.event.title;
   const days = RESPONSE_TOKEN_TTL_MS / (24 * 60 * 60 * 1000);
@@ -567,8 +580,7 @@ export async function sendVoteLink(
 ): Promise<void> {
   const { link, access, from } = input;
   const one = oneTime(input.onTable);
-  const url = new URL(VOTE_PATH, input.publicBaseUrl);
-  url.searchParams.set("t", link.token);
+  const url = voteUrl(input.publicBaseUrl, link.token);
   const name = access.thread.name;
   const days = VOTE_LINK_TTL_MS / (24 * 60 * 60 * 1000);
   await mail.send({

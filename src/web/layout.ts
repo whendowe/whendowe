@@ -209,6 +209,18 @@ export function shareBox(
 <div class="row">${share ? html`<button type="button" data-share-sheet hidden>Share…</button>` : ""}<button type="button" data-copy hidden>Copy</button></div></div>`;
 }
 
+/**
+ * A person's own answer link, copied by an organizer instead of emailed (DESIGN §10 rc36):
+ * shown once, with what it is. Follow it with SHARE_BUTTONS.
+ */
+export function copiedLink(name: string, url: string, days: number, back: string): Html {
+  return html`<h1>${name}'s link</h1>
+<p><strong>This link answers as ${name}. Send it only to ${name}.</strong> Whoever opens it can answer for them, here and nowhere else. It never signs anyone in.</p>
+${shareBox(`${name}'s link`, url, 2)}
+<p class="muted">It works for ${String(days)} days. This is the only time it's shown: copying it again makes a new one, and this one stops working.</p>
+<p><a href="${back}">Back</a></p>`;
+}
+
 /** Wires every shareBox on the page. One fixed script, so the CSP allows it by hash. */
 export const SHARE_BUTTONS = html`<script>
   document.querySelectorAll("[data-share]").forEach(function (box) {

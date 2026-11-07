@@ -484,3 +484,108 @@ it("a note from the plan page lands on the thread and on the plans whose days it
   expect(closed.status).toBe(409);
   expect(await closed.text()).toContain("Nothing is on the table to note against.");
 });
+
+// --- Copying a member's vote link (rc36) ------------------------------------------------
+
+it("the organizer copies a member's own link instead of emailing it: fresh, shown once, the old one dead", async () => {
+  const b = await browser({ now: () => NOW });
+  const f = await signedInPoll(b, ["david", "ana"]);
+  const page = await (await b.request(f.thread)).text();
+  expect(page).toContain("Their own links");
+  expect(page).toContain(`action="${f.thread}/links/copy"`);
+  const david = f.rest[0]?.id ?? "";
+  const copy = async () =>
+    b.request(`${f.thread}/links/copy`, post({ csrf: (await home(b)).csrf, person: david }));
+  const before = b.sent.length;
+  const res = await copy();
+  expect(res.status).toBe(200);
+  expect(res.headers.get("cache-control")).toBe("no-store");
+  const body = await res.text();
+  // In the name the thread shows him by: he chose none, so a guest name (rc21).
+  const name =
+    /<strong>([^<]+)<\/strong><\/span><form method="post" action="[^"]+\/links\/copy"/.exec(
+      page,
+    )?.[1];
+  expect(name).toMatch(/^Guest \d+$/);
+  expect(body).toContain(`This link answers as ${name}. Send it only to ${name}.`);
+  expect(body).toContain("data-share-sheet"); // to send it in a chat
+  expect(b.sent.length).toBe(before);
+  const linkOf = (html: string) => {
+    const url = new URL(
+      /https:\/\/[^\s"<]+\/vote\?t=[A-Za-z0-9_-]+/.exec(html)?.[0] ?? "https://x/",
+    );
+    return `${url.pathname}${url.search}`;
+  };
+  const first = linkOf(body);
+  expect((await b.request(first)).status).toBe(200);
+  const second = linkOf(await (await copy()).text()); // at once: no resend throttle
+  expect(second).not.toBe(first);
+  expect((await b.request(first)).status).toBe(404);
+  expect((await b.request(second)).status).toBe(200);
+});
+
+it("only the organizer copies links, and only a member's", async () => {
+  const b = await browser({ now: () => NOW });
+  const f = await signedInPoll(b, ["david"]);
+  const notMember = await b.request(
+    `${f.thread}/links/copy`,
+    post({ csrf: (await home(b)).csrf, person: "nobody" }),
+  );
+  expect(notMember.status).toBe(409);
+  expect(await notMember.text()).toContain("They have no link of their own here.");
+  await addAccount(b, "david@example.org");
+  expect(await (await b.request(f.thread)).text()).not.toContain("Their own links");
+  const asDavid = await b.request(
+    `${f.thread}/links/copy`,
+    post({ csrf: (await home(b)).csrf, person: f.mara.id }),
+  );
+  expect(asDavid.status).toBe(403);
+  expect(await asDavid.text()).toContain("Only the organizer copies vote links.");
+});
+
+it("copying refuses a guest, a form without its token, and a thread with nothing on the table", async () => {
+  const b = await browser({ now: () => NOW });
+  const f = await signedInPoll(b, ["david", "ana"]);
+  const copy = async (person: string, csrf?: string) =>
+    b.request(`${f.thread}/links/copy`, post({ csrf: csrf ?? (await home(b)).csrf, person }));
+  const ok = await (await copy(f.rest[1]?.id ?? "")).text();
+  expect(ok).toContain("It works for 14 days.");
+  expect(ok).toMatch(/aria-label="Guest \d+&#39;s link"/);
+  expect(ok).toMatch(/<title>[^<]*Their link/);
+  // A guest answered from the shared link: they have that, and their claim link.
+  await b.storage.batch([
+    { sql: "UPDATE person SET guest_at = ? WHERE id = ?", params: [NOW, f.rest[0]?.id ?? ""] },
+  ]);
+  const page = await (await b.request(f.thread)).text();
+  expect(page.match(/\/links\/copy"/g)).toHaveLength(1); // only Ana's
+  const guest = await copy(f.rest[0]?.id ?? "");
+  expect(guest.status).toBe(409);
+  expect(await guest.text()).toContain("They have no link of their own here.");
+  expect((await copy(f.rest[1]?.id ?? "", "forged")).status).toBe(403);
+  // Nothing on the table: nothing to vote on, so no links to copy.
+  const mara = await f.as(f.mara.id);
+  for (const planId of f.planIds) await withdrawPlan(b.storage, mara, { planId, now: NOW });
+  expect(await (await b.request(f.thread)).text()).not.toContain("Their own links");
+  const closed = await copy(f.rest[1]?.id ?? "");
+  expect(closed.status).toBe(409);
+  expect(await closed.text()).toContain("Nothing is on the table to vote on.");
+});
+
+it("the section is there while anything is on the table, and only with someone to send to", async () => {
+  const b = await browser({ now: () => NOW });
+  const f = await signedInPoll(b, ["david"]);
+  const mara = await f.as(f.mara.id);
+  await withdrawPlan(b.storage, mara, { planId: f.planIds[0] ?? "", now: NOW });
+  expect(await (await b.request(f.thread)).text()).toContain("Their own links"); // one still is
+  const alone = await createPollThread(b.storage, {
+    creatorId: f.mara.id,
+    group: null,
+    fields: { title: "Solo", allDay: true, tzid: null, ...NO_PLACE },
+    candidates: SATURDAY,
+    people: [],
+    now: NOW,
+  });
+  expect(await (await b.request(`${PLANS_PATH}/${alone.threadId}`)).text()).not.toContain(
+    "Their own links",
+  );
+});

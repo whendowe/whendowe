@@ -1493,3 +1493,103 @@ it("retention routes take only a listed period, with CSRF, from someone in it", 
   expect((await retainOf(h, "person_group", group))?.d).toBe(365);
   expect((await retainOf(h, "canonical_event", event))?.d).toBe(365);
 });
+
+// --- Copying someone's answer link (rc36) -----------------------------------------------
+
+it("an editor copies a person's link instead of emailing it: fresh each time, shown once, with what it is", async () => {
+  const h = await harness();
+  const { dm, group } = await setup(h);
+  const ann = await join(h, dm, group, "ann@example.org", "view", "FULL");
+  const event = await createVia(h, dm, group);
+  const page = await text(h, event, dm);
+  expect(page).toContain(`action="${event}/people/link"`);
+  expect(page).toContain("Copy their link");
+  const annId = /name="person" value="([^"]+)" \/><button type="submit">Copy their link/.exec(
+    page.slice(page.indexOf("ann")),
+  )?.[1];
+  if (annId === undefined) throw new Error("no copy button for ann");
+
+  const before = h.sent.length;
+  const copy = () =>
+    h.app.request(`${event}/people/link`, post({ csrf: dm.csrf, person: annId }, dm.cookie));
+  const res = await copy();
+  expect(res.status).toBe(200);
+  expect(res.headers.get("cache-control")).toBe("no-store");
+  expect(res.headers.get("referrer-policy")).toBe("no-referrer");
+  const body = await res.text();
+  expect(body).toContain("This link answers as ann. Send it only to ann.");
+  expect(body).toContain("It works for 14 days.");
+  expect(body).toContain('aria-label="ann&#39;s link"');
+  expect(body).toMatch(/<title>[^<]*Their link/);
+  expect(body).toContain(`<a href="${event}">Back</a>`);
+  expect(h.sent.length).toBe(before); // copied, not mailed
+  const link = /https:\/\/[^\s"<]+\/respond\?t=[A-Za-z0-9_-]+/.exec(body)?.[0] ?? "";
+  const path = new URL(link).pathname + new URL(link).search;
+  expect(await (await h.app.request(path)).text()).toContain("Are you coming?");
+
+  // Again at once: no resend throttle for a copy, and the first link stops working.
+  const again =
+    /https:\/\/[^\s"<]+\/respond\?t=[A-Za-z0-9_-]+/.exec(await (await copy()).text())?.[0] ?? "";
+  expect(again).not.toBe(link);
+  expect((await h.app.request(path)).status).toBe(404);
+
+  // Ann can't copy anyone's link, and nobody without the CSRF token can.
+  expect(await text(h, event, ann)).not.toContain("Copy their link");
+  expect(
+    (
+      await h.app.request(
+        `${event}/people/link`,
+        post({ csrf: ann.csrf, person: annId }, ann.cookie),
+      )
+    ).status,
+  ).toBe(403);
+  expect(
+    (await h.app.request(`${event}/people/link`, post({ person: annId }, dm.cookie))).status,
+  ).toBe(403);
+  const refused = await h.app.request(
+    `${event}/people/link`,
+    post({ csrf: ann.csrf, person: annId }, ann.cookie),
+  );
+  expect(await refused.text()).toContain("Only people who can edit it copy links");
+  // Someone not on the event, or HIDDEN from it, can't even find it.
+  const ghost = await join(h, dm, group, "ghost2@example.org", "view", "HIDDEN");
+  const stranger = await signIn(h, "stranger@example.org");
+  for (const who of [ghost, stranger])
+    expect(
+      (
+        await h.app.request(
+          `${event}/people/link`,
+          post({ csrf: who.csrf, person: annId }, who.cookie),
+        )
+      ).status,
+    ).toBe(404);
+});
+
+it("a cancelled event offers no link to copy; someone not on it gets none; HIDDEN has no button", async () => {
+  const h = await harness();
+  const { dm, group } = await setup(h);
+  await join(h, dm, group, "ann@example.org", "view", "FULL");
+  await join(h, dm, group, "ghost@example.org", "view", "HIDDEN");
+  const event = await createVia(h, dm, group);
+  const annId = /name="person" value="([^"]+)" \/><button type="submit">Copy their link/.exec(
+    await text(h, event, dm),
+  )?.[1];
+  const stranger = await h.app.request(
+    `${event}/people/link`,
+    post({ csrf: dm.csrf, person: "nobody" }, dm.cookie),
+  );
+  // Ann has a button; the HIDDEN member, who can't see the event at all, has none.
+  expect((await text(h, event, dm)).match(/>Copy their link</g)).toHaveLength(1);
+  expect(stranger.status).toBe(409);
+  expect(await stranger.text()).toContain("They have nothing to answer here.");
+  await h.app.request(`${event}/cancel`, post({ csrf: dm.csrf }, dm.cookie));
+  expect(await text(h, event, dm)).not.toContain("Copy their link");
+  expect(
+    (
+      await h.app.request(
+        `${event}/people/link`,
+        post({ csrf: dm.csrf, person: annId ?? "" }, dm.cookie),
+      )
+    ).status,
+  ).toBe(409);
+});
