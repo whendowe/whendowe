@@ -59,6 +59,20 @@ async function thread(b: Browser, name = "Kiddo's weeks") {
   return location(res);
 }
 
+it("a plan starts with more than the 20 it once held; 50 addresses at once at most (rc38)", async () => {
+  const b = await browser({ now: () => "2101-11-01T09:00:00.000Z" });
+  await addAccount(b, "big@example.org");
+  const emails = (n: number) => Array.from({ length: n }, (_, i) => `crowd${i}@example.org`);
+  const big = await act(b, PLANS_PATH, { name: "Festival", tzid: "UTC", email: emails(50) });
+  expect(big.status).toBe(303);
+  expect((await page(b, location(big))).match(/Guest \d{4}/g)?.length ?? 0).toBeGreaterThanOrEqual(
+    50,
+  );
+  const tooMany = await act(b, PLANS_PATH, { name: "Too many", tzid: "UTC", email: emails(51) });
+  expect(tooMany.status).toBe(400);
+  expect(await tooMany.text()).toContain("At most 50 addresses at once.");
+});
+
 it("two co-parents agree two weeks, with no JavaScript", async () => {
   const b = await browser({ now: () => "2101-11-01T09:00:00.000Z" });
   await addAccount(b, "mara@example.org");

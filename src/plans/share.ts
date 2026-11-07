@@ -9,7 +9,6 @@ import { listPlans, type Plan } from "./plan.js";
 import {
   findThreadById,
   findThreadForMember,
-  MAX_MEMBERS,
   memberName,
   type Thread,
   type ThreadAccess,
@@ -156,13 +155,12 @@ export async function questionAsOutsider(
 export type JoinResult =
   | { readonly kind: "joined"; readonly access: ThreadAccess }
   /** The link went, or the question closed, between the page and the tap. */
-  | { readonly kind: "gone" }
-  | { readonly kind: "full" };
+  | { readonly kind: "gone" };
 
 /**
  * A signed-in person joins from the link (rc25: one tap). Already a member, it is a no-op
- * that answers "joined". The insert carries the link, the open question and the member cap,
- * so a link turned off a moment ago adds nobody.
+ * that answers "joined". The insert carries the link and the open question, so a link turned
+ * off a moment ago adds nobody. A thread has no member limit (rc38).
  */
 export async function joinByShareLink(
   storage: StoragePort,
@@ -174,14 +172,14 @@ export async function joinByShareLink(
   await storage.batch([
     {
       sql: `INSERT INTO plan_thread_member (thread_id, person_id, created_at)
-            SELECT ?, ?, ? WHERE ${LIVE} AND ${ROOM}
+            SELECT ?, ?, ? WHERE ${LIVE}
             ON CONFLICT DO NOTHING`,
-      params: [threadId, personId, now, ...liveParams(question, now), threadId, MAX_MEMBERS],
+      params: [threadId, personId, now, ...liveParams(question, now)],
     },
   ]);
   const access = await findThreadForMember(storage, threadId, personId);
   if (access !== null) return { kind: "joined", access };
-  return (await stillLive(storage, question, now)) ? { kind: "full" } : { kind: "gone" };
+  return { kind: "gone" };
 }
 
 export type ClaimResult =
@@ -194,7 +192,6 @@ export type ClaimResult =
   | { readonly kind: "taken" }
   /** GUESTS_PER_DAY guests joined in the last day. */
   | { readonly kind: "busy" }
-  | { readonly kind: "full" }
   | { readonly kind: "gone" };
 
 /** A name compared the way people read it: trimmed, spaces collapsed, case ignored. */
@@ -239,7 +236,7 @@ export async function claimName(
   await storage.batch([
     {
       sql: `INSERT INTO person (id, email, display_name, created_at, guest_at)
-            SELECT ?, ?, NULL, ?, ? WHERE ${LIVE} AND ${ROOM}
+            SELECT ?, ?, NULL, ?, ? WHERE ${LIVE}
               AND NOT EXISTS (SELECT 1 FROM plan_thread_member
                               WHERE thread_id = ? AND lower(handle) = lower(?))`,
       params: [
@@ -248,8 +245,6 @@ export async function claimName(
         input.now,
         input.now,
         ...liveParams(question, input.now),
-        threadId,
-        MAX_MEMBERS,
         threadId,
         name,
       ],
@@ -267,9 +262,7 @@ export async function claimName(
   ]);
   const access = await findThreadForMember(storage, threadId, guestId);
   if (access !== null) return { kind: "claimed", access, token: issued.token };
-  if (!(await stillLive(storage, question, input.now))) return { kind: "gone" };
-  const now = (await threadMembers(storage, threadId)).map(memberName);
-  return now.length >= MAX_MEMBERS ? { kind: "full" } : { kind: "taken" };
+  return (await stillLive(storage, question, input.now)) ? { kind: "taken" } : { kind: "gone" };
 }
 
 /**
@@ -295,7 +288,6 @@ export async function resolveClaim(
 const LIVE = `EXISTS (SELECT 1 FROM share_link WHERE token_hash = ? AND thread_id = ? AND expires_at > ?)
   AND EXISTS (SELECT 1 FROM plan WHERE thread_id = ? AND status = 'on_table')`;
 const liveParams = (q: SharedQuestion, now: string) => [q.tokenHash, q.thread.id, now, q.thread.id];
-const ROOM = "(SELECT count(*) FROM plan_thread_member WHERE thread_id = ?) < ?";
 
 async function stillLive(storage: StoragePort, q: SharedQuestion, now: string): Promise<boolean> {
   const rows = await storage.query({

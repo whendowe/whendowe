@@ -350,7 +350,6 @@ export function registerShareRoutes(app: Hono<AppEnv>, deps: ShareRouteDeps): vo
     } else if (who.kind === "account") {
       const joined = await joinByShareLink(deps.storage, q, who.me.personId, now);
       if (joined.kind === "gone") return again("This was decided meanwhile.", 409);
-      if (joined.kind === "full") return again("This plan is full — ask whoever shared it.", 409);
       access = joined.access;
     } else {
       let claimed: Awaited<ReturnType<typeof claimName>>;
@@ -364,7 +363,6 @@ export function registerShareRoutes(app: Hono<AppEnv>, deps: ShareRouteDeps): vo
         return again("Someone in this plan already goes by that name — pick another.", 409);
       if (claimed.kind === "busy")
         return again("A lot of people joined today. Please try again tomorrow.", 429);
-      if (claimed.kind === "full") return again("This plan is full — ask whoever shared it.", 409);
       if (claimed.kind === "gone") return again("This was decided meanwhile.", 409);
       access = claimed.access;
       claimedNow = claimed.token;

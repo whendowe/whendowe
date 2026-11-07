@@ -5,7 +5,7 @@ import { LOGIN_REQUESTS_PER_WINDOW } from "../../src/people/login.js";
 import { findOrCreatePerson } from "../../src/people/person.js";
 import { acceptPlan, castVote, createPollThread, listPlans } from "../../src/plans/plan.js";
 import { claimName, GUESTS_PER_DAY, resolveShareLink } from "../../src/plans/share.js";
-import { findThreadForMember, MAX_MEMBERS } from "../../src/plans/thread.js";
+import { findThreadForMember } from "../../src/plans/thread.js";
 import { PLANS_PATH } from "../../src/web/routes/plans.js";
 import {
   CLAIM_COOKIE,
@@ -325,7 +325,7 @@ describe("the shared link's page (rc25, rc29)", () => {
     expect((await member(org, f.threadId, f.mara.id)).members).toHaveLength(2);
   });
 
-  it("a full plan takes no one more, signed in or not; a busy day takes no more guests", async () => {
+  it("a busy day takes no more guests; past 20 people a plan still takes anyone (rc38)", async () => {
     const org = await browser({ now: () => NOW });
     const f = await maraPoll(org);
     const { path } = await share(org, f.threadId);
@@ -347,17 +347,16 @@ describe("the shared link's page (rc25, rc29)", () => {
     ]);
     const q = await resolveShareLink(org.storage, t, NOW);
     if (q === null) throw new Error("link");
-    for (let i = 2; i < MAX_MEMBERS; i++)
-      await claimName(org.storage, q, { name: `G${i}`, now: NOW });
-    const full = await org.another().request(SHARE_PATH, post({ ...vote, name: "Kestrel" }));
-    expect(full.status).toBe(409);
-    expect(await full.text()).toContain("This plan is full");
+    // The 20 a thread used to hold, and more: there is no member limit (rc38).
+    for (let i = 2; i < 24; i++) await claimName(org.storage, q, { name: `G${i}`, now: NOW });
+    const kestrel = await org.another().request(SHARE_PATH, post({ ...vote, name: "Kestrel" }));
+    expect(kestrel.status).toBeLessThan(400);
     const ana = org.another();
     await addAccount(ana, "ana@example.org");
     const csrf = /name="csrf" value="([^"]+)"/.exec(await (await ana.request(path)).text())?.[1];
     const joined = await ana.request(SHARE_PATH, post({ ...vote, csrf: csrf ?? "" }));
-    expect(joined.status).toBe(409);
-    expect(await joined.text()).toContain("This plan is full");
+    expect(joined.status).toBeLessThan(400);
+    expect((await member(org, f.threadId, f.mara.id)).members).toHaveLength(26);
   });
 
   it("a claim that went in stays, even when its answer is refused", async () => {

@@ -22,7 +22,6 @@ import {
   decidesByConsensus,
   findThreadForMember,
   leaveThread,
-  MAX_MEMBERS,
   ThreadInputError,
 } from "../../src/plans/thread.js";
 import { issueVoteLinks } from "../../src/plans/vote-link.js";
@@ -184,14 +183,15 @@ export function runShareLinksContract(makePort: () => Promise<StoragePort>): voi
       expect(await listPlans(port, joined.access)).toHaveLength(2);
     });
 
-    it("a thread at the member cap takes no one more", async () => {
+    it("a thread past the 20 it used to hold still takes anyone (rc38)", async () => {
       const port = await makePort();
       const f = await poll(port, "f");
       const { q } = await shared(port, f);
-      for (let i = 2; i < MAX_MEMBERS; i++) await claimed(port, q, `Guest name ${i}`);
+      for (let i = 2; i < 24; i++) await claimed(port, q, `Guest name ${i}`);
       const late = await findOrCreatePerson(port, "share-late-f@example.org", { now: T0 });
-      expect(await joinByShareLink(port, q, late.id, LATER)).toEqual({ kind: "full" });
-      expect((await claimName(port, q, { name: "One more", now: LATER })).kind).toBe("full");
+      expect((await joinByShareLink(port, q, late.id, LATER)).kind).toBe("joined");
+      const more = await claimName(port, q, { name: "One more", now: LATER });
+      expect(more.kind === "claimed" && more.access.members).toHaveLength(26);
     });
 
     it("claiming a name makes a guest with that handle and an address that can't be mailed", async () => {

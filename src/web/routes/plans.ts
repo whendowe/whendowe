@@ -3,7 +3,11 @@ import type { Context, Hono } from "hono";
 import { Temporal } from "temporal-polyfill";
 import { ZodError } from "zod";
 import type { StoragePort } from "../../db/port.js";
-import { resolveInvitees, UnreachableAddressError } from "../../events/participation.js";
+import {
+  MAX_INVITEES,
+  resolveInvitees,
+  UnreachableAddressError,
+} from "../../events/participation.js";
 import { type Answer, answerSchema } from "../../events/poll.js";
 import { MailCapReachedError } from "../../mail/capped.js";
 import type { MailPort } from "../../mail/port.js";
@@ -46,7 +50,6 @@ import {
   findThreadForMember,
   leaveThread,
   listThreadsFor,
-  MAX_MEMBERS,
   memberName,
   type ThreadAccess,
   ThreadInputError,
@@ -1151,8 +1154,9 @@ export function registerPlanRoutes(app: Hono<AppEnv>, deps: PlanRouteDeps): void
       }
     });
     if (bad.length > 0) return again(`Not an email address: ${bad.join(", ")}`);
-    if (values.emails.length + 1 > MAX_MEMBERS)
-      return again(`At most ${MAX_MEMBERS} people plan together.`);
+    // No limit on members (rc38); addresses typed at once are bounded as for an event.
+    if (values.emails.length > MAX_INVITEES)
+      return again(`At most ${MAX_INVITEES} addresses at once.`);
     const memberIds: string[] = [];
     const groupId = str(form, "group");
     if (groupId !== "") {

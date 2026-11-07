@@ -18,12 +18,7 @@ import {
   suggestTime,
   withdrawPlan,
 } from "../../src/plans/plan.js";
-import {
-  decidesByConsensus,
-  findThreadForMember,
-  MAX_MEMBERS,
-  ThreadInputError,
-} from "../../src/plans/thread.js";
+import { decidesByConsensus, findThreadForMember } from "../../src/plans/thread.js";
 
 // Polls as one-event plans (DESIGN §10 rc26–27) on BOTH drivers: the poll is one batch,
 // accepting writes the place, notes and group, and the group's BUSY members get the
@@ -246,18 +241,20 @@ export function runPollPlansContract(makePort: () => Promise<StoragePort>): void
       await expect(
         poll([{ startLocal: "2101-12-02", endLocal: "2101-12-01" }], [david.id]),
       ).rejects.toThrow(/end after/);
-      // rc29: nobody else is allowed (a poll made to be shared); too many is not.
-      const crowd = await Promise.all(
-        Array.from({ length: MAX_MEMBERS }, (_, i) => person(port, `crowd${i}`, "d")),
-      );
-      await expect(
-        poll(
-          TIMES,
-          crowd.map((p) => p.id),
-        ),
-      ).rejects.toBeInstanceOf(ThreadInputError);
       expect(await count()).toBe(0);
       expect((await poll(days(10), [david.id])).planIds).toHaveLength(10);
+      // rc29: nobody else is allowed (a poll made to be shared); rc38: so is a crowd.
+      const crowd = await Promise.all(
+        Array.from({ length: 25 }, (_, i) => person(port, `crowd${i}`, "d")),
+      );
+      expect(
+        (
+          await poll(
+            TIMES,
+            crowd.map((p) => p.id),
+          )
+        ).planIds,
+      ).toHaveLength(TIMES.length);
     });
 
     it("one time is a question: between two, a yes agrees it; a no leaves the way to another time (rc33)", async () => {

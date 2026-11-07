@@ -66,7 +66,6 @@ export function memberName(m: Pick<ThreadMember, "shown">): string {
 }
 
 export const MAX_THREAD_NAME = 80;
-export const MAX_MEMBERS = 20;
 
 /** A person-facing problem with what was asked (shown on the form, not a crash). */
 export class ThreadInputError extends Error {}
@@ -130,8 +129,6 @@ export function threadStatements(input: {
   const others = [...new Set(input.memberIds)].filter((id) => id !== input.creatorId);
   if (others.length === 0 && input.alone !== true)
     throw new ThreadInputError("Add at least one person to plan with.");
-  if (others.length + 1 > MAX_MEMBERS)
-    throw new ThreadInputError(`At most ${MAX_MEMBERS} people plan together.`);
   const id = (input.newId ?? (() => uuidv7()))();
   const statements: SqlStatement[] = [
     {
