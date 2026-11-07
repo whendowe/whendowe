@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { expect, it } from "vitest";
 import { createTokenCipher } from "../../src/crypto/tokens.js";
-import { createEvent } from "../../src/events/event.js";
-import { issueFeedLink } from "../../src/feeds/feed.js";
-import { createGroup } from "../../src/people/group.js";
+import { createEvent, findEventForParticipant, setCancelled } from "../../src/events/event.js";
+import { issueFeedLink, makeSharedLink } from "../../src/feeds/feed.js";
+import { createGroup, findGroupForMember } from "../../src/people/group.js";
 import { findOrCreatePerson } from "../../src/people/person.js";
-import { ACCOUNT_FEED_PATH, feedPath } from "../../src/web/routes/feeds.js";
+import { ACCOUNT_FEED_PATH, feedPath, sharedPath } from "../../src/web/routes/feeds.js";
 import { GROUPS_PATH } from "../../src/web/routes/groups.js";
 import { addAccount, browser, home, post } from "../property/one-browser.js";
 
@@ -190,4 +190,201 @@ it("without a key the pages say feeds aren't set up, and there is nothing to POS
   expect((await b.request(ACCOUNT_FEED_PATH, post({ csrf: (await home(b)).csrf }))).status).toBe(
     404,
   );
+});
+
+// --- A group calendar link's page and feed (rc36) --------------------------------------
+
+async function sharedFixture(tier: "DETAILS" | "BUSY") {
+  const b = await browser({ now: () => NOW });
+  const ann = await findOrCreatePerson(b.storage, "ann@example.org", { now: NOW });
+  const group = await createGroup(b.storage, { name: "Rope jam", creatorId: ann.id, now: NOW });
+  const membership = await findGroupForMember(b.storage, group.id, ann.id);
+  await createEvent(b.storage, {
+    creatorId: ann.id,
+    group: membership,
+    fields: {
+      title: "Jam night",
+      description: "SECRET-NOTE",
+      location: "The hall",
+      allDay: false,
+      startLocal: "2101-11-21T18:00",
+      endLocal: "2101-11-21T20:00",
+      tzid: "Europe/Prague",
+    },
+    now: NOW,
+  });
+  const cipher = await createTokenCipher([{ id: 1, material: KEY }], 1);
+  const token = await makeSharedLink(b.storage, cipher, {
+    groupId: group.id,
+    organizerId: ann.id,
+    label: "Grandparents",
+    tier,
+    now: NOW,
+  });
+  if (token === null) throw new Error("made");
+  return { b, token };
+}
+
+it("a group calendar link's page: what's coming, for anyone, naming nobody, found by nobody", async () => {
+  const { b, token } = await sharedFixture("DETAILS");
+  const before = b.writes;
+  const res = await b.request(sharedPath(token));
+  expect(res.status).toBe(200);
+  expect(res.headers.get("set-cookie")).toBeNull();
+  expect(res.headers.get("x-robots-tag")).toBe("noindex, nofollow");
+  expect(res.headers.get("referrer-policy")).toBe("no-referrer");
+  const page = await res.text();
+  expect(page).toContain("<h1>Rope jam</h1>");
+  expect(page).toContain("Jam night");
+  expect(page).toContain("The hall");
+  expect(page).toContain("Mon 21 Nov, 18:00–20:00 · Europe/Prague");
+  for (const hidden of ["SECRET-NOTE", "ann", "Grandparents", "/events/"])
+    expect(page, hidden).not.toContain(hidden);
+  // The card in a chat names the group, never an event.
+  expect(page).toContain('<meta property="og:title" content="Rope jam"');
+  expect(page).not.toMatch(/<meta property="og:[a-z]+" content="[^"]*Jam night/);
+  const webcal = `webcal://whendowe.example${sharedPath(token, true)}`;
+  expect(page).toContain(`href="${webcal}"`);
+  expect(page).toContain(encodeURIComponent(webcal));
+  expect(b.writes).toBe(before);
+});
+
+it("a busy-only link shows the time and nothing else; its feed is the same, with an ETag", async () => {
+  const { b, token } = await sharedFixture("BUSY");
+  const page = await (await b.request(sharedPath(token))).text();
+  expect(page).toContain("<strong>Busy</strong>");
+  expect(page).toContain("when they&#39;re busy, not what with");
+  for (const hidden of ["Jam night", "The hall", "SECRET-NOTE"]) expect(page).not.toContain(hidden);
+  const feed = await b.request(sharedPath(token, true));
+  expect(feed.headers.get("content-type")).toBe("text/calendar; charset=utf-8");
+  const body = await feed.text();
+  expect(body).toContain("SUMMARY:Busy");
+  expect(body).toContain("X-WR-CALNAME:Rope jam\r\n");
+  expect(body).not.toContain("URL:");
+  const etag = feed.headers.get("etag") ?? "";
+  expect(
+    (await b.request(sharedPath(token, true), { headers: { "If-None-Match": etag } })).status,
+  ).toBe(304);
+});
+
+it("an unknown link, or a feed link at /c, is a 404 page", async () => {
+  const { b } = await sharedFixture("DETAILS");
+  const ann = await findOrCreatePerson(b.storage, "ann@example.org", { now: NOW });
+  const cipher = await createTokenCipher([{ id: 1, material: KEY }], 1);
+  const own = await issueFeedLink(b.storage, cipher, { personId: ann.id, groupId: null, now: NOW });
+  for (const bad of [
+    sharedPath("A".repeat(43)),
+    sharedPath(own ?? ""),
+    "/c/nope",
+    `/c/x${"A".repeat(43)}`,
+  ]) {
+    const res = await b.request(bad);
+    expect(res.status, bad).toBe(404);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    const body = await res.text();
+    expect(body).toContain("This link no longer works");
+    expect(body).toMatch(/<title>[^<]*Link no longer works/);
+  }
+});
+
+it("the page lists what's coming: not the past, repeats marked, cancelled said, places only where set", async () => {
+  const b = await browser({ now: () => NOW }); // 2101-10-01
+  const ann = await findOrCreatePerson(b.storage, "ann@example.org", { now: NOW });
+  const group = await createGroup(b.storage, { name: "Rope jam", creatorId: ann.id, now: NOW });
+  const membership = await findGroupForMember(b.storage, group.id, ann.id);
+  const cipher = await createTokenCipher([{ id: 1, material: KEY }], 1);
+  const token =
+    (await makeSharedLink(b.storage, cipher, {
+      groupId: group.id,
+      organizerId: ann.id,
+      label: "Grandparents",
+      tier: "DETAILS",
+      now: NOW,
+    })) ?? "";
+  const empty = await b.request(sharedPath(token));
+  expect(empty.headers.get("cache-control")).toBe("private, no-cache");
+  const emptyPage = await empty.text();
+  expect(emptyPage).toContain("Nothing coming up.");
+  expect(emptyPage).toContain("What's coming, shared by its organizers.</p>");
+  expect(emptyPage).toContain(
+    '<meta property="og:description" content="What&#39;s coming, shared by its organizers."',
+  );
+  const event = (title: string, fields: Record<string, unknown>) =>
+    createEvent(b.storage, {
+      creatorId: ann.id,
+      group: membership,
+      fields: {
+        title,
+        description: null,
+        location: null,
+        allDay: false,
+        startLocal: "2101-10-05T18:00",
+        endLocal: "2101-10-05T20:00",
+        tzid: "Europe/Prague",
+        ...fields,
+      },
+      now: NOW,
+    });
+  await event("Last month", { startLocal: "2101-09-05T18:00", endLocal: "2101-09-05T20:00" });
+  await event("Ends today", { startLocal: "2101-09-30T22:00", endLocal: "2101-10-01T01:00" });
+  await event("Weekly since summer", {
+    startLocal: "2101-07-05T18:00",
+    endLocal: "2101-07-05T20:00",
+    rrule: "FREQ=WEEKLY",
+  });
+  await event("Picnic", {
+    allDay: true,
+    startLocal: "2101-10-10",
+    endLocal: "2101-10-11",
+    tzid: null,
+    location: "The park",
+  });
+  const off = await event("Called off", {});
+  const offAccess = await findEventForParticipant(b.storage, off.id, ann.id);
+  if (offAccess === null) throw new Error("access");
+  await setCancelled(b.storage, offAccess, { cancelled: true, now: NOW });
+
+  const page = await (await b.request(sharedPath(token))).text();
+  expect(page).not.toContain("Last month");
+  expect(page).not.toContain("Nothing coming up.");
+  expect(page).not.toContain("busy, not what with");
+  const item = (title: string) => {
+    const at = page.indexOf(`<strong>${title}</strong>`);
+    expect(at, title).toBeGreaterThan(-1);
+    return page.slice(at, page.indexOf("</li>", at));
+  };
+  expect(item("Ends today")).toContain("Europe/Prague");
+  expect(item("Weekly since summer")).toContain(" · repeats");
+  expect(item("Ends today")).not.toContain("repeats");
+  expect(item("Called off")).toContain("(cancelled)");
+  expect(item("Ends today")).not.toContain("(cancelled)");
+  expect(item("Picnic")).toContain("📍 The park");
+  expect(item("Picnic")).not.toContain("Europe/Prague"); // all day has no zone
+  expect(item("Ends today")).not.toContain("📍");
+  // Whole lines, so no part prints anything where it should print nothing.
+  expect(item("Ends today")).toMatch(
+    /^<strong>Ends today<\/strong><br \/><span class="muted">[^<·]+ · Europe\/Prague<\/span>$/,
+  );
+  expect(item("Picnic")).toMatch(
+    /^<strong>Picnic<\/strong><br \/><span class="muted">[^<·]+, all day · 📍 The park<\/span>$/,
+  );
+  expect(item("Weekly since summer")).toMatch(
+    /^<strong>Weekly since summer<\/strong><br \/><span class="muted">[^<·]+ · Europe\/Prague · repeats<\/span>$/,
+  );
+});
+
+it("a link's label is short and says who it's for", async () => {
+  const b = await browser({ now: () => NOW });
+  const ann = await findOrCreatePerson(b.storage, "ann@example.org", { now: NOW });
+  const group = await createGroup(b.storage, { name: "Rope jam", creatorId: ann.id, now: NOW });
+  const cipher = await createTokenCipher([{ id: 1, material: KEY }], 1);
+  await expect(
+    makeSharedLink(b.storage, cipher, {
+      groupId: group.id,
+      organizerId: ann.id,
+      label: "x".repeat(41),
+      tier: "BUSY",
+      now: NOW,
+    }),
+  ).rejects.toThrow("Keep it under 40 characters.");
 });

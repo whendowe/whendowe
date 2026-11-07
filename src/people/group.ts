@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { z } from "zod";
-import type { StoragePort } from "../db/port.js";
+import type { SqlStatement, StoragePort } from "../db/port.js";
 import { uuidv7 } from "../ids.js";
 import { collect } from "../privacy/purge.js";
 import { type Shown, shownAs, shownRowSchema } from "./person.js";
@@ -189,18 +189,39 @@ export async function leaveGroup(
                               WHERE group_id = ? AND role = 'organizer' AND person_id <> ?)`,
       params: [groupId, groupId, personId, groupId, personId],
     },
+    // The group calendar links they keep move to the organizer who takes over (rc36).
+    moveSharedLinks(groupId, personId),
     {
       sql: "DELETE FROM group_member WHERE group_id = ? AND person_id = ?",
       params: [groupId, personId],
     },
     // Their link to the group's feed goes with them (rc34).
     {
-      sql: "DELETE FROM feed_token WHERE group_id = ? AND person_id = ?",
+      sql: "DELETE FROM feed_token WHERE kind = 'feed' AND group_id = ? AND person_id = ?",
       params: [groupId, personId],
     },
   ]);
   const gone = await collect(storage, { groups: [groupId] }, now);
   return { deleted: gone.groups.length > 0 };
+}
+
+/**
+ * When `personId` stops being an organizer of a group (they leave, or are erased), the
+ * group calendar links they keep there move to the organizer who remains or has just
+ * taken over (DESIGN §10 rc36), and are capped by that person's view from then on. Run it
+ * after the role is handed on; if nobody remains, the group goes and its links with it.
+ */
+export function moveSharedLinks(groupId: string, personId: string): SqlStatement {
+  return {
+    sql: `UPDATE feed_token SET person_id =
+            (SELECT person_id FROM group_member
+             WHERE group_id = ? AND role = 'organizer' AND person_id <> ?
+             ORDER BY joined_at, person_id LIMIT 1)
+          WHERE kind = 'shared' AND group_id = ? AND person_id = ?
+            AND EXISTS (SELECT 1 FROM group_member
+                        WHERE group_id = ? AND role = 'organizer' AND person_id <> ?)`,
+    params: [groupId, personId, groupId, personId, groupId, personId],
+  };
 }
 
 /** How long events made from this group are kept after they end (DESIGN §10 rc23). */

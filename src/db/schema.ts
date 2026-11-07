@@ -786,6 +786,9 @@ export const guestClaim = sqliteTable(
 // rc34 (DESIGN §10 *Calendar feeds*): one secret link per person, per feed — their own
 // (group_id NULL) or a group's. The hash is the lookup; the encrypted token is there only
 // so its owner can be shown it again. Making a new link replaces the row.
+// rc36 (*Group calendar links*): the same table holds a group's links for people outside
+// it (kind 'shared'): labelled, at a tier, as many as wanted, kept by an organizer
+// (person_id), who caps what they show; made_by remembers who made them.
 export const feedToken = sqliteTable(
   "feed_token",
   {
@@ -796,12 +799,22 @@ export const feedToken = sqliteTable(
       .references(() => person.id, { onDelete: "cascade" }),
     groupId: text("group_id").references(() => personGroup.id, { onDelete: "cascade" }),
     createdAt: text("created_at").notNull(),
+    // feed | shared — checked by zod where it is read (SQLite can't add a CHECK by ALTER).
+    kind: text("kind").notNull().default("feed"),
+    // shared only: who it is for ("Grandparents") and what it shows (DETAILS | BUSY).
+    label: text("label"),
+    tier: text("tier"),
+    madeBy: text("made_by").references(() => person.id, { onDelete: "set null" }),
   },
   (t) => [
-    // NULLs are distinct in a UNIQUE constraint, so your own feed has an index of its own.
+    // One feed per person per scope; NULLs are distinct in a UNIQUE constraint, so your
+    // own feed has an index of its own. Shared links have no limit (rc36).
     uniqueIndex("feed_token_group_uq")
       .on(t.personId, t.groupId)
-      .where(sql`${t.groupId} IS NOT NULL`),
-    uniqueIndex("feed_token_own_uq").on(t.personId).where(sql`${t.groupId} IS NULL`),
+      .where(sql`${t.kind} = 'feed' AND ${t.groupId} IS NOT NULL`),
+    uniqueIndex("feed_token_own_uq")
+      .on(t.personId)
+      .where(sql`${t.kind} = 'feed' AND ${t.groupId} IS NULL`),
+    index("feed_token_shared_idx").on(t.groupId).where(sql`${t.kind} = 'shared'`),
   ],
 );

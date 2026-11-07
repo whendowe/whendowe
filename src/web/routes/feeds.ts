@@ -1,23 +1,28 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import type { Hono } from "hono";
+import type { Context, Hono } from "hono";
 import type { TokenCipher } from "../../crypto/tokens.js";
 import type { StoragePort } from "../../db/port.js";
 import {
   type FeedScope,
   feedEntries,
   issueFeedLink,
+  type ResolvedSharedLink,
   resolveFeed,
+  resolveSharedLink,
+  sharedEntries,
   shownFeedLink,
 } from "../../feeds/feed.js";
-import { serializeFeed } from "../../feeds/ics.js";
+import { BUSY_SUMMARY, type FeedEntry, serializeFeed } from "../../feeds/ics.js";
 import { findGroupForMember } from "../../people/group.js";
 import { hashToken } from "../../people/tokens.js";
+import { whenText } from "../../plans/weeks.js";
 import {
   ACCOUNT_PATH,
   EVENTS_PATH,
   GROUPS_PATH,
   type Html,
   html,
+  renderPage,
   SHARE_BUTTONS,
   shareBox,
 } from "../layout.js";
@@ -98,6 +103,14 @@ export function feedPath(token: string): string {
 
 const FILE = /^([A-Za-z0-9_-]{43})\.ics$/;
 
+/** A group calendar link (rc36): `/c/<token>` the page, `/c/<token>.ics` the feed. */
+export const SHARED_PATH = "/c";
+const SHARED_FILE = /^([A-Za-z0-9_-]{43})(?:\.ics)?$/;
+
+export function sharedPath(token: string, ics = false): string {
+  return `${SHARED_PATH}/${token}${ics ? ".ics" : ""}`;
+}
+
 export function registerFeedRoutes(app: Hono<AppEnv>, deps: FeedRouteDeps): void {
   const cipher = deps.feedCipher;
   if (cipher !== undefined) {
@@ -149,12 +162,88 @@ export function registerFeedRoutes(app: Hono<AppEnv>, deps: FeedRouteDeps): void
       }),
       now,
     });
-    const etag = `"${await hashToken(body)}"`;
-    c.header("ETag", etag);
-    // Private: each link is one person's view at their tier, never a shared cache's.
-    c.header("Cache-Control", "private, max-age=900");
-    if (c.req.header("If-None-Match") === etag) return c.body(null, 304);
-    c.header("Content-Type", "text/calendar; charset=utf-8");
-    return c.body(body, 200);
+    return serveCalendar(c, body);
   });
+
+  // A group calendar link (rc36): /c/<token> is a read-only page of what is coming,
+  // /c/<token>.ics the same events as a feed. For people outside the group: no names,
+  // no notes, no links into pages only members can open, nothing for search engines.
+  app.get(`${SHARED_PATH}/:file`, async (c) => {
+    c.header("Referrer-Policy", "no-referrer");
+    c.header("X-Robots-Tag", "noindex, nofollow");
+    const file = c.req.param("file");
+    const token = SHARED_FILE.exec(file)?.[1];
+    const link = token === undefined ? null : await resolveSharedLink(deps.storage, token);
+    if (token === undefined || link === null) {
+      c.header("Cache-Control", "no-store");
+      return c.html(
+        renderPage(
+          "Link no longer works",
+          html`<h1>This link no longer works</h1><p>Ask whoever sent it for a new one.</p>`,
+          null,
+        ),
+        404,
+      );
+    }
+    const now = deps.now();
+    const entries = await sharedEntries(deps.storage, link, now);
+    if (file.endsWith(".ics"))
+      return serveCalendar(
+        c,
+        serializeFeed({
+          name: link.groupName,
+          host: new URL(deps.publicBaseUrl).host,
+          entries,
+          now,
+        }),
+      );
+    c.header("Cache-Control", "private, no-cache");
+    return c.html(
+      renderPage(
+        link.groupName,
+        sharedPage(link, entries, new URL(sharedPath(token, true), deps.publicBaseUrl), now),
+        null,
+        // A link preview names the group, never an event: a card in a chat is how it spreads.
+        { title: link.groupName, description: "What's coming, shared by its organizers." },
+      ),
+    );
+  });
+}
+
+/** A calendar body with an ETag over it: an unchanged one answers 304 (rc34). */
+async function serveCalendar(c: Context<AppEnv>, body: string): Promise<Response> {
+  const etag = `"${await hashToken(body)}"`;
+  c.header("ETag", etag);
+  // Private: each link is one view at one tier, never a shared cache's.
+  c.header("Cache-Control", "private, max-age=900");
+  if (c.req.header("If-None-Match") === etag) return c.body(null, 304);
+  c.header("Content-Type", "text/calendar; charset=utf-8");
+  return c.body(body, 200);
+}
+
+/** A group calendar link's page: what is coming, at the link's tier, and ways to subscribe. */
+function sharedPage(
+  link: ResolvedSharedLink,
+  entries: readonly FeedEntry[],
+  ics: URL,
+  now: string,
+): Html {
+  const today = now.slice(0, 10);
+  // Coming up: anything that repeats, or ends today or later. Past ones are in the feed.
+  const coming = entries.filter((e) => e.rrule !== null || e.endLocal.slice(0, 10) >= today);
+  const webcal = ics.toString().replace(/^https?:/, "webcal:");
+  const google = `https://calendar.google.com/calendar/r?cid=${encodeURIComponent(webcal)}`;
+  const line = (e: FeedEntry) => {
+    const busy = e.visibility === "BUSY";
+    return html`<li><strong>${busy ? BUSY_SUMMARY : e.title}</strong>${
+      e.status === "cancelled" ? html` <span class="muted">(cancelled)</span>` : ""
+    }<br /><span class="muted">${whenText(e)}${e.tzid === null ? "" : ` · ${e.tzid}`}${
+      e.rrule === null ? "" : " · repeats"
+    }${!busy && e.location !== null ? html` · 📍 ${e.location}` : ""}</span></li>`;
+  };
+  return html`<h1>${link.groupName}</h1>
+<p class="muted">What's coming, shared by its organizers${link.tier === "BUSY" ? ": when they're busy, not what with" : ""}.</p>
+${coming.length === 0 ? html`<p>Nothing coming up.</p>` : html`<ul class="shared-cal">${coming.map(line)}</ul>`}
+<p><a href="${webcal}">Open in your calendar app</a> · <a href="${google}" rel="noreferrer">Add to Google Calendar</a></p>
+<p class="muted">Google Calendar checks a calendar like this every few hours. Apple Calendar and others check more often.</p>`;
 }

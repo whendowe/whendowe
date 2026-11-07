@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+
 import { z } from "zod";
 import type { SqlStatement, StoragePort } from "../db/port.js";
 import { transitionStatements } from "../events/event.js";
 import { uuidv7 } from "../ids.js";
+import { moveSharedLinks } from "../people/group.js";
 import { hashToken, issueToken } from "../people/tokens.js";
 import { collect, reapplyLedger } from "./purge.js";
 
@@ -172,6 +174,8 @@ function groupStatements(g: string, p: string, t: string, now: string): SqlState
       params: [g, g, p, g, p],
     },
     { sql: "DELETE FROM group_invite WHERE group_id = ? AND invited_by = ?", params: [g, p] },
+    // The group calendar links they keep move to the organizer who takes over (rc36).
+    moveSharedLinks(g, p),
     { sql: "DELETE FROM group_member WHERE group_id = ? AND person_id = ?", params: [g, p] },
     tombstone(t, now, {
       sql: "EXISTS (SELECT 1 FROM person_group WHERE id = ? AND created_by = ?)",

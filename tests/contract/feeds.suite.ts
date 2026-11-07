@@ -15,8 +15,16 @@ import {
   feedEntries,
   issueFeedLink,
   listFeeds,
+  listKeptLinks,
+  listSharedLinks,
+  makeSharedLink,
+  replaceSharedLink,
   resolveFeed,
+  resolveSharedLink,
+  sharedEntries,
   shownFeedLink,
+  shownSharedLinks,
+  stopSharedLink,
 } from "../../src/feeds/feed.js";
 import { createGroup, findGroupForMember, leaveGroup } from "../../src/people/group.js";
 import { acceptInvite, createInvite } from "../../src/people/invite.js";
@@ -290,6 +298,236 @@ export function runFeedsContract(makePort: () => Promise<StoragePort>): void {
           params: [bob],
         }),
       ).toEqual([]);
+    });
+  });
+
+  describe("group calendar links (rc36)", () => {
+    const cipherOf = () => createTokenCipher([{ id: 1, material: KEY }], 1);
+    const make = async (
+      port: StoragePort,
+      groupId: string,
+      organizerId: string,
+      tier: "DETAILS" | "BUSY" = "DETAILS",
+      label = "Grandparents",
+    ) => makeSharedLink(port, await cipherOf(), { groupId, organizerId, label, tier, now: T0 });
+
+    it("only an organizer makes one, as many as they like, each labelled, listed for the group", async () => {
+      const port = await makePort();
+      const { ann, group, join } = await table(port, "make");
+      const bob = await join("bob", "FULL");
+      expect(await make(port, group, bob)).toBeNull(); // a member, not an organizer
+      const grand = await make(port, group, ann);
+      const sitter = await make(port, group, ann, "BUSY", "Babysitter");
+      const third = await make(port, group, ann, "BUSY", "Band website");
+      expect(new Set([grand, sitter, third]).size).toBe(3);
+      expect(
+        (await listSharedLinks(port, group)).map((l) => [l.label, l.tier, l.keeperId, l.madeBy]),
+      ).toEqual([
+        ["Grandparents", "DETAILS", ann, ann],
+        ["Babysitter", "BUSY", ann, ann],
+        ["Band website", "BUSY", ann, ann],
+      ]);
+      const shown = await shownSharedLinks(port, await cipherOf(), group);
+      expect([...shown.values()].sort()).toEqual([grand, sitter, third].sort());
+      await expect(make(port, group, ann, "DETAILS", "   ")).rejects.toThrow(/who the link is for/);
+      // Making your own feed of the group leaves the group's links alone.
+      await issueFeedLink(port, await cipherOf(), { personId: ann, groupId: group, now: T1 });
+      expect(await listSharedLinks(port, group)).toHaveLength(3);
+      expect((await listKeptLinks(port, ann)).map((k) => k.label)).toEqual([
+        "Grandparents",
+        "Babysitter",
+        "Band website",
+      ]);
+      const exported = await exportPerson(port, ann, T1);
+      expect(exported.calendar_links_you_keep).toEqual([
+        { group: "Jam make", for: "Grandparents", shows: "details" },
+        { group: "Jam make", for: "Babysitter", shows: "busy only" },
+        { group: "Jam make", for: "Band website", shows: "busy only" },
+      ]);
+      expect(JSON.stringify(exported)).not.toContain(grand ?? "?");
+    });
+
+    it("never shows more than its keeper sees: their events, at the lower of the two tiers", async () => {
+      const port = await makePort();
+      const { ann, membership, group, join } = await table(port, "cap");
+      const bob = await join("bob", "FULL");
+      const bobsMembership = await findGroupForMember(port, group, bob);
+      if (bobsMembership === null) throw new Error("membership");
+      // Ann's event, which she sees in full; and one Bob made that she sees only as busy.
+      await createEvent(port, { creatorId: ann, group: membership, fields: DINNER, now: T0 });
+      const busyForAnn = await createEvent(port, {
+        creatorId: bob,
+        group: bobsMembership,
+        fields: {
+          ...DINNER,
+          title: "Bob's",
+          startLocal: "2101-11-23T18:00",
+          endLocal: "2101-11-23T20:00",
+        },
+        now: T0,
+      });
+      await port.batch([
+        {
+          sql: "UPDATE event_participation SET visibility = 'BUSY' WHERE canonical_event_id = ? AND person_id = ?",
+          params: [busyForAnn.id, ann],
+        },
+      ]);
+      // And one Ann isn't in at all.
+      const notAnns = await createEvent(port, {
+        creatorId: bob,
+        group: bobsMembership,
+        fields: {
+          ...DINNER,
+          title: "Not Ann's",
+          startLocal: "2101-11-24T18:00",
+          endLocal: "2101-11-24T20:00",
+        },
+        now: T0,
+      });
+      await removeParticipant(port, await access(port, notAnns.id, bob), {
+        personId: ann,
+        now: T0,
+      });
+
+      const details = await resolveSharedLink(port, (await make(port, group, ann)) ?? "");
+      if (details === null) throw new Error("resolve");
+      expect(details).toMatchObject({
+        groupId: group,
+        groupName: "Jam cap",
+        keeperId: ann,
+        tier: "DETAILS",
+      });
+      const shown = await sharedEntries(port, details, T1);
+      expect(shown.map((e) => [e.title, e.visibility, e.url])).toEqual([
+        ["Dinner", "DETAILS", null],
+        ["Bob's", "BUSY", null],
+      ]);
+      const busy = await resolveSharedLink(port, (await make(port, group, ann, "BUSY")) ?? "");
+      if (busy === null) throw new Error("resolve");
+      expect((await sharedEntries(port, busy, T1)).map((e) => e.visibility)).toEqual([
+        "BUSY",
+        "BUSY",
+      ]);
+      // A link isn't a feed, and a feed isn't a link.
+      expect(await resolveFeed(port, (await make(port, group, ann)) ?? "")).toBeNull();
+      const own = await issueFeedLink(port, await cipherOf(), {
+        personId: ann,
+        groupId: group,
+        now: T1,
+      });
+      expect(await resolveSharedLink(port, own ?? "")).toBeNull();
+    });
+
+    it("an organizer replaces or stops one; nobody else can, and not from another group", async () => {
+      const port = await makePort();
+      const { ann, group, join } = await table(port, "stop");
+      const other = await table(port, "stop2");
+      const bob = await join("bob", "FULL");
+      const first = await make(port, group, ann, "BUSY", "Babysitter");
+      const [row] = await listSharedLinks(port, group);
+      const hash = row?.hash ?? "";
+      const cipher = await cipherOf();
+      expect(
+        await replaceSharedLink(port, cipher, { groupId: group, organizerId: bob, hash, now: T1 }),
+      ).toBeNull();
+      expect(
+        await replaceSharedLink(port, cipher, {
+          groupId: other.group,
+          organizerId: other.ann,
+          hash,
+          now: T1,
+        }),
+      ).toBeNull();
+      expect(await resolveSharedLink(port, first ?? "")).not.toBeNull();
+      const second = await replaceSharedLink(port, cipher, {
+        groupId: group,
+        organizerId: ann,
+        hash,
+        now: T1,
+      });
+      expect(await resolveSharedLink(port, first ?? "")).toBeNull();
+      expect(await resolveSharedLink(port, second ?? "")).toMatchObject({ tier: "BUSY" });
+      expect(
+        (await listSharedLinks(port, group)).map((l) => [l.label, l.tier, l.createdAt]),
+      ).toEqual([["Babysitter", "BUSY", T1]]);
+      const newHash = (await listSharedLinks(port, group))[0]?.hash ?? "";
+      expect(await stopSharedLink(port, { groupId: group, organizerId: bob, hash: newHash })).toBe(
+        false,
+      );
+      expect(
+        await stopSharedLink(port, { groupId: other.group, organizerId: other.ann, hash: newHash }),
+      ).toBe(false);
+      expect(await stopSharedLink(port, { groupId: group, organizerId: ann, hash: newHash })).toBe(
+        true,
+      );
+      expect(await resolveSharedLink(port, second ?? "")).toBeNull();
+      expect(await listSharedLinks(port, group)).toEqual([]);
+    });
+
+    it("when its keeper leaves or is erased, a link moves to the organizer who takes over", async () => {
+      const port = await makePort();
+      const { ann, group, membership, join } = await table(port, "move");
+      const bob = await join("bob", "FULL");
+      const cat = await join("cat", "FULL");
+      await createEvent(port, { creatorId: ann, group: membership, fields: DINNER, now: T0 });
+      const link = (await make(port, group, ann)) ?? "";
+      // Ann's own feed of the group must go with her, not move: only shared links move.
+      await issueFeedLink(port, await cipherOf(), { personId: ann, groupId: group, now: T0 });
+      // Ann leaves: Bob, the longest-standing member, becomes the organizer and keeps it.
+      await leaveGroup(port, membership, ann, T1);
+      expect(
+        await port.query({
+          sql: "SELECT person_id FROM feed_token WHERE kind = 'feed' AND group_id = ?",
+          params: [group],
+        }),
+      ).toEqual([]);
+      const moved = await resolveSharedLink(port, link);
+      expect(moved?.keeperId).toBe(bob);
+      expect((await listSharedLinks(port, group))[0]).toMatchObject({ keeperId: bob, madeBy: ann });
+      // Bob was on Ann's dinner (group events copy their members), so it is still shown.
+      expect(
+        (
+          await sharedEntries(
+            port,
+            moved ?? { groupId: group, groupName: "", keeperId: bob, tier: "DETAILS" },
+            T1,
+          )
+        ).map((e) => e.title),
+      ).toEqual(["Dinner"]);
+      // Bob is erased: Cat takes over, and the link with it.
+      await eraseAccount(port, bob, { now: T1 });
+      expect((await resolveSharedLink(port, link))?.keeperId).toBe(cat);
+      // Ann, who made it, is erased too: it was made by a former member now.
+      await eraseAccount(port, ann, { now: T1 });
+      expect((await listSharedLinks(port, group))[0]).toMatchObject({
+        keeperId: cat,
+        madeBy: null,
+      });
+      // However someone stops being an organizer, a link they still keep stops working.
+      await port.batch([
+        {
+          sql: "UPDATE group_member SET role = 'member' WHERE group_id = ? AND person_id = ?",
+          params: [group, cat],
+        },
+      ]);
+      expect(await resolveSharedLink(port, link)).toBeNull();
+    });
+
+    it("with another organizer already there, a link moves to them, not to the oldest member", async () => {
+      const port = await makePort();
+      const { ann, group, membership, join } = await table(port, "move2");
+      const bob = await join("bob", "FULL"); // the longest-standing member
+      const cat = await join("cat", "FULL");
+      await port.batch([
+        {
+          sql: "UPDATE group_member SET role = 'organizer' WHERE group_id = ? AND person_id = ?",
+          params: [group, cat],
+        },
+      ]);
+      const link = (await make(port, group, ann)) ?? "";
+      await leaveGroup(port, membership, ann, T1);
+      expect((await resolveSharedLink(port, link))?.keeperId).toBe(cat);
+      expect((await findGroupForMember(port, group, bob))?.role).toBe("member");
     });
   });
 }

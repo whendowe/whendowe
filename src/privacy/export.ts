@@ -2,7 +2,7 @@
 import { z } from "zod";
 import type { StoragePort } from "../db/port.js";
 import { canSee } from "../events/participation.js";
-import { listFeeds } from "../feeds/feed.js";
+import { listFeeds, listKeptLinks } from "../feeds/feed.js";
 import { visibilitySchema } from "../people/invite.js";
 
 // "Download your data" (DESIGN §10 rc21, GDPR Art. 15 and 20): one JSON document of the
@@ -220,6 +220,12 @@ export async function exportPerson(storage: StoragePort, personId: string, now: 
     calendar_feeds: (await listFeeds(storage, personId)).map((f) => ({
       feed: f.group === null ? "your events" : `events from ${f.group}`,
       made_at: f.createdAt,
+    })),
+    // The group calendar links you keep as an organizer (rc36), never the links themselves.
+    calendar_links_you_keep: (await listKeptLinks(storage, personId)).map((k) => ({
+      group: k.group,
+      for: k.label,
+      shows: k.tier === "BUSY" ? "busy only" : "details",
     })),
   };
 }
