@@ -1135,7 +1135,10 @@ it("only editors add or remove; the creator has no Remove button", async () => {
   expect((await addVia(h, ann, event, "x@example.org")).status).toBe(403);
 
   const asDm = await text(h, event, dm);
-  const removable = [...asDm.matchAll(/name="person" value="([^"]+)"/g)].map((m) => m[1]);
+  // Remove buttons only: the Copy their link buttons (rc36) carry a person too.
+  const removable = [
+    ...asDm.matchAll(/name="person" value="([^"]+)" \/><button type="submit">Remove</g),
+  ].map((m) => m[1]);
   expect(removable).toHaveLength(1); // Ann, not the DM
   const refused = await h.app.request(
     `${event}/people/remove`,
@@ -1153,7 +1156,10 @@ it("removing someone ends their access and their emailed link", async () => {
   expect((await h.app.request(new URL(link).pathname + new URL(link).search)).status).toBe(200);
   const guest = await signIn(h, "guest@example.org");
 
-  const person = /name="person" value="([^"]+)"/.exec(await text(h, event, dm))?.[1] ?? "";
+  const person =
+    /name="person" value="([^"]+)" \/><button type="submit">Remove</.exec(
+      await text(h, event, dm),
+    )?.[1] ?? "";
   const res = await h.app.request(
     `${event}/people/remove`,
     post({ csrf: dm.csrf, person }, dm.cookie),

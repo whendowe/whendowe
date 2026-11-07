@@ -193,7 +193,8 @@ test.describe("without JavaScript", () => {
   }) => {
     await open(page, "plan-thread-shared");
     await expect(page.getByRole("textbox", { name: "Message to paste" })).toBeVisible();
-    await expect(page.getByRole("button", { name: "Copy" })).toBeHidden();
+    // Exactly "Copy": the organizer's "Copy lea's link" buttons (rc36) are forms, and work.
+    await expect(page.getByRole("button", { name: "Copy", exact: true })).toBeHidden();
     await expect(page.getByRole("button", { name: "Share…" })).toBeHidden();
   });
 

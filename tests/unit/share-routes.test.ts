@@ -768,7 +768,8 @@ describe("the organizer and guests (rc30)", () => {
     expect(thread).toContain(`action="${PLANS_PATH}/${f.threadId}/guests/remove"`);
     expect(thread).toContain("<strong>Kestrel</strong> · not confirmed");
     expect(thread).toContain("Remove Kestrel");
-    expect(thread).not.toContain(`value="${f.david.id}"`);
+    // David has an account: no Remove for him (his own link, rc36, may be copied).
+    expect(thread).not.toContain(`name="guest" value="${f.david.id}"`);
     const remove = `${PLANS_PATH}/${f.threadId}/guests/remove`;
     const writes = org.writes;
     const forged = await org.request(remove, post({ guest: k.guestId }));
