@@ -247,7 +247,14 @@ const pages: Record<string, string> = {
   "event-edit": `${event}/edit`,
   "poll-new": `${group}/polls/new`,
   "account-feed": `${ACCOUNT_PATH}#feed`,
+  "group-shared": `${group}#shared`,
 };
+// The table's calendar shared with people outside it (rc36): two links, at both tiers.
+await app.request(
+  `${group}/shared`,
+  post({ csrf, label: "Grandparents", tier: "DETAILS" }, cookie),
+);
+await app.request(`${group}/shared`, post({ csrf, label: "Babysitter", tier: "BUSY" }, cookie));
 // The account page with a calendar feed link made (rc34): the link is random, the
 // screenshot masks it.
 await app.request(`${ACCOUNT_PATH}/feed`, post({ csrf }, cookie));
@@ -257,6 +264,16 @@ for (const [name, path] of Object.entries(pages)) {
   if (res.status !== 200) throw new Error(`${path} answered ${res.status}`);
   writeFileSync(new URL(`${name}.html`, OUT), await res.text());
 }
+
+// What the grandparents see: the details link opened with no account at all.
+const groupPage = await (await app.request(group, { headers: { cookie } })).text();
+const calendarLink = must(
+  /https:\/\/whendowe\.example(\/c\/[A-Za-z0-9_-]{43})/.exec(groupPage)?.[1],
+  "group calendar link",
+);
+const calendar = await app.request(calendarLink);
+if (calendar.status !== 200) throw new Error(`${calendarLink} answered ${calendar.status}`);
+writeFileSync(new URL("shared-calendar.html", OUT), await calendar.text());
 
 // The table's shared link (DESIGN §10 rc25), opened on a phone with no account: after
 // the pages above, so the thread page is drawn before it was shared.
@@ -370,4 +387,4 @@ const withGoogle = createApp({
 const signInPage = await withGoogle.request(SIGN_IN_PATH);
 if (signInPage.status !== 200) throw new Error(`sign-in answered ${signInPage.status}`);
 writeFileSync(new URL("sign-in.html", OUT), await signInPage.text());
-console.log(`rendered ${Object.keys(pages).length + 3} pages`);
+console.log(`rendered ${Object.keys(pages).length + 4} pages`);

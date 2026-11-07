@@ -4,10 +4,11 @@ import { createTokenCipher } from "../../src/crypto/tokens.js";
 import { createEvent, findEventForParticipant, setCancelled } from "../../src/events/event.js";
 import { issueFeedLink, makeSharedLink } from "../../src/feeds/feed.js";
 import { createGroup, findGroupForMember } from "../../src/people/group.js";
+import { acceptInvite, createInvite } from "../../src/people/invite.js";
 import { findOrCreatePerson } from "../../src/people/person.js";
 import { ACCOUNT_FEED_PATH, feedPath, sharedPath } from "../../src/web/routes/feeds.js";
 import { GROUPS_PATH } from "../../src/web/routes/groups.js";
-import { addAccount, browser, home, post } from "../property/one-browser.js";
+import { addAccount, browser, home, nameActive, post } from "../property/one-browser.js";
 
 // GET /feed/<token>.ics (DESIGN §10 rc34): the link is the key, so it works with no
 // cookie at all, never sets one and writes nothing; an unchanged feed answers 304.
@@ -387,4 +388,151 @@ it("a link's label is short and says who it's for", async () => {
       now: NOW,
     }),
   ).rejects.toThrow("Keep it under 40 characters.");
+});
+
+// --- The group page's calendar links (rc36, U3) ----------------------------------------
+
+async function groupWithMember(feedCipher?: Awaited<ReturnType<typeof createTokenCipher>>) {
+  const b = await browser({ now: () => NOW, ...(feedCipher === undefined ? {} : { feedCipher }) });
+  await addAccount(b, "ann@example.org");
+  await nameActive(b, "ann@example.org");
+  const made = await b.request(GROUPS_PATH, post({ csrf: (await home(b)).csrf, name: "Rope jam" }));
+  const group = made.headers.get("location") ?? "";
+  const ann = await findOrCreatePerson(b.storage, "ann@example.org", { now: NOW });
+  const membership = await findGroupForMember(b.storage, group.split("/").at(-1) ?? "", ann.id);
+  if (membership === null) throw new Error("membership");
+  const invite = await createInvite(b.storage, membership, {
+    email: "bob@example.org",
+    invitedBy: ann.id,
+    editTier: "view",
+    visibility: "FULL",
+    now: NOW,
+  });
+  if (!invite.ok) throw new Error(invite.reason);
+  await acceptInvite(b.storage, invite.token, NOW);
+  const bob = b.another();
+  await addAccount(bob, "bob@example.org");
+  await nameActive(bob, "bob@example.org");
+  return { b, bob, group };
+}
+
+const sharedLinkIn = (page: string) =>
+  /https:\/\/whendowe\.example\/c\/[A-Za-z0-9_-]{43}/.exec(page)?.[0] ?? null;
+
+it("an organizer makes, replaces and stops calendar links; every member sees that they exist", async () => {
+  const cipher = await createTokenCipher([{ id: 1, material: KEY }], 1);
+  const { b, bob, group } = await groupWithMember(cipher);
+  const before = await (await b.request(group)).text();
+  expect(before).toContain("Shared with people outside the group");
+  expect(before).toContain("Nobody outside the group can see its calendar.");
+  expect(before).toContain(`action="${group}/shared"`);
+  expect(await (await bob.request(group)).text()).toContain(
+    "Nobody outside the group can see its calendar.",
+  );
+
+  const csrf = (await home(b)).csrf;
+  const made = await b.request(
+    `${group}/shared`,
+    post({ csrf, label: "Grandparents", tier: "DETAILS" }),
+  );
+  expect(made.status).toBe(303);
+  expect(made.headers.get("location")).toBe(`${group}#shared`);
+  await b.request(`${group}/shared`, post({ csrf, label: "Babysitter", tier: "BUSY" }));
+  const page = await (await b.request(group)).text();
+  expect(page).toContain("<strong>Grandparents</strong> · details");
+  expect(page).toContain("<strong>Babysitter</strong> · busy only");
+  expect(page).toMatch(
+    /<strong>Grandparents<\/strong> · details <span class="muted">· 2101-10-01, made by ann<\/span>/,
+  );
+  expect(page).toContain(`action="${group}/shared/replace"`);
+  expect(page).toContain(`action="${group}/shared/stop"`);
+  expect(page).toMatch(/<button type="submit">New link<\/button>/);
+  const link = sharedLinkIn(page);
+  expect(link).not.toBeNull();
+  expect((await b.request(new URL(link ?? "").pathname)).status).toBe(200);
+  expect(page).toContain('aria-label="Link for Grandparents"');
+
+  // Bob, a member, sees that they exist and who they're for, but not the links or the buttons.
+  const asBob = await (await bob.request(group)).text();
+  expect(asBob).toContain("<strong>Grandparents</strong> · details");
+  expect(sharedLinkIn(asBob)).toBeNull();
+  expect(asBob).not.toContain("Link for");
+  expect(asBob).not.toContain("/c/");
+  expect(asBob).not.toContain("New link");
+  expect(asBob).not.toContain(`action="${group}/shared`);
+  const hash = /name="link" value="([^"]+)"/.exec(page)?.[1] ?? "";
+  const bobCsrf = (await home(bob)).csrf;
+  for (const [path, fields] of [
+    [`${group}/shared`, { label: "Mine", tier: "DETAILS" }],
+    [`${group}/shared/replace`, { link: hash }],
+    [`${group}/shared/stop`, { link: hash }],
+  ] as const) {
+    const res = await bob.request(path, post({ csrf: bobCsrf, ...fields }));
+    expect(res.status, path).toBe(403);
+    expect(await res.text()).toBe("Only the group's organizers share its calendar.");
+  }
+  expect((await b.request(`${group}/shared`, post({ label: "x", tier: "DETAILS" }))).status).toBe(
+    403,
+  );
+
+  // New link: the old one is dead. Stop sharing: gone.
+  const replaced = await b.request(`${group}/shared/replace`, post({ csrf, link: hash }));
+  expect(replaced.status).toBe(303);
+  expect((await b.request(new URL(link ?? "").pathname)).status).toBe(404);
+  const after = await (await b.request(group)).text();
+  const newHash = /name="link" value="([^"]+)"/.exec(after)?.[1] ?? "";
+  expect(newHash).not.toBe(hash);
+  expect((await b.request(`${group}/shared/stop`, post({ csrf, link: hash }))).status).toBe(409);
+  expect((await b.request(`${group}/shared/replace`, post({ csrf, link: hash }))).status).toBe(409);
+  for (const h of [
+    ...after.matchAll(/name="link" value="([^"]+)" \/>\s*<button type="submit">Stop sharing/g),
+  ])
+    await b.request(`${group}/shared/stop`, post({ csrf, link: h[1] ?? "" }));
+  expect(await (await b.request(group)).text()).toContain(
+    "Nobody outside the group can see its calendar.",
+  );
+});
+
+it("refuses a link with no label or tier, and from someone outside the group", async () => {
+  const cipher = await createTokenCipher([{ id: 1, material: KEY }], 1);
+  const { b, group } = await groupWithMember(cipher);
+  const csrf = (await home(b)).csrf;
+  for (const fields of [
+    { label: "  ", tier: "DETAILS" },
+    { label: "Grandparents", tier: "FULL" },
+  ]) {
+    const res = await b.request(`${group}/shared`, post({ csrf, ...fields }));
+    expect(res.status).toBe(409);
+    expect(await res.text()).toBe("That link isn't this group's.");
+  }
+  const eve = b.another();
+  await addAccount(eve, "eve@example.org");
+  const res = await eve.request(
+    `${group}/shared`,
+    post({ csrf: (await home(eve)).csrf, label: "Mine", tier: "DETAILS" }),
+  );
+  expect(res.status).toBe(404);
+  expect(await res.text()).toBe("Not found");
+});
+
+it("when the organizer leaves, the page says who made a link and who keeps it now", async () => {
+  const cipher = await createTokenCipher([{ id: 1, material: KEY }], 1);
+  const { b, bob, group } = await groupWithMember(cipher);
+  await b.request(
+    `${group}/shared`,
+    post({ csrf: (await home(b)).csrf, label: "Grandparents", tier: "DETAILS" }),
+  );
+  await b.request(`${group}/leave`, post({ csrf: (await home(b)).csrf }));
+  const page = await (await bob.request(group)).text();
+  // Ann has left: the group page names only its members, so she is a former member (rc21).
+  expect(page).toContain("made by a former member, now kept by bob");
+  expect(sharedLinkIn(page)).not.toBeNull(); // Bob is the organizer now: he sees it
+});
+
+it("without a key: organizers are told links aren't set up; members see nothing", async () => {
+  const { b, bob, group } = await groupWithMember();
+  expect(await (await b.request(group)).text()).toContain(
+    "Calendar links aren't set up on this server.",
+  );
+  expect(await (await bob.request(group)).text()).not.toContain("Shared with people outside");
 });

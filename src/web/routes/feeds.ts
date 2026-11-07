@@ -6,14 +6,22 @@ import {
   type FeedScope,
   feedEntries,
   issueFeedLink,
+  listSharedLinks,
+  makeSharedLink,
   type ResolvedSharedLink,
+  replaceSharedLink,
   resolveFeed,
   resolveSharedLink,
+  type SharedLink,
   sharedEntries,
+  sharedLabelSchema,
+  sharedTierSchema,
   shownFeedLink,
+  shownSharedLinks,
+  stopSharedLink,
 } from "../../feeds/feed.js";
 import { BUSY_SUMMARY, type FeedEntry, serializeFeed } from "../../feeds/ics.js";
-import { findGroupForMember } from "../../people/group.js";
+import { findGroupForMember, type GroupMembership, listMembers } from "../../people/group.js";
 import { hashToken } from "../../people/tokens.js";
 import { whenText } from "../../plans/weeks.js";
 import {
@@ -75,6 +83,71 @@ export async function feedSection(
   if (token === null)
     return html`<h2 id="feed">${heading}</h2><p class="muted">${what}</p>${button("Make a feed link")}`;
   return html`${PLAN_STYLE}<div class="pl">${linkShown(deps, token, heading, what, button)}</div>`;
+}
+
+/**
+ * "Shared with people outside the group" (§10 rc36), on a group's page. Every member sees
+ * that links exist — who each is for, what it shows, who made and keeps it — so nobody's
+ * schedule is published without them being able to see it. Organizers also see the links
+ * themselves, make new ones, and replace or stop each.
+ */
+export async function sharedLinksSection(
+  deps: FeedRouteDeps,
+  membership: GroupMembership,
+  csrf: string,
+): Promise<Html | string> {
+  const groupId = membership.group.id;
+  const heading = html`<h2 id="shared">Shared with people outside the group</h2>`;
+  const organizer = membership.role === "organizer";
+  if (deps.feedCipher === undefined)
+    return organizer
+      ? html`${heading}<p class="muted">Calendar links aren't set up on this server.</p>`
+      : "";
+  const links = await listSharedLinks(deps.storage, groupId);
+  const names = new Map(
+    (await listMembers(deps.storage, membership)).map((m) => [m.personId, m.shown.name]),
+  );
+  const nameOf = (id: string | null) =>
+    id === null ? "a former member" : (names.get(id) ?? "a former member");
+  const shown = organizer ? await shownSharedLinks(deps.storage, deps.feedCipher, groupId) : null;
+  const action = (what: string) => `${GROUPS_PATH}/${groupId}/shared${what}`;
+  const rowForm = (
+    what: string,
+    hash: string,
+    label: string,
+  ) => html`<form method="post" action="${action(what)}" style="display:inline">
+  <input type="hidden" name="csrf" value="${csrf}" />
+  <input type="hidden" name="link" value="${hash}" />
+  <button type="submit">${label}</button>
+</form>`;
+  const row = (l: SharedLink) => {
+    const token = shown?.get(l.hash);
+    const by =
+      l.madeBy === l.keeperId
+        ? `made by ${nameOf(l.madeBy)}`
+        : `made by ${nameOf(l.madeBy)}, now kept by ${nameOf(l.keeperId)}`;
+    return html`<li><strong>${l.label}</strong> · ${l.tier === "BUSY" ? "busy only" : "details"} <span class="muted">· ${l.createdAt.slice(0, 10)}, ${by}</span>${
+      token === undefined
+        ? ""
+        : html`${shareBox(`Link for ${l.label}`, new URL(sharedPath(token), deps.publicBaseUrl).toString(), 2)}
+<p>${rowForm("/replace", l.hash, "New link")} ${rowForm("/stop", l.hash, "Stop sharing")}</p>`
+    }</li>`;
+  };
+  const list =
+    links.length === 0
+      ? html`<p class="muted">Nobody outside the group can see its calendar.</p>`
+      : html`<p class="muted">People outside the group can see its calendar through these links: what's coming, never notes or anyone's name.</p>
+<ul class="stack">${links.map(row)}</ul>${organizer ? SHARE_BUTTONS : ""}`;
+  const make = organizer
+    ? html`<form method="post" action="${action("")}" class="stack">
+  <input type="hidden" name="csrf" value="${csrf}" />
+  <p><label>Who is it for? <input name="label" maxlength="40" required placeholder="Grandparents" /></label></p>
+  <p><label>What it shows <select name="tier"><option value="DETAILS">Details: what, when and where</option><option value="BUSY">Busy only: just the times</option></select></label></p>
+  <p><button type="submit">Make a link</button></p>
+</form>
+<p class="muted">Anyone with a link sees what it shows. If one gets out, make it a new link: the old one stops working at once.</p>`
+    : "";
+  return html`${PLAN_STYLE}<div class="pl">${heading}${list}${make}</div>`;
 }
 
 /** The link, the ways into a calendar app, and how slowly Google reads it. */
@@ -141,6 +214,66 @@ export function registerFeedRoutes(app: Hono<AppEnv>, deps: FeedRouteDeps): void
       });
       return c.redirect(`${GROUPS_PATH}/${membership.group.id}#feed`, 303);
     });
+
+    // Group calendar links (rc36): make, replace, stop. Organizers only, which the domain
+    // checks in the statement that writes; anyone else changes nothing.
+    const organizerPost = async (
+      c: Context<AppEnv>,
+      act: (
+        groupId: string,
+        organizerId: string,
+        form: Record<string, unknown>,
+      ) => Promise<boolean>,
+    ) => {
+      const me = requireSignedIn(c);
+      if (me instanceof Response) return me;
+      const form = await c.req.parseBody();
+      if (!(await verifyFormCsrf(me, form))) return rejectedPage(c, form);
+      const membership = await findGroupForMember(
+        deps.storage,
+        c.req.param("id") ?? "",
+        me.personId,
+      );
+      if (membership === null) return c.text("Not found", 404);
+      if (membership.role !== "organizer")
+        return c.text("Only the group's organizers share its calendar.", 403);
+      if (!(await act(membership.group.id, me.personId, form)))
+        return c.text("That link isn't this group's.", 409);
+      return c.redirect(`${GROUPS_PATH}/${membership.group.id}#shared`, 303);
+    };
+    const field = (form: Record<string, unknown>, key: string) =>
+      typeof form[key] === "string" ? form[key] : "";
+    app.post(`${GROUPS_PATH}/:id/shared`, (c) =>
+      organizerPost(c, async (groupId, organizerId, form) => {
+        const label = sharedLabelSchema.safeParse(field(form, "label"));
+        const tier = sharedTierSchema.safeParse(field(form, "tier"));
+        if (!label.success || !tier.success) return false;
+        const made = await makeSharedLink(deps.storage, cipher, {
+          groupId,
+          organizerId,
+          label: label.data,
+          tier: tier.data,
+          now: deps.now(),
+        });
+        return made !== null;
+      }),
+    );
+    app.post(`${GROUPS_PATH}/:id/shared/replace`, (c) =>
+      organizerPost(c, async (groupId, organizerId, form) => {
+        const made = await replaceSharedLink(deps.storage, cipher, {
+          groupId,
+          organizerId,
+          hash: field(form, "link"),
+          now: deps.now(),
+        });
+        return made !== null;
+      }),
+    );
+    app.post(`${GROUPS_PATH}/:id/shared/stop`, (c) =>
+      organizerPost(c, (groupId, organizerId, form) =>
+        stopSharedLink(deps.storage, { groupId, organizerId, hash: field(form, "link") }),
+      ),
+    );
   }
 
   app.get(`${FEED_PATH}/:file`, async (c) => {

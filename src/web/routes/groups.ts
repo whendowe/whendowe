@@ -36,7 +36,7 @@ import {
 } from "../session.js";
 import { appearanceSection, saveAppearance } from "./account.js";
 import { eventSummary } from "./events.js";
-import { feedSection } from "./feeds.js";
+import { feedSection, sharedLinksSection } from "./feeds.js";
 
 // Groups (MVP-1 slice D1). Every route needs a signed-in person; every group page
 // goes through findGroupForMember, which is the only way to read a group at all, so
@@ -199,6 +199,7 @@ ${events.length === 0 ? html`<p class="muted">Nothing planned yet.</p>` : html`<
             html`<li>${who(m.shown)}${m.personId === me.personId ? " (you)" : ""}${m.role === "organizer" ? html` <span class="muted">· organizer</span>` : ""}</li>`,
         )}</ul>
 ${await feedSection(deps, { personId: me.personId, groupId: membership.group.id }, me.csrfToken)}
+${await sharedLinksSection(deps, membership, me.csrfToken)}
 ${await appearanceSection(deps.storage, { kind: "group", id: membership.group.id }, me, `${GROUPS_PATH}/${membership.group.id}/me`, "group")}
 ${membership.role === "organizer" ? inviteForm(membership, me.csrfToken, null) : ""}
 ${retentionSection({
