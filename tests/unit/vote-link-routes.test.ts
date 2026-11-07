@@ -501,11 +501,11 @@ it("the organizer copies a member's own link instead of emailing it: fresh, show
   expect(res.status).toBe(200);
   expect(res.headers.get("cache-control")).toBe("no-store");
   const body = await res.text();
-  // In the name the thread shows him by: he chose none, so a guest name (rc21).
-  const name =
-    /<strong>([^<]+)<\/strong><\/span><form method="post" action="[^"]+\/links\/copy"/.exec(
-      page,
-    )?.[1];
+  // In the name the thread shows him by: he chose none, so a guest name (rc21). His row,
+  // by his id: rows go in name order, and guest names are random, so his isn't always first.
+  const name = new RegExp(
+    `<strong>([^<]+)</strong></span><form method="post" action="[^"]+/links/copy"><input type="hidden" name="csrf" value="[^"]+" /><input type="hidden" name="person" value="${david}" />`,
+  ).exec(page)?.[1];
   expect(name).toMatch(/^Guest \d+$/);
   expect(body).toContain(`This link answers as ${name}. Send it only to ${name}.`);
   expect(body).toContain("data-share-sheet"); // to send it in a chat
