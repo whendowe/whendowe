@@ -159,6 +159,10 @@ export function buildFlowClearCookie(options: CookieOptions = {}): string {
 
 /** Extract the raw flow cookie from a `Cookie` request header, if present. */
 export function readFlowCookie(cookieHeader: string | null | undefined): string | null {
+  return readCookie(cookieHeader, FLOW_COOKIE_NAME);
+}
+
+function readCookie(cookieHeader: string | null | undefined, name: string): string | null {
   if (cookieHeader === undefined || cookieHeader === null || cookieHeader.length === 0) {
     return null;
   }
@@ -167,10 +171,75 @@ export function readFlowCookie(cookieHeader: string | null | undefined): string 
     if (separator === -1) {
       continue;
     }
-    if (pair.slice(0, separator).trim() === FLOW_COOKIE_NAME) {
+    if (pair.slice(0, separator).trim() === name) {
       const value = pair.slice(separator + 1).trim();
       return value.length === 0 ? null : value;
     }
   }
   return null;
+}
+
+// A granted connection waiting for its calendar to be chosen (rc40). The callback has
+// the tokens before the person has picked a calendar, and a connection row needs one
+// (`calendar_id` is NOT NULL). So, as the flow itself does, the grant waits in the
+// browser that asked for it: ENCRYPTED with the token cipher, exactly as the tokens
+// are at rest in the database, scoped to /oauth, for ten minutes, and cleared on use.
+// Nothing is stored until a calendar is chosen, so walking away stores nothing.
+
+export const PENDING_COOKIE_NAME = "wdw_oauth_pending";
+
+const pendingSchema = z.object({
+  /** The signed-in person who granted it; choosing requires the same one. */
+  personId: z.string().min(1),
+  accountEmail: z.string().min(1),
+  /** The main calendar's zone, for a new calendar. */
+  timeZone: z.string().min(1).nullable(),
+  accessToken: z.string().min(1),
+  refreshToken: z.string().min(1),
+  expiresAt: z.string().min(1),
+  issuedAt: z.number().int().nonnegative(),
+});
+
+export type PendingConnection = z.infer<typeof pendingSchema>;
+
+export async function sealPending(
+  cipher: TokenCipher,
+  pending: PendingConnection,
+): Promise<string> {
+  return encodeURIComponent(await cipher.encrypt(JSON.stringify(pendingSchema.parse(pending))));
+}
+
+/** Decrypt and validate; throws on anything tampered, malformed or expired. */
+export async function unsealPending(
+  cipher: TokenCipher,
+  cookieValue: string,
+  nowEpochSeconds: number,
+): Promise<PendingConnection> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(await cipher.decrypt(decodeURIComponent(cookieValue)));
+  } catch {
+    // Neither the cookie nor the reason: either could carry a token.
+    throw new Error("pending connection cookie is unreadable");
+  }
+  const result = pendingSchema.safeParse(parsed);
+  if (!result.success) throw new Error("pending connection cookie is malformed");
+  const pending = result.data;
+  const age = nowEpochSeconds - pending.issuedAt;
+  if (age > FLOW_TTL_SECONDS || age < -CLOCK_SKEW_TOLERANCE_SECONDS) {
+    throw new Error("pending connection expired");
+  }
+  return pending;
+}
+
+export function buildPendingSetCookie(sealedValue: string, options: CookieOptions = {}): string {
+  return `${PENDING_COOKIE_NAME}=${sealedValue}; ${attributes(FLOW_TTL_SECONDS, options)}`;
+}
+
+export function buildPendingClearCookie(options: CookieOptions = {}): string {
+  return `${PENDING_COOKIE_NAME}=; ${attributes(0, options)}`;
+}
+
+export function readPendingCookie(cookieHeader: string | null | undefined): string | null {
+  return readCookie(cookieHeader, PENDING_COOKIE_NAME);
 }

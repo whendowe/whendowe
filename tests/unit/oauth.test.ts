@@ -128,10 +128,16 @@ it("forces consent so reconnects re-issue a refresh token", () => {
   expect(authorizeParams().get("prompt")).toBe("consent");
 });
 
-it("requests exactly the two calendar scopes, space-delimited", () => {
+it("requests exactly the three narrow calendar scopes, space-delimited (rc40)", () => {
   const scope = authorizeParams().get("scope");
   expect(scope).toBe(GOOGLE_CALENDAR_SCOPES.join(" "));
-  expect(GOOGLE_CALENDAR_SCOPES).toHaveLength(2);
+  expect(scope?.split(" ")).toEqual([
+    "https://www.googleapis.com/auth/calendar.events",
+    "https://www.googleapis.com/auth/calendar.calendarlist.readonly",
+    "https://www.googleapis.com/auth/calendar.app.created",
+  ]);
+  // Never full calendar access, which could share and delete every calendar.
+  expect(scope?.split(" ")).not.toContain("https://www.googleapis.com/auth/calendar");
   // §13 least scope: no Gmail, Drive, or full-account scopes creeping in.
   expect(scope).not.toMatch(/gmail|drive|userinfo/);
 });

@@ -7,13 +7,17 @@ import { sqliteStoragePort } from "../../src/db/sqlite.js";
 import { UUIDV7_PATTERN } from "../../src/ids.js";
 import type { MailMessage } from "../../src/mail/port.js";
 import { GOOGLE_AUTHORIZE_ENDPOINT } from "../../src/oauth/authorize.js";
-import { FLOW_COOKIE_NAME } from "../../src/oauth/flow-cookie.js";
+import { FLOW_COOKIE_NAME, PENDING_COOKIE_NAME } from "../../src/oauth/flow-cookie.js";
 import type { FetchLike } from "../../src/oauth/http.js";
-import { GOOGLE_PRIMARY_CALENDAR_URL } from "../../src/oauth/primary-calendar.js";
+import {
+  GOOGLE_CALENDAR_LIST_URL,
+  GOOGLE_CALENDARS_URL,
+  GOOGLE_PRIMARY_CALENDAR_URL,
+} from "../../src/oauth/primary-calendar.js";
 import { GOOGLE_REVOKE_ENDPOINT, GOOGLE_TOKEN_ENDPOINT } from "../../src/oauth/token-exchange.js";
 import { createApp } from "../../src/web/app.js";
 import { CONFIRM_PATH, GOOGLE_SIGN_IN_PATH, SIGN_IN_PATH } from "../../src/web/routes/auth.js";
-import { CALLBACK_PATH, CONNECT_PATH } from "../../src/web/routes/oauth.js";
+import { CALLBACK_PATH, CHOOSE_PATH, CONNECT_PATH } from "../../src/web/routes/oauth.js";
 import { loadMigrationSql } from "../conftest.js";
 
 // Route-level tests against a real in-memory SQLite database and a fake fetch, so
@@ -54,14 +58,34 @@ async function makeStorage() {
 }
 
 interface GoogleFakeOptions {
-  readonly calendarSummary?: string | null;
   readonly calendarId?: string;
   readonly tokenStatus?: number;
   readonly tokenBody?: string;
+  /** The account's calendar list, as Google returns its entries (rc40). */
+  readonly calendars?: readonly Record<string, unknown>[];
+  /** Every request, for tests that check what was asked of Google. */
+  readonly log?: { url: string; method: string; body: string | undefined }[];
+}
+
+const MADE_ID = "made-by-us@group.calendar.google.com";
+
+const CALENDARS: readonly Record<string, unknown>[] = [
+  { id: "family@group.calendar.google.com", summary: "Family", accessRole: "writer" },
+  { id: "someone@example.com", summary: "Someone", primary: true, accessRole: "owner" },
+];
+
+function json(body: unknown, status = 200) {
+  return Promise.resolve({
+    ok: status < 300,
+    status,
+    text: () => Promise.resolve(JSON.stringify(body)),
+  });
 }
 
 function googleFake(options: GoogleFakeOptions = {}): FetchLike {
-  return (url) => {
+  const calendars = options.calendars ?? CALENDARS;
+  return (url, init) => {
+    options.log?.push({ url, method: init.method, body: init.body });
     if (url === GOOGLE_TOKEN_ENDPOINT) {
       const body =
         options.tokenBody ??
@@ -87,17 +111,19 @@ function googleFake(options: GoogleFakeOptions = {}): FetchLike {
           Promise.resolve(
             JSON.stringify({
               id: options.calendarId ?? "someone@example.com",
-              // `?? ` would collapse an intentional null into the default, which
-              // is exactly the fallback this fake needs to be able to exercise.
-              summary:
-                options.calendarSummary === undefined
-                  ? "Someone's calendar"
-                  : options.calendarSummary,
+              summary: "Someone's calendar",
               timeZone: "Europe/Prague",
             }),
           ),
       });
     }
+    if (url.startsWith(`${GOOGLE_CALENDAR_LIST_URL}?`)) return json({ items: calendars });
+    if (url.startsWith(`${GOOGLE_CALENDAR_LIST_URL}/`)) {
+      const id = decodeURIComponent(url.slice(GOOGLE_CALENDAR_LIST_URL.length + 1));
+      const entry = calendars.find((c) => c.id === id);
+      return entry === undefined ? json({ error: { message: "Not Found" } }, 404) : json(entry);
+    }
+    if (url === GOOGLE_CALENDARS_URL) return json({ id: MADE_ID, summary: "WhenDoWe" });
     throw new Error(`unexpected fetch to ${url}`);
   };
 }
@@ -206,6 +232,33 @@ async function connections(h: Harness) {
   });
 }
 
+/** The sealed pending connection a callback set (rc40), as a Cookie pair. */
+function pendingCookie(res: Response): string {
+  const set = res.headers.getSetCookie().find((c) => c.startsWith(`${PENDING_COOKIE_NAME}=`));
+  return set?.split(";")[0] ?? "";
+}
+
+/** Choose a calendar on the page a first connection shows (rc40). */
+async function choose(
+  h: Harness,
+  pending: string,
+  calendar: string,
+  as: Session = h.session,
+): Promise<Response> {
+  return h.app.request(
+    CHOOSE_PATH,
+    form({ csrf: as.csrf, calendar }, [as.cookie, pending].filter((c) => c !== "").join("; ")),
+  );
+}
+
+/** Connect all the way: Google's consent, then the calendar choice. */
+async function connect(h: Harness, calendar = "new"): Promise<Response> {
+  const { cookie, state } = await startFlow(h);
+  const chooser = await callback(h, `code=c&state=${encodeURIComponent(state)}`, cookie);
+  expect(chooser.status).toBe(200);
+  return choose(h, pendingCookie(chooser), calendar);
+}
+
 // --- the connect leg ---
 
 it("redirects to Google with the PKCE challenge and sets the flow cookie", async () => {
@@ -253,7 +306,9 @@ it("offers the connect button only to a signed-in person, carrying their CSRF to
   ).text();
   expect(signedIn).toContain(CONNECT_PATH);
   expect(signedIn).toContain(`name="csrf" value="${h.session.csrf}"`);
-  expect(await (await h.app.request("/")).text()).not.toContain(CONNECT_PATH);
+  const signedOut = await h.app.request("/");
+  expect(signedOut.status).toBe(200);
+  expect(await signedOut.text()).not.toContain(CONNECT_PATH);
   const bare = await (await createApp().request("/")).text();
   expect(bare).not.toContain(CONNECT_PATH);
   expect(bare).toContain("not configured");
@@ -312,6 +367,12 @@ it("stores the connection under the person who connected it, with a UUIDv7 id by
     headers: { cookie: `${me.cookie}; ${flowCookie}` },
   });
   expect(done.status).toBe(200);
+  const pending = pendingCookie(done);
+  const chosen = await app.request(
+    CHOOSE_PATH,
+    form({ csrf: me.csrf, calendar: "new" }, `${me.cookie}; ${pending}`),
+  );
+  expect(chosen.status).toBe(200);
   const [row] = await storage.query({
     sql: "SELECT id, owner_id FROM calendar_connection",
     params: [],
@@ -345,12 +406,13 @@ it("refuses the callback if nobody is signed in by then", async () => {
 
 // --- the callback leg, happy path ---
 
-it("completes the flow and stores an encrypted connection", async () => {
+it("completes the flow and stores an encrypted connection to a new WhenDoWe calendar", async () => {
   const h = await harness();
-  const { cookie, state } = await startFlow(h);
-
-  const response = await callback(h, `code=auth-code&state=${encodeURIComponent(state)}`, cookie);
+  const response = await connect(h);
   expect(response.status).toBe(200);
+  expect(await response.text()).toContain(
+    "<h1>Calendar connected</h1><p>Connected <strong>WhenDoWe</strong>.</p>",
+  );
 
   const rows = await connections(h);
   expect(rows).toHaveLength(1);
@@ -358,7 +420,8 @@ it("completes the flow and stores an encrypted connection", async () => {
   expect(row?.owner_id).toBe(h.personId);
   expect(row?.provider).toBe("google");
   expect(row?.account_email).toBe("someone@example.com");
-  expect(row?.calendar_id).toBe("someone@example.com");
+  expect(row?.calendar_id).toBe(MADE_ID);
+  expect(row?.made_by_us).toBe(1);
   expect(row?.status).toBe("active");
   expect(row?.token_expiry).toBe("2026-09-12T13:00:00.000Z");
 
@@ -377,10 +440,20 @@ it("clears the flow cookie after use", async () => {
   expect(response.headers.get("set-cookie")).toContain("Max-Age=0");
 });
 
-it("upserts on reconnect instead of duplicating or colliding", async () => {
-  const h = await harness();
-  const first = await startFlow(h);
-  await callback(h, `code=code-1&state=${encodeURIComponent(first.state)}`, first.cookie);
+it("upserts on reconnect instead of duplicating or colliding, keeping the calendar", async () => {
+  // Each consent issues a new grant: the reconnect must store the second one.
+  let grants = 0;
+  const h = await harness((url, init) => {
+    if (url !== GOOGLE_TOKEN_ENDPOINT) return googleFake()(url, init);
+    grants++;
+    return json({
+      access_token: `${ACCESS_TOKEN}-${grants}`,
+      refresh_token: `${REFRESH_TOKEN}-${grants}`,
+      expires_in: 3600,
+      token_type: "Bearer",
+    });
+  });
+  await connect(h);
 
   // Simulate a cursor established by a later sync, which a reconnect must not drop.
   await h.storage.batch([
@@ -392,7 +465,14 @@ it("upserts on reconnect instead of duplicating or colliding", async () => {
 
   h.now.value = "2026-09-12T14:00:00.000Z";
   const second = await startFlow(h);
-  await callback(h, `code=code-2&state=${encodeURIComponent(second.state)}`, second.cookie);
+  const again = await callback(
+    h,
+    `code=code-2&state=${encodeURIComponent(second.state)}`,
+    second.cookie,
+  );
+  // A reconnect asks nothing: it keeps the calendar it already writes to.
+  expect(await again.text()).toContain("<h1>Calendar reconnected</h1><p>Reconnected.</p>");
+  expect(pendingCookie(again)).toBe("");
 
   const rows = await connections(h);
   // (owner_id, provider, calendar_id) is UNIQUE — a plain INSERT would have thrown.
@@ -401,6 +481,229 @@ it("upserts on reconnect instead of duplicating or colliding", async () => {
   expect(rows[0]?.token_expiry).toBe("2026-09-12T15:00:00.000Z");
   // A live cursor survives reconnect; a dead one is handled by 410 GONE (§12).
   expect(rows[0]?.sync_token).toBe("cursor-1");
+  expect(rows[0]?.calendar_id).toBe(MADE_ID);
+  expect(rows[0]?.made_by_us).toBe(1);
+  expect(await h.cipher.decrypt(String(rows[0]?.access_token_enc))).toBe(`${ACCESS_TOKEN}-2`);
+  expect(await h.cipher.decrypt(String(rows[0]?.refresh_token_enc))).toBe(`${REFRESH_TOKEN}-2`);
+});
+
+// --- choosing the calendar (rc40) ---
+
+it("asks a first connection which calendar, a new one chosen, the main one first; stores nothing yet", async () => {
+  const h = await harness();
+  const { cookie, state } = await startFlow(h);
+  const res = await callback(h, `code=c&state=${encodeURIComponent(state)}`, cookie);
+  const page = await res.text();
+  expect(page).toContain("<h1>Choose a calendar</h1>");
+  expect(page).toContain(`action="${CHOOSE_PATH}"`);
+  expect(page).toContain(`name="csrf" value="${h.session.csrf}"`);
+  expect(page).toContain('value="new" checked');
+  const main = page.indexOf('value="someone@example.com"');
+  const family = page.indexOf('value="family@group.calendar.google.com"');
+  expect(main).toBeGreaterThan(page.indexOf('value="new"'));
+  expect(family).toBeGreaterThan(main);
+  expect(page).toContain("(your main calendar)");
+  expect(await connections(h)).toHaveLength(0);
+  // The grant waits sealed in this browser, on /oauth only, for ten minutes, never readable.
+  const set = res.headers.getSetCookie().find((c) => c.startsWith(`${PENDING_COOKIE_NAME}=`));
+  expect(set).toContain("HttpOnly");
+  expect(set).toContain("Path=/oauth");
+  expect(set).toContain("Max-Age=600");
+  expect(set).not.toContain(ACCESS_TOKEN);
+  expect(set).not.toContain(encodeURIComponent(REFRESH_TOKEN));
+});
+
+it("makes the new calendar in the main calendar's zone, named WhenDoWe", async () => {
+  const log: { url: string; method: string; body: string | undefined }[] = [];
+  const h = await harness(googleFake({ log }));
+  await connect(h);
+  const made = log.filter((r) => r.url === GOOGLE_CALENDARS_URL);
+  expect(made).toHaveLength(1);
+  expect(made[0]?.method).toBe("POST");
+  expect(JSON.parse(made[0]?.body ?? "")).toEqual({
+    summary: "WhenDoWe",
+    timeZone: "Europe/Prague",
+  });
+});
+
+it("connects a calendar of their own, checked with Google, and makes none", async () => {
+  const log: { url: string; method: string; body: string | undefined }[] = [];
+  const h = await harness(googleFake({ log }));
+  const res = await connect(h, "family@group.calendar.google.com");
+  expect(await res.text()).toContain("Connected <strong>Family</strong>");
+  const [row] = await connections(h);
+  expect(row?.calendar_id).toBe("family@group.calendar.google.com");
+  expect(row?.made_by_us).toBe(0);
+  expect(log.some((r) => r.url === GOOGLE_CALENDARS_URL)).toBe(false);
+});
+
+it("refuses a calendar Google says can't take events, or doesn't know", async () => {
+  const h = await harness(
+    googleFake({
+      calendars: [
+        ...CALENDARS,
+        { id: "holidays@group.v.calendar.google.com", summary: "Holidays", accessRole: "reader" },
+      ],
+    }),
+  );
+  for (const id of ["holidays@group.v.calendar.google.com", "someone-elses@example.com"]) {
+    const { cookie, state } = await startFlow(h);
+    const chooser = await callback(h, `code=c&state=${encodeURIComponent(state)}`, cookie);
+    const res = await choose(h, pendingCookie(chooser), id);
+    expect(res.status).toBe(400);
+    expect(await res.text()).toContain(
+      "<h1>Not connected</h1><p>That calendar can't take events. Please start again.</p>",
+    );
+  }
+  expect(await connections(h)).toHaveLength(0);
+});
+
+it("lists only calendars that can take events", async () => {
+  const h = await harness(
+    googleFake({
+      calendars: [
+        ...CALENDARS,
+        { id: "ro@example.com", summary: "Read only", accessRole: "reader" },
+      ],
+    }),
+  );
+  const { cookie, state } = await startFlow(h);
+  const page = await (
+    await callback(h, `code=c&state=${encodeURIComponent(state)}`, cookie)
+  ).text();
+  expect(page).toContain("Family");
+  expect(page).not.toContain("ro@example.com");
+});
+
+it("refuses a choice without the pending grant, from someone else, or without CSRF", async () => {
+  const h = await harness();
+  const { cookie, state } = await startFlow(h);
+  const chooser = await callback(h, `code=c&state=${encodeURIComponent(state)}`, cookie);
+  const pending = pendingCookie(chooser);
+
+  const none = await choose(h, "", "new");
+  expect(none.status).toBe(400);
+  expect(await none.text()).toContain("<h1>Attempt expired</h1>");
+  const other = await signIn(h, "someone-else@example.org");
+  const stopped = await choose(h, pending, "new", other);
+  expect(stopped.status).toBe(403);
+  expect(await stopped.text()).toContain(
+    "<h1>Connection stopped</h1><p>You're no longer signed in as the person who started this.",
+  );
+  const forged = await h.app.request(
+    CHOOSE_PATH,
+    form({ csrf: "nope", calendar: "new" }, `${h.session.cookie}; ${pending}`),
+  );
+  expect(forged.status).toBe(403);
+  expect(await forged.text()).toContain("<h1>Request rejected</h1><p>Please try again.</p>");
+  const signedOut = await h.app.request(CHOOSE_PATH, form({ calendar: "new" }, pending));
+  expect(signedOut.status).toBe(303);
+  expect(signedOut.headers.get("location")).toBe(SIGN_IN_PATH);
+  const blank = await choose(h, pending, "");
+  expect(blank.status).toBe(400);
+  expect(await blank.text()).toContain("<h1>Choose a calendar</h1><p>Please choose one.</p>");
+  expect(await connections(h)).toHaveLength(0);
+});
+
+it("refuses an expired or tampered pending grant, and clears it either way", async () => {
+  const h = await harness();
+  const { cookie, state } = await startFlow(h);
+  const chooser = await callback(h, `code=c&state=${encodeURIComponent(state)}`, cookie);
+  const pending = pendingCookie(chooser);
+
+  const value = pending.slice(`${PENDING_COOKIE_NAME}=`.length);
+  const bytes = base64ToBytes(decodeURIComponent(value));
+  const last = bytes.length - 1;
+  bytes[last] = (bytes[last] ?? 0) ^ 0x01;
+  const tampered = await choose(
+    h,
+    `${PENDING_COOKIE_NAME}=${encodeURIComponent(bytesToBase64(bytes))}`,
+    "new",
+  );
+  expect(tampered.status).toBe(400);
+  expect(tampered.headers.get("set-cookie")).toContain(`${PENDING_COOKIE_NAME}=; `);
+
+  h.now.value = "2026-09-12T12:11:00.000Z";
+  expect((await choose(h, pending, "new")).status).toBe(400);
+  expect(await connections(h)).toHaveLength(0);
+});
+
+it("allows one Google connection per account: a second choice is refused", async () => {
+  const h = await harness();
+  // Two tabs both reach the choice; the first wins.
+  const tabs = [];
+  for (let i = 0; i < 2; i++) {
+    const { cookie, state } = await startFlow(h);
+    tabs.push(
+      pendingCookie(await callback(h, `code=c&state=${encodeURIComponent(state)}`, cookie)),
+    );
+  }
+  expect((await choose(h, tabs[0] ?? "", "new")).status).toBe(200);
+  const second = await choose(h, tabs[1] ?? "", "family@group.calendar.google.com");
+  expect(second.status).toBe(409);
+  expect(await second.text()).toContain(
+    "<h1>Already connected</h1><p>This account already has a calendar connected.</p>",
+  );
+  expect(await connections(h)).toHaveLength(1);
+});
+
+it("refuses to reconnect through a different Google account, and gives that grant back", async () => {
+  const revoked: string[] = [];
+  let account = "someone@example.com";
+  const h = await harness((url, init) => {
+    if (url === GOOGLE_REVOKE_ENDPOINT) {
+      revoked.push(new URLSearchParams(init.body ?? "").get("token") ?? "");
+      return json({});
+    }
+    return googleFake({ calendarId: account })(url, init);
+  });
+  await connect(h);
+  account = "other@example.com";
+  const { cookie, state } = await startFlow(h);
+  const res = await callback(h, `code=c&state=${encodeURIComponent(state)}`, cookie);
+  expect(res.status).toBe(409);
+  const text = await res.text();
+  expect(text).toContain("<h1>Not connected</h1>");
+  expect(text).toContain("someone@example.com");
+  expect(revoked).toEqual([REFRESH_TOKEN]);
+  const [row] = await connections(h);
+  expect(row?.account_email).toBe("someone@example.com");
+});
+
+it("home says where the calendar is connected, and offers to reconnect after auth_error", async () => {
+  const h = await harness();
+  const home = async () =>
+    (await h.app.request("/", { headers: { cookie: h.session.cookie } })).text();
+  expect(await home()).toContain("Connect Google Calendar");
+  await connect(h);
+  const connected = await home();
+  expect(connected).toContain("Google Calendar connected: someone@example.com.");
+  expect(connected).not.toContain(`action="${CONNECT_PATH}"`);
+  await h.storage.batch([
+    { sql: "UPDATE calendar_connection SET status = 'auth_error'", params: [] },
+  ]);
+  const broken = await home();
+  expect(broken).toContain("Reconnect Google Calendar");
+  expect(broken).toContain(`action="${CONNECT_PATH}"`);
+  // Someone else's connection is theirs: this person still has none.
+  const other = await signIn(h, "someone-else@example.org");
+  const theirs = await (await h.app.request("/", { headers: { cookie: other.cookie } })).text();
+  expect(theirs).toContain("Connect Google Calendar");
+  expect(theirs).not.toContain("someone@example.com");
+});
+
+it("a connection of another provider is not this account's Google connection", async () => {
+  const h = await harness();
+  await h.storage.batch([
+    {
+      sql: `INSERT INTO calendar_connection (id, owner_id, provider, account_email, calendar_id,
+              access_token_enc, refresh_token_enc, status, created_at, updated_at)
+            VALUES ('x', ?, 'caldav', 'dav@example.org', 'dav', 'e', 'e', 'active', ?, ?)`,
+      params: [h.personId, NOW, NOW],
+    },
+  ]);
+  const home = await (await h.app.request("/", { headers: { cookie: h.session.cookie } })).text();
+  expect(home).toContain("Connect Google Calendar");
 });
 
 // --- the callback leg, rejections ---
@@ -486,18 +789,30 @@ it("escapes a hostile error parameter", async () => {
   expect(html).toContain("&lt;script&gt;");
 });
 
-it("falls back to the calendar id when there is no summary", async () => {
-  const h = await harness(googleFake({ calendarSummary: null }));
+it("names a calendar by its id when it has no name", async () => {
+  const h = await harness(
+    googleFake({ calendars: [{ id: "nameless@group.calendar.google.com", accessRole: "owner" }] }),
+  );
   const { cookie, state } = await startFlow(h);
   const response = await callback(h, `code=auth-code&state=${encodeURIComponent(state)}`, cookie);
   expect(response.status).toBe(200);
-  expect(await response.text()).toContain("someone@example.com");
+  expect(await response.text()).toContain("> nameless@group.calendar.google.com</label>");
 });
 
 it("escapes a calendar summary containing markup", async () => {
   // The summary is whatever the account holder typed into Google (§13: provider
   // content is untrusted input in both directions).
-  const h = await harness(googleFake({ calendarSummary: '<img src=x onerror="alert(1)">' }));
+  const h = await harness(
+    googleFake({
+      calendars: [
+        {
+          id: "x@group.calendar.google.com",
+          summary: '<img src=x onerror="alert(1)">',
+          accessRole: "owner",
+        },
+      ],
+    }),
+  );
   const { cookie, state } = await startFlow(h);
   const response = await callback(h, `code=auth-code&state=${encodeURIComponent(state)}`, cookie);
   const html = await response.text();
@@ -722,8 +1037,7 @@ it("deleting an account revokes its calendar grant at Google, then deletes the t
     }
     return base(url, init);
   });
-  const { cookie, state } = await startFlow(h);
-  await callback(h, `code=c&state=${encodeURIComponent(state)}`, cookie);
+  await connect(h);
   expect(await connections(h)).toHaveLength(1);
 
   const asked = await h.app.request(

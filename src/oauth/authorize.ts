@@ -5,12 +5,15 @@
 
 export const GOOGLE_AUTHORIZE_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth";
 
-// §12 + §13 least-scope: exactly the two scopes the reconcile loop uses, nothing
-// more. Both are "sensitive" — public use needs OAuth/brand verification but not
-// the CASA security assessment.
+// §12 + §13 least-scope (rc40): the fewest scopes that let someone choose a calendar,
+// or have a new one made, and put events in it. Not `.../auth/calendar`, which could
+// also share and delete every calendar the account has: a leaked token does less.
+// All three are "sensitive" — public use needs OAuth/brand verification but not the
+// CASA security assessment — so the narrow set costs no more than the broad one.
 export const GOOGLE_CALENDAR_SCOPES: readonly string[] = [
-  "https://www.googleapis.com/auth/calendar",
   "https://www.googleapis.com/auth/calendar.events",
+  "https://www.googleapis.com/auth/calendar.calendarlist.readonly",
+  "https://www.googleapis.com/auth/calendar.app.created",
 ];
 
 export interface AuthorizeRequest {

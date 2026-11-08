@@ -9,10 +9,16 @@ import { buildAuthorizeUrl } from "../../oauth/authorize.js";
 import {
   buildFlowClearCookie,
   buildFlowSetCookie,
+  buildPendingClearCookie,
+  buildPendingSetCookie,
   type OAuthFlow,
+  type PendingConnection,
   readFlowCookie,
+  readPendingCookie,
   sealFlow,
+  sealPending,
   unsealFlow,
+  unsealPending,
 } from "../../oauth/flow-cookie.js";
 import type { FetchLike } from "../../oauth/http.js";
 import {
@@ -21,8 +27,18 @@ import {
   readGoogleIdToken,
 } from "../../oauth/identity.js";
 import { createPkcePair, createState, timingSafeEqual } from "../../oauth/pkce.js";
-import { fetchPrimaryCalendar } from "../../oauth/primary-calendar.js";
-import { exchangeAuthorizationCode, exchangeForIdToken } from "../../oauth/token-exchange.js";
+import {
+  type CalendarChoice,
+  createCalendar,
+  fetchPrimaryCalendar,
+  findWritableCalendar,
+  listWritableCalendars,
+} from "../../oauth/primary-calendar.js";
+import {
+  exchangeAuthorizationCode,
+  exchangeForIdToken,
+  revokeGoogleGrant,
+} from "../../oauth/token-exchange.js";
 import { findOrCreatePerson, findPersonByEmail, normalizeEmail } from "../../people/person.js";
 import { type Html, html } from "../layout.js";
 import {
@@ -54,6 +70,15 @@ import { type AuthDeps, GOOGLE_SIGN_IN_PATH, SIGN_IN_PATH, tooManyAccounts } fro
 
 export const CONNECT_PATH = "/oauth/google/connect";
 export const CALLBACK_PATH = "/oauth/google/callback";
+/** Where a first connection's calendar is chosen (rc40); under /oauth, where its cookie is. */
+export const CHOOSE_PATH = "/oauth/google/calendar";
+
+/** The choice that makes a new calendar, and that calendar's name (rc40). */
+const NEW_CALENDAR = "new";
+export const NEW_CALENDAR_NAME = "WhenDoWe";
+
+const choiceSchema = z.string().min(1).max(1024);
+
 export { GOOGLE_SIGN_IN_PATH };
 
 export interface OAuthRouteDeps {
@@ -85,6 +110,26 @@ const callbackQuerySchema = z.object({
   state: z.string().min(1).max(MAX_QUERY_FIELD).optional(),
   error: z.string().min(1).max(MAX_QUERY_FIELD).optional(),
 });
+
+/** A person's Google connection, if any: one per account (rc40). */
+export async function googleConnectionOf(
+  storage: StoragePort,
+  personId: string,
+): Promise<{ accountEmail: string; calendarId: string; status: string } | null> {
+  const [row] = await storage.query(
+    stmt(
+      "SELECT account_email, calendar_id, status FROM calendar_connection WHERE owner_id = ? AND provider = 'google'",
+      personId,
+    ),
+  );
+  return row === undefined
+    ? null
+    : {
+        accountEmail: String(row.account_email),
+        calendarId: String(row.calendar_id),
+        status: String(row.status),
+      };
+}
 
 /** Truncated so a hostile `?error=` cannot flood the response. Escaped by `html`. */
 function shortCode(value: string): string {
@@ -278,26 +323,159 @@ ${EMAIL_LINK}`,
       fetchImpl: deps.fetchImpl,
     });
 
-    const calendar = await fetchPrimaryCalendar(tokens.accessToken, deps.fetchImpl);
+    const primary = await fetchPrimaryCalendar(tokens.accessToken, deps.fetchImpl);
+    const existing = await googleConnectionOf(deps.storage, flow.personId);
 
+    // One Google connection per account (rc40). Connecting again — a reconnect after
+    // auth_error — refreshes the grant and keeps the calendar it already writes to.
+    if (existing !== null) {
+      if (existing.accountEmail !== primary.id) {
+        // A grant we won't use is given back, not kept.
+        await revokeGoogleGrant(tokens.refreshToken, deps.fetchImpl);
+        return c.html(
+          result(
+            c,
+            "Not connected",
+            html`<p>This account's calendar is connected through <strong>${existing.accountEmail}</strong>. To reconnect, choose that Google account.</p>`,
+          ),
+          409,
+        );
+      }
+      await store(flow.personId, primary.id, existing.calendarId, tokens, false);
+      return c.html(result(c, "Calendar reconnected", html`<p>Reconnected.</p>`));
+    }
+
+    // A first connection: the person chooses the calendar (rc40). The grant waits,
+    // sealed, in this browser until they do; nothing is stored yet.
+    const calendars = await listWritableCalendars(tokens.accessToken, deps.fetchImpl);
+    const sealed = await sealPending(deps.cipher, {
+      personId: flow.personId,
+      accountEmail: primary.id,
+      timeZone: primary.timeZone,
+      accessToken: tokens.accessToken,
+      refreshToken: tokens.refreshToken,
+      expiresAt: tokens.expiresAt,
+      issuedAt: secondsSinceEpoch(deps.now()),
+    });
+    c.header("Set-Cookie", buildPendingSetCookie(sealed, cookieOptions), { append: true });
+    // Calendar names are whatever the account holder typed: untrusted, escaped (§13).
+    const option = (cal: CalendarChoice) =>
+      html`<p><label><input type="radio" name="calendar" value="${cal.id}" /> ${cal.name}${
+        cal.primary ? html` <span class="muted">(your main calendar)</span>` : ""
+      }</label></p>`;
+    return c.html(
+      result(
+        c,
+        "Choose a calendar",
+        html`<p>Which calendar of <strong>${primary.id}</strong> should your WhenDoWe events go into?</p>
+<form method="post" action="${CHOOSE_PATH}">
+  <input type="hidden" name="csrf" value="${me.csrfToken}" />
+  <p><label><input type="radio" name="calendar" value="${NEW_CALENDAR}" checked /> A new calendar called <strong>${NEW_CALENDAR_NAME}</strong></label><br /><span class="muted">Its own colour in Google, and easy to hide or remove.</span></p>
+  ${calendars.map(option)}
+  <p><button type="submit">Use this calendar</button></p>
+</form>`,
+      ),
+    );
+  }
+
+  // The choice (rc40). POST, CSRF-checked, by the person who granted it.
+  app.post(CHOOSE_PATH, async (c) => {
+    c.header("Set-Cookie", buildPendingClearCookie(cookieOptions));
+    const me = requireSignedIn(c);
+    if (me instanceof Response) return me;
+    const body = await c.req.parseBody();
+    if (!(await verifyFormCsrf(me, body))) {
+      return c.html(result(c, "Request rejected", html`<p>Please try again.</p>`), 403);
+    }
+    const cookie = readPendingCookie(c.req.header("cookie"));
+    let pending: PendingConnection | null = null;
+    if (cookie !== null) {
+      try {
+        pending = await unsealPending(deps.cipher, cookie, secondsSinceEpoch(deps.now()));
+      } catch {
+        pending = null;
+      }
+    }
+    if (pending === null) return c.html(result(c, "Attempt expired", EXPIRED), 400);
+    if (pending.personId !== me.personId) {
+      return c.html(
+        result(
+          c,
+          "Connection stopped",
+          html`<p>You're no longer signed in as the person who started this. Sign in and try again.</p>`,
+        ),
+        403,
+      );
+    }
+    const choice = choiceSchema.safeParse(body.calendar);
+    if (!choice.success) {
+      return c.html(result(c, "Choose a calendar", html`<p>Please choose one.</p>`), 400);
+    }
+    if ((await googleConnectionOf(deps.storage, me.personId)) !== null) {
+      return c.html(
+        result(c, "Already connected", html`<p>This account already has a calendar connected.</p>`),
+        409,
+      );
+    }
+    const tokens = {
+      accessToken: pending.accessToken,
+      refreshToken: pending.refreshToken,
+      expiresAt: pending.expiresAt,
+    };
+    let calendar: { id: string; name: string };
+    const madeByUs = choice.data === NEW_CALENDAR;
+    if (madeByUs) {
+      const id = await createCalendar(
+        tokens.accessToken,
+        { summary: NEW_CALENDAR_NAME, timeZone: pending.timeZone },
+        deps.fetchImpl,
+      );
+      calendar = { id, name: NEW_CALENDAR_NAME };
+    } else {
+      // The id came back from a form: Google says whether it may still take events.
+      const found = await findWritableCalendar(tokens.accessToken, choice.data, deps.fetchImpl);
+      if (found === null) {
+        return c.html(
+          result(
+            c,
+            "Not connected",
+            html`<p>That calendar can't take events. Please start again.</p>`,
+          ),
+          400,
+        );
+      }
+      calendar = found;
+    }
+    await store(me.personId, pending.accountEmail, calendar.id, tokens, madeByUs);
+    return c.html(
+      result(c, "Calendar connected", html`<p>Connected <strong>${calendar.name}</strong>.</p>`),
+    );
+  });
+
+  async function store(
+    personId: string,
+    accountEmail: string,
+    calendarId: string,
+    tokens: { accessToken: string; refreshToken: string; expiresAt: string },
+    madeByUs: boolean,
+  ): Promise<void> {
     const [accessTokenEnc, refreshTokenEnc] = await Promise.all([
       deps.cipher.encrypt(tokens.accessToken),
       deps.cipher.encrypt(tokens.refreshToken),
     ]);
-
     const timestamp = deps.now();
     // Upsert, not insert: (owner_id, provider, calendar_id) is UNIQUE (§10), and
     // reconnecting after an auth_error must refresh the grant rather than collide.
-    // sync_token is deliberately left alone — an existing cursor stays valid, and a
-    // dead one is recovered by the 410 GONE full-resync path (§12), not by
-    // discarding it here.
+    // sync_token and made_by_us are deliberately left alone — an existing cursor stays
+    // valid, a dead one is recovered by the 410 GONE full-resync path (§12), and who
+    // made the calendar doesn't change by reconnecting.
     await deps.storage.batch([
       stmt(
         `INSERT INTO calendar_connection
            (id, owner_id, provider, account_email, calendar_id,
             access_token_enc, refresh_token_enc, token_expiry,
-            status, created_at, updated_at)
-         VALUES (?, ?, 'google', ?, ?, ?, ?, ?, 'active', ?, ?)
+            status, made_by_us, created_at, updated_at)
+         VALUES (?, ?, 'google', ?, ?, ?, ?, ?, 'active', ?, ?, ?)
          ON CONFLICT(owner_id, provider, calendar_id) DO UPDATE SET
            account_email = excluded.account_email,
            access_token_enc = excluded.access_token_enc,
@@ -306,26 +484,17 @@ ${EMAIL_LINK}`,
            status = 'active',
            updated_at = excluded.updated_at`,
         newId(),
-        flow.personId,
-        calendar.id,
-        calendar.id,
+        personId,
+        accountEmail,
+        calendarId,
         accessTokenEnc,
         refreshTokenEnc,
         tokens.expiresAt,
+        madeByUs ? 1 : 0,
         timestamp,
         timestamp,
       ),
     ]);
-
-    // calendar.summary and calendar.id are whatever the account holder typed —
-    // untrusted, escaped by `html` (§13).
-    return c.html(
-      result(
-        c,
-        "Calendar connected",
-        html`<p>Connected <strong>${calendar.summary ?? calendar.id}</strong>.</p>`,
-      ),
-    );
   }
 
   /** Sign in as the address Google vouches for: the person a magic link to it gives. */

@@ -5,12 +5,19 @@ import { createTokenCipher, type TokenCipher } from "../../src/crypto/tokens.js"
 import {
   buildFlowClearCookie,
   buildFlowSetCookie,
+  buildPendingClearCookie,
+  buildPendingSetCookie,
   FLOW_COOKIE_NAME,
   FLOW_TTL_SECONDS,
   type OAuthFlow,
+  PENDING_COOKIE_NAME,
+  type PendingConnection,
   readFlowCookie,
+  readPendingCookie,
   sealFlow,
+  sealPending,
   unsealFlow,
+  unsealPending,
 } from "../../src/oauth/flow-cookie.js";
 import { createCodeVerifier, createState } from "../../src/oauth/pkce.js";
 
@@ -242,4 +249,70 @@ it("does not confuse a similarly-named cookie", () => {
 
 it("tolerates other cookies containing = in their values", () => {
   expect(readFlowCookie(`session=YWJjPT09; ${FLOW_COOKIE_NAME}=abc123`)).toBe("abc123");
+});
+
+// --- the pending connection, waiting for its calendar (rc40) ---
+
+const PENDING: PendingConnection = {
+  personId: "person-1",
+  accountEmail: "someone@example.com",
+  timeZone: "Europe/Prague",
+  accessToken: "ya29.access",
+  refreshToken: "1//refresh",
+  expiresAt: "2026-09-12T13:00:00.000Z",
+  issuedAt: ISSUED_AT,
+};
+
+it("round-trips a pending connection, unreadable in the cookie", async () => {
+  const c = await cipher();
+  const sealed = await sealPending(c, PENDING);
+  expect(sealed).not.toContain("ya29");
+  expect(sealed).not.toContain("refresh");
+  expect(await unsealPending(c, sealed, ISSUED_AT)).toEqual(PENDING);
+});
+
+it("keeps a pending connection exactly ten minutes, and refuses one from the future", async () => {
+  const c = await cipher();
+  const sealed = await sealPending(c, PENDING);
+  expect(await unsealPending(c, sealed, ISSUED_AT + FLOW_TTL_SECONDS)).toEqual(PENDING);
+  await expect(unsealPending(c, sealed, ISSUED_AT + FLOW_TTL_SECONDS + 1)).rejects.toThrow(
+    "pending connection expired",
+  );
+  expect(await unsealPending(c, sealed, ISSUED_AT - 60)).toEqual(PENDING);
+  await expect(unsealPending(c, sealed, ISSUED_AT - 61)).rejects.toThrow(
+    "pending connection expired",
+  );
+});
+
+it("refuses a pending connection that is tampered, foreign, or the wrong shape, naming no token", async () => {
+  const c = await cipher();
+  const bytes = base64ToBytes(decodeURIComponent(await sealPending(c, PENDING)));
+  const last = bytes.length - 1;
+  bytes[last] = (bytes[last] ?? 0) ^ 0x01;
+  await expect(
+    unsealPending(c, encodeURIComponent(bytesToBase64(bytes)), ISSUED_AT),
+  ).rejects.toThrow("pending connection cookie is unreadable");
+  const other = await createTokenCipher([KEY_2], 2);
+  await expect(unsealPending(c, await sealPending(other, PENDING), ISSUED_AT)).rejects.toThrow(
+    "pending connection cookie is unreadable",
+  );
+  const wrong = encodeURIComponent(await c.encrypt(JSON.stringify({ personId: "p" })));
+  await expect(unsealPending(c, wrong, ISSUED_AT)).rejects.toThrow(
+    "pending connection cookie is malformed",
+  );
+  const notJson = encodeURIComponent(await c.encrypt("ya29.secret{"));
+  const error = await unsealPending(c, notJson, ISSUED_AT).catch((e: unknown) => e);
+  expect(String(error)).not.toContain("ya29");
+});
+
+it("sets and clears the pending cookie on /oauth, and reads it back by name", () => {
+  expect(PENDING_COOKIE_NAME).toBe("wdw_oauth_pending");
+  expect(buildPendingSetCookie("v", { secure: true })).toBe(
+    "wdw_oauth_pending=v; Path=/oauth; Max-Age=600; HttpOnly; SameSite=Lax; Secure",
+  );
+  expect(buildPendingClearCookie({ secure: false })).toBe(
+    "wdw_oauth_pending=; Path=/oauth; Max-Age=0; HttpOnly; SameSite=Lax",
+  );
+  expect(readPendingCookie(`${FLOW_COOKIE_NAME}=f; wdw_oauth_pending=p`)).toBe("p");
+  expect(readPendingCookie(`${FLOW_COOKIE_NAME}=f`)).toBeNull();
 });

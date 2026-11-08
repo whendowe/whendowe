@@ -11,7 +11,12 @@ import { type AuthDeps, registerAuthRoutes, SIGN_IN_PATH } from "./routes/auth.j
 import { EVENTS_PATH, POLLS_PATH, registerEventRoutes, yourEvents } from "./routes/events.js";
 import { registerFeedRoutes } from "./routes/feeds.js";
 import { GROUPS_PATH, registerGroupRoutes } from "./routes/groups.js";
-import { CONNECT_PATH, type OAuthRouteDeps, registerOAuthRoutes } from "./routes/oauth.js";
+import {
+  CONNECT_PATH,
+  googleConnectionOf,
+  type OAuthRouteDeps,
+  registerOAuthRoutes,
+} from "./routes/oauth.js";
 import { PLANS_PATH, registerPlanRoutes } from "./routes/plans.js";
 import { registerRespondRoutes } from "./routes/respond.js";
 import { registerShareRoutes } from "./routes/share.js";
@@ -91,15 +96,27 @@ export function createApp(options: AppOptions = {}): Hono<AppEnv> {
     // trigger it with an <img> tag.
     // Connecting a calendar needs a person to own it (MVP-1 E), so the button only
     // appears signed in, and carries that session's CSRF token.
+    // One Google connection per account (rc40): once connected, this says where, and
+    // offers the button again only to reconnect a grant Google stopped honouring.
+    const connection =
+      oauth === undefined || signedIn === null
+        ? null
+        : await googleConnectionOf(oauth.storage, signedIn.personId);
+    const button = (label: string) =>
+      signedIn === null
+        ? ""
+        : html`<form method="post" action="${CONNECT_PATH}">
+  <input type="hidden" name="csrf" value="${signedIn.csrfToken}" />
+  <button type="submit">${label}</button>
+</form>`;
     const connect =
       oauth === undefined
         ? html`<p class="muted">Google credentials are not configured on this instance.</p>`
-        : signedIn === null
-          ? ""
-          : html`<form method="post" action="${CONNECT_PATH}">
-  <input type="hidden" name="csrf" value="${signedIn.csrfToken}" />
-  <button type="submit">Connect Google Calendar</button>
-</form>`;
+        : connection === null
+          ? button("Connect Google Calendar")
+          : connection.status === "auth_error"
+            ? html`<p>Google stopped accepting WhenDoWe's access to <strong>${connection.accountEmail}</strong>.</p>${button("Reconnect Google Calendar")}`
+            : html`<p class="muted">Google Calendar connected: ${connection.accountEmail}.</p>`;
     return c.html(
       page(
         c,

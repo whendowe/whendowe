@@ -33,6 +33,8 @@ export const calendarConnection = sqliteTable(
     tokenExpiry: text("token_expiry"),
     syncToken: text("sync_token"),
     watchChannel: text("watch_channel"),
+    // rc40: 1 when WhenDoWe made the calendar, so disconnecting may offer to delete it.
+    madeByUs: integer("made_by_us").notNull().default(0),
     // auth_error: revoked/expired grant (§12); worker skips its projections until reconnected.
     status: text("status").notNull().default("active"),
     createdAt: text("created_at").notNull(),
