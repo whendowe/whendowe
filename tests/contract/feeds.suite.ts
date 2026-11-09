@@ -38,6 +38,7 @@ import { exportPerson } from "../../src/privacy/export.js";
 
 const T0 = "2101-10-01T10:00:00.000Z";
 const T1 = "2101-10-02T10:00:00.000Z";
+const T0_LATER = "2101-10-01T11:00:00.000Z"; // between T0 and T1
 const KEY = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="; // 32 zero bytes: a test key
 const url = (id: string) => `https://whendowe.example/events/${id}`;
 
@@ -56,16 +57,21 @@ async function table(port: StoragePort, tag: string) {
   const group = await createGroup(port, { name: `Jam ${tag}`, creatorId: ann.id, now: T0 });
   const membership = await findGroupForMember(port, group.id, ann.id);
   if (membership === null) throw new Error("membership");
-  const join = async (who: string, visibility: "FULL" | "DETAILS" | "BUSY" | "HIDDEN") => {
+  // `at` orders members who must not tie: ids made in the same millisecond sort at random.
+  const join = async (
+    who: string,
+    visibility: "FULL" | "DETAILS" | "BUSY" | "HIDDEN",
+    at: string = T0,
+  ) => {
     const invite = await createInvite(port, membership, {
       email: `feed-${who}-${tag}@example.org`,
       invitedBy: ann.id,
       editTier: "view",
       visibility,
-      now: T0,
+      now: at,
     });
     if (!invite.ok) throw new Error(invite.reason);
-    const accepted = await acceptInvite(port, invite.token, T0);
+    const accepted = await acceptInvite(port, invite.token, at);
     if (accepted === null) throw new Error("accept");
     return accepted.personId;
   };
@@ -468,7 +474,7 @@ export function runFeedsContract(makePort: () => Promise<StoragePort>): void {
       const port = await makePort();
       const { ann, group, membership, join } = await table(port, "move");
       const bob = await join("bob", "FULL");
-      const cat = await join("cat", "FULL");
+      const cat = await join("cat", "FULL", T0_LATER);
       await createEvent(port, { creatorId: ann, group: membership, fields: DINNER, now: T0 });
       const link = (await make(port, group, ann)) ?? "";
       // Ann's own feed of the group must go with her, not move: only shared links move.
@@ -517,7 +523,7 @@ export function runFeedsContract(makePort: () => Promise<StoragePort>): void {
       const port = await makePort();
       const { ann, group, membership, join } = await table(port, "move2");
       const bob = await join("bob", "FULL"); // the longest-standing member
-      const cat = await join("cat", "FULL");
+      const cat = await join("cat", "FULL", T0_LATER);
       await port.batch([
         {
           sql: "UPDATE group_member SET role = 'organizer' WHERE group_id = ? AND person_id = ?",
