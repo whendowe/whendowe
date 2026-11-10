@@ -2,6 +2,7 @@
 import type { Context, Hono } from "hono";
 import type { TokenCipher } from "../../crypto/tokens.js";
 import type { StoragePort } from "../../db/port.js";
+import { busyQuerySchema, ownBusy } from "../../feeds/busy.js";
 import {
   type FeedScope,
   feedEntries,
@@ -26,6 +27,7 @@ import { hashToken } from "../../people/tokens.js";
 import { whenText } from "../../plans/weeks.js";
 import {
   ACCOUNT_PATH,
+  BUSY_PATH,
   EVENTS_PATH,
   GROUPS_PATH,
   type Html,
@@ -185,6 +187,16 @@ export function sharedPath(token: string, ics = false): string {
 }
 
 export function registerFeedRoutes(app: Hono<AppEnv>, deps: FeedRouteDeps): void {
+  // Busy times for the picker (rc41): JSON for the signed-in asker, times only. A
+  // GET, so it reads and writes nothing else; the picker works without it.
+  app.get(BUSY_PATH, async (c) => {
+    c.header("Cache-Control", "no-store");
+    const me = c.get("signedIn");
+    if (me === null) return c.json({ busy: [] }, 401);
+    const query = busyQuerySchema.safeParse(c.req.query());
+    if (!query.success) return c.json({ busy: [] }, 400);
+    return c.json({ busy: await ownBusy(deps.storage, me.personId, query.data, deps.now()) });
+  });
   const cipher = deps.feedCipher;
   if (cipher !== undefined) {
     // Make or replace a link (GET never mutates): your own feed, or a group's for a member.

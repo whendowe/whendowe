@@ -36,7 +36,7 @@ export type EventStatus = z.infer<typeof statusSchema>;
 /** The lifecycle values, derived from the schema rather than asserted with a cast. */
 export const EVENT_STATUSES = statusSchema.options;
 
-function isTimeZone(tzid: string): boolean {
+export function isTimeZone(tzid: string): boolean {
   try {
     // Throws RangeError for an unknown zone, identically on Node and workerd.
     new Intl.DateTimeFormat("en", { timeZone: tzid });

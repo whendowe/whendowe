@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+import { z } from "zod";
 import { expect, type Page, test } from "./fixtures.js";
 
 // The forms' own scripts, in a real browser (DESIGN §9 rc16). Every test drives a page
@@ -131,6 +132,111 @@ test.describe("poll form", () => {
     await shot(page, "poll-days-overlap.png");
     expect(errors).toEqual([]);
   });
+});
+
+/**
+ * Busy times (DESIGN rc41). A fixture page is a file, where the picker's request for
+ * them can only fail; these tests answer it instead, every time with `answer`, and
+ * keep the URLs asked for.
+ */
+async function answerBusy(page: Page, answer: { status: number; busy: unknown[] }): Promise<void> {
+  // Plain JavaScript, run in the page: this project has no DOM types (see poll-machine.ts).
+  await page.addInitScript({
+    content: `(() => {
+      const a = ${JSON.stringify(answer)};
+      const asked = [];
+      globalThis.wdAsked = asked;
+      window.fetch = (input) => {
+        asked.push(String(input));
+        if (a.status === 0) return Promise.reject(new TypeError("offline"));
+        return Promise.resolve(new Response(JSON.stringify({ busy: a.busy }), {
+          status: a.status,
+          headers: { "content-type": "application/json" },
+        }));
+      };
+    })();`,
+  });
+}
+const asked = async (page: Page) =>
+  z.array(z.string()).parse(await page.evaluate("globalThis.wdAsked"));
+const BUSY = [
+  { allDay: false, start: "2026-10-30T18:00", end: "2026-10-30T20:00" },
+  { allDay: true, from: "2026-11-02", to: "2026-11-02" },
+];
+const busyLine = (page: Page) => page.locator(".wd-busyline");
+
+test.describe("busy times while you pick (rc41)", () => {
+  test("the event form marks busy days and says when a time clashes", async ({ page }) => {
+    await answerBusy(page, { status: 200, busy: BUSY });
+    const errors = await open(page, "event-new");
+    const friday = day(page, "Fri 30 Oct, busy 18:00–20:00");
+    await expect(friday).toHaveClass(/wd-busy/);
+    await expect(day(page, "Thu 29 Oct")).not.toHaveClass(/wd-busy/);
+    await expect(busyLine(page)).toBeHidden(); // today has nothing on
+    // The weeks on screen, in the form's zone: October 2026 runs Mon 28 Sep to Sun 1 Nov.
+    expect(await asked(page)).toEqual([
+      expect.stringMatching(/^\/busy\?from=2026-09-28&to=2026-11-01&tz=[^&]+$/),
+    ]);
+
+    await friday.click(); // at the form's 19:00, for an hour
+    await expect(busyLine(page)).toHaveText("You're busy then · that day: 18:00–20:00");
+    await shot(page, "event-busy.png");
+    await picker(page).getByLabel("Starts").fill("20:00");
+    await expect(busyLine(page)).toHaveText("Busy that day: 18:00–20:00");
+    expect(await value(page, "start")).toBe("2026-10-30T20:00"); // still only advice
+    await picker(page).getByLabel("Length").selectOption("days"); // Fri 30 Oct to Sun 1 Nov
+    await expect(busyLine(page)).toHaveText("You're busy on 1 of these days");
+
+    await page.getByRole("button", { name: "Next month" }).click();
+    await expect(day(page, "Mon 2 Nov, busy all day")).toHaveClass(/wd-busy/);
+    expect((await asked(page))[1]).toMatch(/^\/busy\?from=2026-10-26&to=2026-12-06&tz=/);
+    await page.getByRole("button", { name: "Previous month" }).click();
+    expect(await asked(page)).toHaveLength(2); // October is asked once
+    expect(errors).toEqual([]);
+  });
+
+  test("editing leaves the event itself out", async ({ page }) => {
+    await answerBusy(page, { status: 200, busy: [] });
+    const errors = await open(page, "event-edit");
+    await expect(page.locator(".wd-summary")).toContainText("Fri 30 Oct · 19:00–22:00");
+    expect(await asked(page)).toEqual([expect.stringMatching(/&except=[0-9a-f-]{36}$/)]);
+    await expect(page.locator(".wd-busy")).toHaveCount(0);
+    expect(errors).toEqual([]);
+  });
+
+  test("the poll form flags the options you're busy for", async ({ page }) => {
+    await answerBusy(page, { status: 200, busy: BUSY });
+    const errors = await open(page, "poll-new");
+    await day(page, "Fri 30 Oct, busy 18:00–20:00").click(); // 19:00 for 3 hours
+    await day(page, "Sat 31 Oct").click();
+    const options = page.locator(".wd-opts li");
+    await expect(options.nth(0)).toContainText("You're busy then");
+    await expect(options.nth(1)).not.toContainText("busy");
+    await shot(page, "poll-busy.png");
+
+    await page.getByRole("button", { name: "A stretch of days" }).click();
+    await day(page, "Thu 29 Oct").click();
+    await page.getByRole("button", { name: /^Sun 1 Nov/ }).click();
+    await expect(options.nth(0)).toContainText("You're busy on 1 of these days");
+    expect(errors).toEqual([]);
+  });
+
+  for (const [what, status] of [
+    ["a refused answer", 500],
+    ["no answer at all", 0],
+  ] as const) {
+    test(`${what} shows nothing, and the picker works as before`, async ({ page }) => {
+      await answerBusy(page, { status, busy: BUSY });
+      const errors = await open(page, "event-new");
+      await day(page, "Fri 30 Oct").click();
+      await expect(page.locator(".wd-summary")).toContainText("Fri 30 Oct · 19:00–20:00");
+      expect(await value(page, "start")).toBe("2026-10-30T19:00");
+      await expect(page.locator(".wd-busy")).toHaveCount(0);
+      await expect(busyLine(page)).toBeHidden();
+      expect(await asked(page)).toHaveLength(1);
+      expect(errors).toEqual([]);
+    });
+  }
 });
 
 test.describe("without JavaScript (DESIGN rc15: every form works without it)", () => {

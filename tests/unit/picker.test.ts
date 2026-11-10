@@ -191,3 +191,110 @@ describe("polls and the numbered rows the server reads", () => {
     expect(back.length).toBe(180);
   });
 });
+
+describe("busy times (rc41): spread over the days they touch", () => {
+  it("a span keeps its minutes; one past midnight is split at it; whole days are 0–1440", () => {
+    expect(
+      picker.spreadBusy([
+        { allDay: false, start: "2026-11-12T18:00", end: "2026-11-12T20:30" },
+        { allDay: false, start: "2026-11-13T23:00", end: "2026-11-14T01:00" },
+        { allDay: true, from: "2026-11-20", to: "2026-11-21" },
+      ]),
+    ).toEqual({
+      "2026-11-12": [{ from: 1080, to: 1230 }],
+      "2026-11-13": [{ from: 1380, to: 1440 }],
+      "2026-11-14": [{ from: 0, to: 60 }],
+      "2026-11-20": [{ from: 0, to: 1440 }],
+      "2026-11-21": [{ from: 0, to: 1440 }],
+    });
+  });
+
+  it("a span ending at midnight leaves the next day free; a day's spans are in order", () => {
+    expect(
+      picker.spreadBusy([
+        { allDay: false, start: "2026-11-12T20:00", end: "2026-11-13T00:00" },
+        { allDay: false, start: "2026-11-12T08:00", end: "2026-11-12T09:00" },
+        { allDay: false, start: "2026-11-12T08:00", end: "2026-11-12T08:30" },
+      ]),
+    ).toEqual({
+      "2026-11-12": [
+        { from: 480, to: 510 },
+        { from: 480, to: 540 },
+        { from: 1200, to: 1440 },
+      ],
+    });
+  });
+
+  it("the same span twice is kept once (neighbouring months' grids share a week)", () => {
+    const span = { allDay: false, start: "2026-11-30T10:00", end: "2026-11-30T11:00" };
+    const day = { allDay: true, from: "2026-11-30", to: "2026-11-30" };
+    expect(picker.spreadBusy([span, day, span, day])).toEqual({
+      "2026-11-30": [
+        { from: 0, to: 1440 },
+        { from: 600, to: 660 },
+      ],
+    });
+  });
+
+  it("anything malformed is skipped, never thrown on", () => {
+    expect(
+      picker.spreadBusy([
+        null,
+        "busy",
+        { allDay: false, start: "2026-11-12", end: "2026-11-12T10:00" },
+        { allDay: false, start: "2026-11-12T10:00", end: "soon" },
+        { allDay: false, start: 5, end: "2026-11-12T10:00" },
+        { allDay: true, from: "2026-11-12" },
+        { allDay: false, start: "2026-11-12T10:00", end: "2026-11-12T09:00" }, // backwards
+      ]),
+    ).toEqual({});
+    expect(picker.spreadBusy({ busy: [] })).toEqual({});
+  });
+
+  it("a very long stretch stops at 400 days", () => {
+    const days = picker.spreadBusy([{ allDay: true, from: "2026-01-01", to: "2030-01-01" }]);
+    expect(Object.keys(days)).toHaveLength(400);
+    expect(days["2027-02-04"]).toEqual([{ from: 0, to: 1440 }]);
+    expect(days["2027-02-05"]).toBeUndefined();
+  });
+});
+
+describe("busy times: what meets what", () => {
+  const days = picker.spreadBusy([
+    { allDay: false, start: "2026-11-12T18:00", end: "2026-11-12T20:00" },
+    { allDay: false, start: "2026-11-14T08:00", end: "2026-11-14T09:00" },
+  ]);
+
+  it("a time clashes when it overlaps, not when it only touches", () => {
+    expect(picker.clash(days, "2026-11-12", 17 * 60, 60)).toBe(false); // 17–18 touches
+    expect(picker.clash(days, "2026-11-12", 17 * 60, 61)).toBe(true);
+    expect(picker.clash(days, "2026-11-12", 20 * 60, 60)).toBe(false); // 20–21 touches
+    expect(picker.clash(days, "2026-11-12", 19 * 60 + 59, 60)).toBe(true);
+    expect(picker.clash(days, "2026-11-12", 18 * 60 + 30, 30)).toBe(true); // inside
+    expect(picker.clash(days, "2026-11-11", 18 * 60, 120)).toBe(false); // another day
+  });
+
+  it("a time past midnight meets what is on the next day, or the one after", () => {
+    expect(picker.clash(days, "2026-11-13", 23 * 60, 9 * 60 + 1)).toBe(true); // to 08:01
+    expect(picker.clash(days, "2026-11-13", 23 * 60, 9 * 60)).toBe(false); // to 08:00
+    expect(picker.clash(days, "2026-11-12", 21 * 60, 36 * 60)).toBe(true); // to the 14th, 09:00
+  });
+
+  it("says when, in order, with all day and midnight as people say them", () => {
+    const spread = picker.spreadBusy([
+      { allDay: false, start: "2026-11-12T20:00", end: "2026-11-13T00:00" },
+      { allDay: false, start: "2026-11-12T08:05", end: "2026-11-12T09:00" },
+      { allDay: true, from: "2026-11-15", to: "2026-11-15" },
+    ]);
+    expect(picker.busyText(spread["2026-11-12"] ?? [])).toBe("08:05–09:00, 20:00–24:00");
+    expect(picker.busyText(spread["2026-11-15"] ?? [])).toBe("all day");
+    expect(picker.busyText([])).toBe("");
+  });
+
+  it("counts the days of a stretch with something on", () => {
+    expect(picker.busyDays(days, "2026-11-10", "2026-11-20")).toBe(2);
+    expect(picker.busyDays(days, "2026-11-12", "2026-11-12")).toBe(1);
+    expect(picker.busyDays(days, "2026-11-13", "2026-11-13")).toBe(0);
+    expect(picker.busyDays(days, "2026-11-14", "2026-11-12")).toBe(0);
+  });
+});

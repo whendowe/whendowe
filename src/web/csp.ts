@@ -11,7 +11,7 @@ import type { MiddlewareHandler } from "hono";
 export const SCRIPT_HASHES: readonly string[] = [
   "sha256-hy1CT6orc1H1ttOry9+3LGLyKv9lFZDPcMIK/nQvAJo=",
   "sha256-ifuKO1T8Vg/qO2twwUmviNp1akRXwgQk4DZcpWtVKDE=",
-  "sha256-thOP9cofq68135/BNxIx19zBU2Nd3F8xNvN0xZ1hJoc=",
+  "sha256-VeO5M0gSYzkGL61C69kKmK83LS4rYXE/Y/YbskiZynM=",
   "sha256-to6JPZkUfWfQiXrrmnVXATfIzIPJqlnSwh2dzCjuWAM=",
 ];
 

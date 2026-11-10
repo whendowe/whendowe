@@ -85,6 +85,7 @@ import {
   upcomingOccurrences,
 } from "../../recurrence.js";
 import {
+  BUSY_PATH,
   cappedText,
   copiedLink,
   EVENTS_PATH,
@@ -459,9 +460,11 @@ function eventForm(
   vis: Vis = "FULL",
   /** Who it's for: after the what and when, before the button (a new event only). */
   people: Html | string = "",
+  /** The event being edited, whose own time the picker doesn't count as busy (rc41). */
+  editing: string | null = null,
 ): Html {
   return html`${error === null ? "" : html`<p class="error">${error}</p>`}
-<form method="post" action="${action}" data-picker="event">
+<form method="post" action="${action}" data-picker="event" data-busy="${BUSY_PATH}"${editing === null ? "" : html` data-busy-except="${editing}"`}>
   <input type="hidden" name="csrf" value="${csrf}" />
   ${extra}
   ${canSee(vis, "title") ? html`<p><label>Title<br /><input name="title" required maxlength="200" value="${v.title}" style="width:100%" /></label></p>` : ""}
@@ -795,7 +798,7 @@ function pollForm(
     (_, i) => v.slots[i] ?? { start: "", end: "" },
   );
   return html`${error === null ? "" : html`<p class="error">${error}</p>`}
-<form method="post" action="${action}" data-picker="poll" data-max="${MAX_CANDIDATES}">
+<form method="post" action="${action}" data-picker="poll" data-max="${MAX_CANDIDATES}" data-busy="${BUSY_PATH}">
   <input type="hidden" name="csrf" value="${csrf}" />
   <p><label>What<br /><input name="title" required maxlength="200" value="${v.title}" style="width:100%" /></label></p>
   <p><label>Where<br /><input name="location" maxlength="500" value="${v.location}" style="width:100%" /></label></p>
@@ -1220,7 +1223,7 @@ ${eventForm(`/groups/${membership.group.id}/events`, csrf, form.values, "", erro
         canSee(vis, "title") ? `Edit ${event.title}` : "Edit",
         html`<p><a href="${EVENTS_PATH}/${event.id}">← ${canSee(vis, "title") ? event.title : BUSY_LABEL}</a></p>
 ${editHeading(proposing)}
-${eventForm(`${EVENTS_PATH}/${event.id}`, me.csrfToken, valuesFrom(event), html`<input type="hidden" name="revision" value="${event.revision}" />`, null, proposing ? "Send proposal" : "Save", vis)}`,
+${eventForm(`${EVENTS_PATH}/${event.id}`, me.csrfToken, valuesFrom(event), html`<input type="hidden" name="revision" value="${event.revision}" />`, null, proposing ? "Send proposal" : "Save", vis, "", event.id)}`,
       ),
     );
   });
@@ -1243,7 +1246,7 @@ ${eventForm(`${EVENTS_PATH}/${event.id}`, me.csrfToken, valuesFrom(event), html`
         c,
         canSee(vis, "title") ? `Edit ${access.event.title}` : "Edit",
         html`${editHeading(proposing)}
-${eventForm(`${EVENTS_PATH}/${access.event.id}`, me.csrfToken, v, html`<input type="hidden" name="revision" value="${revision}" />`, error, proposing ? "Send proposal" : "Save", vis)}`,
+${eventForm(`${EVENTS_PATH}/${access.event.id}`, me.csrfToken, v, html`<input type="hidden" name="revision" value="${revision}" />`, error, proposing ? "Send proposal" : "Save", vis, "", access.event.id)}`,
       );
 
     let result: Awaited<ReturnType<typeof editEvent>> | Awaited<ReturnType<typeof proposeChange>>;

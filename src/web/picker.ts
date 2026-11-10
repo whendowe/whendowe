@@ -75,6 +75,10 @@ const PICKER_STYLE = html`<style>
     border: 1px solid light-dark(#c9d1cf, #3a4644); background: light-dark(#fff, #1a2221); color: inherit; }
   .wd-headrow { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
   .wd-headrow h3 { margin: 0; font-size: 1rem; }
+  .wd-busy::after { content: ""; position: absolute; top: 4px; right: 4px; width: 7px; height: 7px; border-radius: 50%;
+    background: light-dark(#17201f, #e6eeec); box-shadow: 0 0 0 2px light-dark(#fff, #111716); }
+  .wd-busyline { margin: 0; font-size: .9rem; }
+  .wd-opts .wd-clash { font-weight: 700; opacity: 1; }
 </style>`;
 
 const PICKER_SCRIPT = html`<script>
@@ -227,10 +231,65 @@ const PICKER_SCRIPT = html`<script>
     return n === 1 ? "1 day" : n + " days, " + (n - 1) + (n === 2 ? " night" : " nights");
   }
 
+  /**
+   * Busy times (DESIGN rc41) as the server sends them — { allDay: true, from, to } days,
+   * the last included, or { allDay: false, start, end } wall clock in the picker's zone —
+   * spread over the days they touch: { "YYYY-MM-DD": [{ from, to }] }, minutes into the
+   * day, a span past midnight split at it. Anything malformed is skipped. The same span
+   * twice (two months' grids share a week) is kept once.
+   */
+  var MAX_SPREAD = 400;
+  function spreadBusy(items) {
+    var days = {}, seen = {};
+    function put(key, from, to) {
+      var id = key + "/" + from + "/" + to;
+      if (seen[id] || !(to > from)) return;
+      seen[id] = true;
+      (days[key] = days[key] || []).push({ from: from, to: to });
+    }
+    function at(t) { return DATE.test(t) && TIME.test(t.slice(11)) ? toMin(t.slice(11, 16)) : -1; }
+    (Array.isArray(items) ? items : []).forEach(function (b) {
+      if (!b || typeof b !== "object") return;
+      var first = b.allDay === true ? b.from : b.start;
+      var last = b.allDay === true ? b.to : b.end;
+      if (typeof first !== "string" || typeof last !== "string" || !DATE.test(first) || !DATE.test(last)) return;
+      var a = b.allDay === true ? 0 : at(first);
+      var z = b.allDay === true ? 1440 : at(last);
+      if (a < 0 || z < 0) return;
+      var d1 = first.slice(0, 10), d2 = last.slice(0, 10);
+      for (var k = d1, n = 0; k <= d2 && n < MAX_SPREAD; k = addDays(k, 1), n++) {
+        put(k, k === d1 ? a : 0, b.allDay === true || k !== d2 ? 1440 : z);
+      }
+    });
+    Object.keys(days).forEach(function (k) { days[k].sort(function (x, y) { return x.from - y.from || x.to - y.to; }); });
+    return days;
+  }
+  /** Whether a time from start (minutes into date) for length minutes meets a busy span. */
+  function clash(days, date, start, length) {
+    for (var off = 0, k = date; off < start + length; off += 1440, k = addDays(k, 1)) {
+      var a = Math.max(start - off, 0), z = Math.min(start + length - off, 1440);
+      if ((days[k] || []).some(function (s) { return s.from < z && s.to > a; })) return true;
+    }
+    return false;
+  }
+  /** "09:00–12:00, 18:00–20:00"; "all day" for a whole day. */
+  function busyText(spans) {
+    return spans.map(function (s) {
+      return s.from === 0 && s.to === 1440 ? "all day" : fromMin(s.from) + "–" + (s.to === 1440 ? "24:00" : fromMin(s.to));
+    }).join(", ");
+  }
+  /** How many days from "from" to "to" (both included) have something on. */
+  function busyDays(days, from, to) {
+    var n = 0;
+    for (var k = from; k <= to; k = addDays(k, 1)) if ((days[k] || []).length > 0) n++;
+    return n;
+  }
+
   globalThis.WhenDoWePicker = {
     monthGrid: monthGrid, isoWeek: isoWeek, toFields: toFields, fromFields: fromFields,
     summary: summary, dayLabel: dayLabel, lengthLabel: lengthLabel,
     pollRows: pollRows, pollFromRows: pollFromRows,
+    spreadBusy: spreadBusy, clash: clash, busyText: busyText, busyDays: busyDays,
   };
   if (typeof document === "undefined") return;
 
@@ -246,8 +305,39 @@ const PICKER_SCRIPT = html`<script>
     return n.getFullYear() + "-" + pad(n.getMonth() + 1) + "-" + pad(n.getDate());
   }
 
+  /**
+   * Where a form's busy times come from: its data-busy URL, asked once per range and
+   * zone, for the weeks on screen. Until an answer comes, or if none does, nothing is
+   * busy and the picker works as it would without it; redraw() runs when one arrives.
+   */
+  function busySource(form, redraw) {
+    var url = form.getAttribute("data-busy");
+    var except = form.getAttribute("data-busy-except");
+    var items = {}, spread = {}, asked = {};
+    function zone() {
+      var tz = form.querySelector("#tzid");
+      return (tz && tz.value) || Intl.DateTimeFormat().resolvedOptions().timeZone;
+    }
+    function load(from, to) {
+      var tz = zone(), id = tz + " " + from + " " + to;
+      if (!url || typeof fetch !== "function" || asked[id]) return;
+      asked[id] = true;
+      var q = "?from=" + from + "&to=" + to + "&tz=" + encodeURIComponent(tz) + (except ? "&except=" + encodeURIComponent(except) : "");
+      fetch(url + q, { credentials: "same-origin", headers: { Accept: "application/json" } })
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (data) {
+          if (!data || !Array.isArray(data.busy) || data.busy.length === 0) return;
+          items[tz] = (items[tz] || []).concat(data.busy);
+          spread[tz] = spreadBusy(items[tz]);
+          redraw();
+        })
+        .catch(function () {});
+    }
+    return { load: load, days: function () { return spread[zone()] || {}; } };
+  }
+
   /** The month calendar: paint(key, button) marks a day, onPick(key) handles a tap. */
-  function calendar(view, paint, onPick) {
+  function calendar(view, paint, onPick, busy) {
     var box = el("div");
     var head = el("div", "wd-cal-head");
     var prev = el("button", "", "‹");
@@ -271,9 +361,12 @@ const PICKER_SCRIPT = html`<script>
       var today = localToday();
       title.textContent = monthFmt.format(new Date(Date.UTC(view.year, view.month, 1)));
       grid.textContent = "";
+      var weeks = monthGrid(view.year, view.month);
+      busy.load(weeks[0].days[0].key, weeks[weeks.length - 1].days[6].key);
+      var busyOn = busy.days();
       grid.append(el("span", "wd-wk"));
       ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"].forEach(function (d) { grid.append(el("span", "wd-dow", d)); });
-      monthGrid(view.year, view.month).forEach(function (w) {
+      weeks.forEach(function (w) {
         grid.append(el("span", "wd-wk", String(w.week)));
         w.days.forEach(function (d, i) {
           var cls = "wd-day" + (d.inMonth ? "" : " wd-out") + (i >= 5 ? " wd-we" : "") + (d.key === today ? " wd-today" : "");
@@ -281,6 +374,11 @@ const PICKER_SCRIPT = html`<script>
           b.type = "button";
           b.setAttribute("aria-label", dayLabel(d.key));
           paint(d.key, b);
+          var spans = busyOn[d.key] || [];
+          if (spans.length > 0) {
+            b.classList.add("wd-busy");
+            b.setAttribute("aria-label", b.getAttribute("aria-label") + ", busy " + busyText(spans));
+          }
           b.addEventListener("click", function () { onPick(d.key); });
           grid.append(b);
         });
@@ -301,7 +399,8 @@ const PICKER_SCRIPT = html`<script>
     var view = { year: +p.date.slice(0, 4), month: +p.date.slice(5, 7) - 1 };
 
     var ui = el("div", "wd-picker");
-    var cal = calendar(view, paint, pick);
+    var busy = busySource(form, render);
+    var cal = calendar(view, paint, pick, busy);
     var hint = el("p", "wd-hint");
     var row = el("div", "wd-row");
     var timeLabel = el("label", "wd-field", "Starts");
@@ -321,7 +420,9 @@ const PICKER_SCRIPT = html`<script>
     row.append(timeLabel, lenLabel);
     var sum = el("div", "wd-summary");
     sum.setAttribute("aria-live", "polite");
-    ui.append(cal.node, hint, row, sum);
+    var busyLine = el("p", "wd-busyline");
+    busyLine.setAttribute("aria-live", "polite");
+    ui.append(cal.node, hint, row, sum, busyLine);
 
     // The time zone is one quiet line; "Change" brings back the plain field.
     var tzInput = form.querySelector("#tzid");
@@ -373,11 +474,31 @@ const PICKER_SCRIPT = html`<script>
       var s = pending ? { main: "From " + dayLabel(pending) + "…", sub: "Tap the last day" } : summary(p);
       sum.textContent = s.main;
       if (s.sub) sum.append(el("small", "", s.sub));
+      renderBusy();
       var f = toFields(p);
       allDay.checked = f.allDay;
       start.value = f.start;
       end.value = f.end;
       if (tzLine && tzPara && tzPara.hidden) tzLine.hidden = f.allDay;
+    }
+    /** What you're already doing then: the chosen time, the chosen day, or the stretch. */
+    function renderBusy() {
+      var days = busy.days();
+      var onDay = days[p.date] || [];
+      busyLine.textContent = "";
+      if (pending) {
+        busyLine.hidden = true;
+      } else if (p.length === DAYS) {
+        var n = busyDays(days, p.date, p.to);
+        busyLine.hidden = n === 0;
+        busyLine.append(el("strong", "", "You're busy on " + n + " of these days"));
+      } else if (typeof p.length === "number" && clash(days, p.date, toMin(p.time), p.length)) {
+        busyLine.hidden = false;
+        busyLine.append(el("strong", "", "You're busy then"), " · that day: " + busyText(onDay));
+      } else {
+        busyLine.hidden = onDay.length === 0;
+        busyLine.append("Busy that day: " + busyText(onDay));
+      }
     }
     time.addEventListener("input", function () { if (time.value) { p.time = time.value; render(); } });
     len.addEventListener("change", function () {
@@ -422,11 +543,12 @@ const PICKER_SCRIPT = html`<script>
 
     var ui = el("div", "wd-picker");
     var kind = el("div", "wd-kind");
+    var busy = busySource(form, render);
     var kindTimes = el("button", "", "A time on a day");
     var kindDays = el("button", "", "A stretch of days");
     kindTimes.type = kindDays.type = "button";
     kind.append(kindTimes, kindDays);
-    var cal = calendar(view, paint, pick);
+    var cal = calendar(view, paint, pick, busy);
     var hint = el("p", "wd-hint");
     var chooser = el("div", "wd-chooser");
     chooser.setAttribute("role", "group");
@@ -590,9 +712,12 @@ const PICKER_SCRIPT = html`<script>
         if (poll.kind === DAYS) {
           when.textContent = o.from === o.to ? dayLabel(o.from) : dayLabel(o.from) + " – " + dayLabel(o.to);
           when.append(el("small", "", nightsLabel(o.from, o.to)));
+          var n = busyDays(busy.days(), o.from, o.to);
+          if (n > 0) when.append(el("small", "wd-clash", "You're busy on " + n + " of these days"));
         } else {
           when.textContent = dayLabel(o.date);
           when.append(el("span", "wd-times", startOf(o) + "–" + endOf(o)));
+          if (clash(busy.days(), o.date, toMin(startOf(o)), poll.length)) when.append(el("small", "wd-clash", "You're busy then"));
           var small = el("small", "", o.own === null ? "Shared time · " : "Own time · ");
           var more = el("button", "wd-link", "another time this day");
           more.type = "button";

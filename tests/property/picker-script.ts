@@ -28,6 +28,12 @@ export const pollSchema = z.object({
   times: z.array(z.object({ date: z.string(), own: z.string().nullable() })),
   days: z.array(z.object({ from: z.string(), to: z.string() })),
 });
+/** Busy times as spread over days (rc41): minutes into each day. */
+export const spreadSchema = z.record(
+  z.string(),
+  z.array(z.object({ from: z.number(), to: z.number() })),
+);
+export type Spread = z.infer<typeof spreadSchema>;
 export type Fields = z.infer<typeof fieldsSchema>;
 export type Pick = z.infer<typeof pickSchema>;
 export type Row = z.infer<typeof rowSchema>;
@@ -55,6 +61,10 @@ export function loadPicker() {
       summary: fn,
       pollRows: fn,
       pollFromRows: fn,
+      spreadBusy: fn,
+      clash: fn,
+      busyText: fn,
+      busyDays: fn,
     })
     .parse(sandbox.WhenDoWePicker);
   // Results cross from the sandbox's realm; parse them back into this one.
@@ -67,5 +77,11 @@ export function loadPicker() {
     pollRows: (poll: Poll) => z.array(rowSchema).parse(api.pollRows(poll)),
     pollFromRows: (allDay: boolean, rows: Row[]) =>
       pollSchema.parse(api.pollFromRows(allDay, rows)),
+    spreadBusy: (items: unknown) => spreadSchema.parse(api.spreadBusy(items)),
+    clash: (days: Spread, date: string, start: number, length: number) =>
+      z.boolean().parse(api.clash(days, date, start, length)),
+    busyText: (spans: Spread[string]) => z.string().parse(api.busyText(spans)),
+    busyDays: (days: Spread, from: string, to: string) =>
+      z.number().parse(api.busyDays(days, from, to)),
   };
 }

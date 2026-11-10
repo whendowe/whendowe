@@ -73,6 +73,8 @@ export const PLANS_PATH = "/plans";
 export const GROUPS_PATH = "/groups";
 /** Events (src/web/routes/events.ts); here for the same reason. */
 export const EVENTS_PATH = "/events";
+/** Busy times for the picker (src/web/routes/feeds.ts, rc41); here for the same reason. */
+export const BUSY_PATH = "/busy";
 
 /** The day an account goes, as pages and mail say it: "2101-11-08 10:00 UTC". */
 export function deletionDay(iso: string): string {
