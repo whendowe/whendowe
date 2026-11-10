@@ -24,7 +24,7 @@ import {
   type ThreadMember,
 } from "../../plans/thread.js";
 import { type Html, html, PLANS_PATH } from "../layout.js";
-import { PLAN_STYLE } from "../plan-editor.js";
+import { busyAssets, busyAttrs, PLAN_STYLE } from "../plan-editor.js";
 import { type AppEnv, page, rejectedPage, type SignedIn, verifyFormCsrf } from "../session.js";
 import { type AuthDeps, notSent, sendSignInLink } from "./auth.js";
 import {
@@ -233,11 +233,13 @@ async function sharePage(
 </form>`
       : "";
   // The plan pages' look (rc19), so a link page and a plan page answer alike.
-  const content = html`${PLAN_STYLE}<div class="pl">${notice}<h1>${q.thread.name}</h1>
+  // Busy times (rc41) are the signed-in account's own, so only it sees them; never a guest.
+  const busy = who.kind === "account" && q.open ? q.thread.tzid : null;
+  const content = html`${PLAN_STYLE}<div class="pl"${busyAttrs(busy)}>${notice}<h1>${q.thread.name}</h1>
 ${move}${body}
 ${keep}
 ${s.notes === "" ? "" : html`<h2>Notes</h2>${s.notes}`}
-<p class="muted">Anyone with this link can answer${who.kind === "account" ? "" : ", no account needed"}.</p></div>`;
+<p class="muted">Anyone with this link can answer${who.kind === "account" ? "" : ", no account needed"}.</p></div>${busy === null ? "" : busyAssets()}`;
   // Signed in, the page acts as the account: its header says which (§13 rc18).
   return who.kind === "account"
     ? page(c, q.thread.name, content)

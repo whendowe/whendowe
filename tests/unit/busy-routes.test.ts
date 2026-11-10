@@ -4,8 +4,14 @@ import type { StoragePort } from "../../src/db/port.js";
 import { createEvent, findEventForParticipant, setCancelled } from "../../src/events/event.js";
 import { MAX_BUSY_DAYS } from "../../src/feeds/busy.js";
 import { findOrCreatePerson } from "../../src/people/person.js";
+import { createPollThread, startDraft } from "../../src/plans/plan.js";
+import { findThreadForMember } from "../../src/plans/thread.js";
+import { issueVoteLinks } from "../../src/plans/vote-link.js";
 import { BUSY_PATH } from "../../src/web/layout.js";
-import { addAccount, type Browser, browser } from "../property/one-browser.js";
+import { PLANS_PATH } from "../../src/web/routes/plans.js";
+import { VOTE_PATH } from "../../src/web/routes/respond.js";
+import { SHARE_PATH } from "../../src/web/routes/share.js";
+import { addAccount, type Browser, browser, home, post } from "../property/one-browser.js";
 
 // GET /busy (DESIGN §10 rc41): when the signed-in asker is already committed, for the
 // picker to shade. The feed's set (rc34), times only, in the asker's zone; it writes
@@ -209,5 +215,124 @@ describe("the forms ask", () => {
     const e = await event(b.storage, ann, { start: "2101-11-22T10:00", end: "2101-11-22T11:00" });
     const edit = await (await b.request(`/events/${e.id}/edit`)).text();
     expect(edit).toContain(`data-busy="${BUSY_PATH}" data-busy-except="${e.id}">`);
+  });
+});
+
+// The plan pages and voting (B1b): the page says where to ask and in the thread's zone,
+// and each option carries its events for the script to compare. Only when the person
+// signed in is the one choosing — never a guest, and never on someone else's vote link.
+
+const ON = 'data-busy="/busy" data-busy-tz="Europe/Prague"';
+const SCRIPT = "globalThis.WhenDoWePlanBusy";
+
+/** Ann's poll of two evenings, with Bob in it; Ann signed in. */
+async function poll() {
+  const { b, ann } = await signedIn();
+  const bob = await findOrCreatePerson(b.storage, "bob@example.org", { now: NOW });
+  const { threadId, planIds } = await createPollThread(b.storage, {
+    creatorId: ann,
+    group: null,
+    fields: {
+      title: "Dinner",
+      location: null,
+      description: null,
+      allDay: false,
+      tzid: "Europe/Prague",
+    },
+    candidates: [
+      { startLocal: "2101-11-21T18:00", endLocal: "2101-11-21T20:00" },
+      { startLocal: "2101-11-22T18:00", endLocal: "2101-11-22T20:00" },
+    ],
+    people: [bob.id],
+    now: NOW,
+  });
+  const as = async (id: string) => {
+    const a = await findThreadForMember(b.storage, threadId, id);
+    if (a === null) throw new Error("member");
+    return a;
+  };
+  return { b, ann, bob: bob.id, threadId, planIds, as };
+}
+
+const text = async (b: Browser, path: string) => {
+  const res = await b.request(path);
+  expect(res.status, path).toBe(200);
+  return res.text();
+};
+
+describe("plans and voting ask too", () => {
+  it("a plan's page, its day sheet and your draft: in the thread's zone; the thread page doesn't", async () => {
+    const f = await poll();
+    const [first] = f.planIds;
+    const plan = await text(f.b, `${PLANS_PATH}/${f.threadId}/p/${first}`);
+    expect(plan).toContain(`<div class="pl" ${ON}>`);
+    expect(plan).toContain(SCRIPT);
+    expect(plan).toContain(
+      '<p class="clash" data-busy-spans="t:2101-11-21T18:00/2101-11-21T20:00" hidden></p>',
+    );
+    const day = await text(f.b, `${PLANS_PATH}/${f.threadId}/p/${first}?day=2101-11-21`);
+    expect(day).toContain('<p class="small clash" data-busy-day="2101-11-21" hidden></p>');
+
+    const started = await startDraft(f.b.storage, await f.as(f.ann), {
+      fromId: null,
+      rest: false,
+      replace: false,
+      now: NOW,
+    });
+    expect(started.kind).not.toBe("has_draft");
+    const draft = await text(f.b, `${PLANS_PATH}/${f.threadId}/draft?day=2101-11-23`);
+    expect(draft).toContain(`<div class="pl" ${ON}>`);
+    expect(draft).toContain('data-busy-day="2101-11-23"');
+    expect(draft).toContain(SCRIPT);
+
+    const thread = await text(f.b, `${PLANS_PATH}/${f.threadId}`);
+    expect(thread).not.toContain("data-busy");
+    expect(thread).not.toContain(SCRIPT);
+  });
+
+  it("a vote link: only when the one signed in is the one it's for", async () => {
+    const f = await poll();
+    const issued = await issueVoteLinks(f.b.storage, await f.as(f.ann), { now: NOW });
+    if (issued.kind !== "issued") throw new Error(issued.kind);
+    const token = issued.links.find((l) => l.personId === f.bob)?.token ?? "";
+    const link = `${VOTE_PATH}?t=${encodeURIComponent(token)}`;
+    const spans = 'data-busy-spans="t:2101-11-21T18:00/2101-11-21T20:00"';
+
+    // Ann is signed in on this browser: Bob's link must not show Ann's busy times.
+    const asAnn = await text(f.b, link);
+    expect(asAnn).toContain(spans); // the options always carry their times; nothing asks
+    expect(asAnn).not.toContain("data-busy=");
+    expect(asAnn).not.toContain(SCRIPT);
+    const nobody = await text(f.b.another(), link);
+    expect(nobody).not.toContain("data-busy=");
+    expect(nobody).not.toContain(SCRIPT);
+
+    await addAccount(f.b, "bob@example.org"); // Bob, now the account in use
+    const asBob = await text(f.b, link);
+    expect(asBob).toContain(`<div class="pl" ${ON}>`);
+    expect(asBob).toContain(SCRIPT);
+    expect(asBob).toContain(
+      `<strong>Mon 21 Nov, 18:00–20:00</strong><span class="clash" ${spans} hidden></span>`,
+    );
+    // A refused POST shows the page again, still for Bob.
+    const refused = await f.b.request(VOTE_PATH, post({ t: token }));
+    expect(refused.status).toBe(400);
+    expect(await refused.text()).toContain(ON);
+  });
+
+  it("a shared link: for an account answering as itself, never for a guest", async () => {
+    const f = await poll();
+    const { csrf } = await home(f.b);
+    const shared = await (
+      await f.b.request(`${PLANS_PATH}/${f.threadId}/share`, post({ csrf }))
+    ).text();
+    const path = /(\/s\?t=[^\s<"]+)/.exec(shared)?.[1] ?? "";
+    expect(path.startsWith(`${SHARE_PATH}?t=`)).toBe(true);
+    const asAnn = await text(f.b, path);
+    expect(asAnn).toContain(`<div class="pl" ${ON}>`);
+    expect(asAnn).toContain(SCRIPT);
+    const guest = await text(f.b.another(), path);
+    expect(guest).not.toContain("data-busy=");
+    expect(guest).not.toContain(SCRIPT);
   });
 });

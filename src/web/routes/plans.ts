@@ -87,7 +87,14 @@ import {
   shareBox,
   ZONE_GUESS,
 } from "../layout.js";
-import { PLAN_STYLE, planAssets } from "../plan-editor.js";
+import {
+  busyAssets,
+  busyAttrs,
+  busyClash,
+  busyDay,
+  PLAN_STYLE,
+  planAssets,
+} from "../plan-editor.js";
 import {
   type AppEnv,
   notVisible,
@@ -335,8 +342,9 @@ function baseOf(v: View, p: Plan): Plan | null {
   return v.plans.find((x) => x.id === p.answersId && x.status !== "draft") ?? null;
 }
 
-function shell(body: Html, editor = false): Html {
-  return html`${editor ? "" : PLAN_STYLE}<div class="pl">${body}</div>${editor ? planAssets() : ""}`;
+/** busyTz: the thread's zone, on the pages where you choose (rc41); null where you don't. */
+function shell(body: Html, editor = false, busyTz: string | null = null): Html {
+  return html`${editor ? "" : PLAN_STYLE}<div class="pl"${busyAttrs(busyTz)}>${body}</div>${editor ? planAssets() : ""}${busyTz === null ? "" : busyAssets()}`;
 }
 
 // --- the thread -----------------------------------------------------------------------
@@ -658,7 +666,7 @@ function planSheet(
   const here = planPath(t.id, p.id);
   const csrf = html`<input type="hidden" name="csrf" value="${v.csrf}" />`;
   if (q.day !== null)
-    return html`<div class="spread"><h3>${dayLabel(q.day)}</h3><a class="x" href="${here}" aria-label="Close">×</a></div>${dayRows(v, model, q.day, { here: p.letter ?? "", base: base?.letter ?? null })}`;
+    return html`<div class="spread"><h3>${dayLabel(q.day)}</h3><a class="x" href="${here}" aria-label="Close">×</a></div>${busyDay(q.day)}${dayRows(v, model, q.day, { here: p.letter ?? "", base: base?.letter ?? null })}`;
   const mine = p.votes.find((x) => x.personId === v.access.personId)?.answer ?? null;
   const yes = p.votes.filter((x) => x.answer === "yes").length;
   const about = html`<details class="about"><summary><strong>${v.nameOf(p.authorId)}</strong>${p.message === null ? ` · ${instant(v, p.sentAt)}` : html`: “${p.message}”`} <span class="small muted">${yes}/${v.access.members.length} yes</span></summary>
@@ -695,7 +703,7 @@ ${shareBox("Message to paste", html`${t.name}: I've proposed “${p.name}” (${
   }
   const voteButton = (a: Answer, label: string) =>
     html`<button type="submit" name="answer" value="${a}" aria-pressed="${mine === a ? "true" : "false"}">${label}</button>`;
-  return html`${sent}${about}
+  return html`${sent}${about}${busyClash(p.events, true)}
 <form method="post" action="${here}/vote" class="seg" role="group" aria-label="Your vote">${csrf}${voteButton("yes", "Yes")}${voteButton("ifneedbe", "If need be")}${voteButton("no", "No")}</form>
 <details class="suggest"><summary>Add a note</summary><form method="post" action="${threadPath(t.id)}/notes">${csrf}<input type="hidden" name="back" value="${p.id}" />
 <p><textarea name="note" rows="2" maxlength="500" class="wide" aria-label="Note" placeholder="Thursday's bad next week"></textarea></p>
@@ -767,6 +775,8 @@ ${
 }
 <section class="sheet">${planSheet(v, p, base, q, model, link)}</section>
 ${planNotes(v, p)}`,
+    false,
+    t.tzid,
   );
 }
 
@@ -906,7 +916,7 @@ function draftSheet(
       es.filter((e) => dayKeys(e).includes(day));
     const back =
       base === null ? [] : on(base.events).filter((e) => !d.events.some((x) => x.sid === e.sid));
-    return html`<div class="spread"><h3>${dayLabel(day)}</h3><a class="x" href="${here}" aria-label="Close">×</a></div>${err}
+    return html`<div class="spread"><h3>${dayLabel(day)}</h3><a class="x" href="${here}" aria-label="Close">×</a></div>${err}${busyDay(day)}
 ${on(v.agreed).map(
   (e) =>
     html`<p class="small muted"><span class="sw muted" style="--x:${colour(v, e)}"></span> Agreed already: ${e.title}. Settled, so not part of a plan.</p>`,
@@ -980,6 +990,7 @@ ${weeksHtml(
 <a class="btn small" href="${here}?more=${q.more + 1}">Show another week</a>
 <section class="sheet">${draftSheet(v, d, base, q, error)}</section>`,
     true,
+    t.tzid,
   );
 }
 
