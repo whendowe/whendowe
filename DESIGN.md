@@ -14,7 +14,7 @@ This is two things at once:
 
 An agent picking this up should: read §2–§5 for context, follow §8–§10 to scaffold, then work the roadmap in §15 one milestone at a time, treating §9 (the verification gate) as the Definition of Done for **every** change and §16 as hard constraints.
 
-**Document map.** This file has two companions: **`WORKFLOWS.md`** (personas, user stories, the north-star vision, and the response/consensus primitive — what people agree on and who sees it) and **`BUSINESS.md`** (segments, revenue model, business-mode triggers). Division of labor: DESIGN.md owns *how truth converges*; WORKFLOWS.md owns *what M3+ must do for people*; BUSINESS.md changes no scope but constrains decisions (e.g. provider priority, CLA timing). **Precedence note:** WORKFLOWS.md §9 lists schema/scope deltas *pending integration* into this file — where they conflict with §2's out-of-scope list or §17 (notably: visibility tiers, the proposal/response lifecycle, multi-person, account-less responses), WORKFLOWS.md reflects the owner's newer intent. The agent reads this file before M0 and WORKFLOWS.md before starting M3.
+**Document map.** This file has one companion: **`WORKFLOWS.md`** (personas, user stories, the north-star vision, and the response/consensus primitive — what people agree on and who sees it). Division of labor: DESIGN.md owns *how truth converges*; WORKFLOWS.md owns *what M3+ must do for people*. Commercial planning is kept out of this repo: it changes no scope here, and where it constrains a decision (e.g. provider priority, CLA timing) the owner states the constraint in the issue or PR. **Precedence note:** WORKFLOWS.md §9 lists schema/scope deltas *pending integration* into this file — where they conflict with §2's out-of-scope list or §17 (notably: visibility tiers, the proposal/response lifecycle, multi-person, account-less responses), WORKFLOWS.md reflects the owner's newer intent. The agent reads this file before M0 and WORKFLOWS.md before starting M3.
 
 ---
 
@@ -142,7 +142,8 @@ whendowe/
   .devcontainer/               # identical env for owner, contributors, cloud agents (Hegel needs Linux)
   DESIGN.md                    # this document
   WORKFLOWS.md                 # user stories, north star, response primitive (companion)
-  BUSINESS.md                  # segments, revenue model, business-mode triggers (companion)
+  SECURITY.md                  # how to report a vulnerability (private vulnerability reporting)
+  CONTRIBUTING.md              # what contributions are accepted, for now
   package.json                 # deps, npm scripts (check/soak/dev)
   package-lock.json
   tsconfig.json                # strict + noUncheckedIndexedAccess
@@ -1865,7 +1866,7 @@ After the MVP, per-instance overrides are "start accepting rows into `event_over
 
 ## 16. Non-goals & anti-patterns (hard constraints — do NOT do)
 
-- **Mail is request-scoped in the MVP, never a broadcast channel** (rc25). No free-form message body (titles and names only, as now), no "send to everyone", no HTML, no tracking. **And nothing may preclude a consented mailing list later** (a possible paid feature, BUSINESS §5):
+- **Mail is request-scoped in the MVP, never a broadcast channel** (rc25). No free-form message body (titles and names only, as now), no "send to everyone", no HTML, no tracking. **And nothing may preclude a consented mailing list later** (a possible paid feature):
   - No code may assume every address was added by someone else. Subscribing yourself is a different legal basis (consent, double opt-in), and gets a column when it exists.
   - Transactional and bulk mail never share a stream or a sending domain. Cloudflare Email Service is for transactional mail only, so bulk mail would have a provider of its own behind the mail port.
   - Mail limits are settings, not constants, each account's share of the cap among them (§13 rc37). Raising them for an organizer is a product decision, not a code change.
@@ -1873,7 +1874,7 @@ After the MVP, per-instance overrides are "start accepting rows into `event_over
 - **Never identify events by title/time.** Identity is the canonical UID in `extendedProperties`.
 - **A mirror deletion must never cascade** to deleting the canonical event or sibling projections — it's an unsubscribe.
 - **No per-instance recurrence overrides** in MVP (whole-series + single events only). The *schema* for them exists (`event_override`, `exdates` — §10) as a seam; it stays empty. The constraint is behavioral: no code path writes it yet.
-- **No multi-tenant / OAuth-verification path** in MVP. *Multi-person* is MVP scope (§2); multi-*tenant* means orgs, seats and admins over people (BUSINESS §6) and is not. Isolation between unrelated groups comes from participation — you see an event because you participate in it — not from a tenant id.
+- **No multi-tenant / OAuth-verification path** in MVP. *Multi-person* is MVP scope (§2); multi-*tenant* means orgs, seats and admins over people and is not. Isolation between unrelated groups comes from participation — you see an event because you participate in it — not from a tenant id.
 - **No provider-specific concept in domain code.** Google is the first two-way provider, not the model. Identity metadata, sync cursors, and change classification go through the `CalendarProvider` port in provider-neutral terms, so Microsoft Graph and CalDAV are new adapters, never a refactor (§5). Google-only shortcuts belong in `src/providers/google*.ts` alone.
 - **Never show an email address to anyone but its owner** unless that person turned it on for that group, event or thread (§10 *Privacy basics*, rc21). This includes mail, history and every list of people.
 - **No business logic in views/templates.** Build a typed (zod) view-model; views only render its fields.
@@ -1890,7 +1891,7 @@ After the MVP, per-instance overrides are "start accepting rows into `event_over
 
 ## 17. Open decisions (owner: you)
 
-- **Who is the controller, and when to incorporate** (rc21). Today the owner, as a private person. Incorporating ring-fences liability for a breach, which scales with how sensitive the data is, not with revenue: decide it before the first sealed group goes live. Commercial detail belongs in BUSINESS.md.
+- **Who is the controller, and when to incorporate** (rc21). Today the owner, as a private person. Incorporating ring-fences liability for a breach, which scales with how sensitive the data is, not with revenue: decide it before the first sealed group goes live. Commercial detail is kept out of this repo.
 
 - ~~Project name~~ — **resolved: WhenDoWe** (`whendowe.org`, `github.com/whendowe/whendowe`). It states the product's question. M0 pre-flight: verify `whendowe.org` in Google Search Console now (needed later for the OAuth consent screen branding and the push-notification endpoint — §12) and reserve the `whendowe` npm name.
 - **Confirm AGPL-3.0** vs Apache-2.0 vs open-core (§7).
@@ -1905,7 +1906,7 @@ After the MVP, per-instance overrides are "start accepting rows into `event_over
 
 **Two repos: product vs instances.**
 - **`whendowe/whendowe` — the product (public-ready from commit one).** App, deploy *adapters* (wrangler template, Dockerfile, compose), migrations, CI. Its CI **never deploys — it publishes**: green gate → versioned artifacts (the Node image `ghcr.io/whendowe/whendowe:<tag>`, the Worker bundle `ghcr.io/whendowe/whendowe-worker:<tag>`, tagged releases). Nothing instance-specific ever enters this repo or its history: no account/database IDs, no zones, no secrets (history is forever; it will be open-sourced). Schema + code stay one atomic PR because migrations live here, with the code.
-- **`whendowe/deployments` — private instance registry (GitOps).** One directory per instance (`staging/`, `prod/`, later `customer-x/`): a product **version pin** + instance identity (vars, D1 ids, domain) + secret references. Its CI performs migrate-then-deploy against the instance's target. Promotion = PRs changing pins: staging auto-bumps via bot PR on new builds; production is an owner-reviewed pin change (the Environment approval lives here). **A new paid deployment — on-prem bundle or dedicated Cloudflare account — is one new directory**, which is the commercial on-prem story (BUSINESS §3 line 2) made operational.
+- **`whendowe/deployments` — private instance registry (GitOps).** One directory per instance (`staging/`, `prod/`, later `customer-x/`): a product **version pin** + instance identity (vars, D1 ids, domain) + secret references. Its CI performs migrate-then-deploy against the instance's target. Promotion = PRs changing pins: staging auto-bumps via bot PR on new builds; production is an owner-reviewed pin change (the Environment approval lives here). **A new paid deployment — on-prem bundle or dedicated Cloudflare account — is one new directory**, which is how a paid on-prem or dedicated offering would be run.
 
 Privilege separation inside the product repo remains: branch protection (no direct pushes to `main`, owner included) and **CODEOWNERS** on the verifier surface. Issues + Actions in the product repo orchestrate *development*; the deployments repo orchestrates *operation*.
 

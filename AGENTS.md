@@ -1,7 +1,7 @@
 # AGENTS.md — how to work in this repo
 
 You are working on **WhenDoWe**. `DESIGN.md` is normative; this file is the operating manual.
-Read order: `DESIGN.md` before any work; `WORKFLOWS.md` before anything M3+; `BUSINESS.md` only when a decision needs commercial context.
+Read order: `DESIGN.md` before any work; `WORKFLOWS.md` before anything M3+. Commercial context is not in this repo; if a decision seems to need it, ask the owner in the issue or PR.
 
 ## Commands
 
