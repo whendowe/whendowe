@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { z } from "zod";
+import { answerBusy, asked } from "./busy.js";
 import { expect, type Page, test } from "./fixtures.js";
 
 // The plan pages (DESIGN §10 rc19) in a real browser. pages.ts renders a game table of
@@ -183,6 +184,65 @@ test("a new shared link is a message to paste, with Copy where the browser can",
   const copied = z.string().parse(await page.evaluate("navigator.clipboard.readText()"));
   expect(copied).toBe(await box.inputValue());
   expect(errors).toEqual([]);
+});
+
+// Busy times while you choose (DESIGN §10 rc41, B1b): the plan's week rows, its sheet, and
+// the options of a vote. The fixture pages are files, so the request is answered here.
+test.describe("busy times while you choose (rc41)", () => {
+  const BUSY = [
+    { allDay: false, start: "2026-11-26T20:00", end: "2026-11-26T22:00" },
+    { allDay: true, from: "2026-11-09", to: "2026-11-10" },
+  ];
+  const cell = (page: Page, key: string) => page.locator(`.weeks .dh[data-k="${key}"]`).first();
+
+  test("a plan's days are marked, and the sheet says how many of its events clash", async ({
+    page,
+  }) => {
+    await answerBusy(page, { status: 200, busy: BUSY });
+    const errors = await open(page, "plan-answer");
+    await expect(cell(page, "2026-11-26")).toHaveClass(/busy/);
+    await expect(cell(page, "2026-11-26")).toHaveAttribute("aria-label", /, busy 20:00–22:00$/);
+    await expect(cell(page, "2026-11-10")).toHaveAttribute("aria-label", /, busy all day$/);
+    await expect(cell(page, "2026-11-12")).not.toHaveClass(/busy/);
+    await expect(page.locator(".sheet .clash")).toHaveText("You're busy during 1 of these events");
+    // The days on screen, in one request, in the thread's zone.
+    expect(await asked(page)).toEqual(["/busy?from=2026-11-02&to=2026-12-13&tz=Europe%2FPrague"]);
+    // The header is plan-answer.png's; masked here, as its dotted underline once rendered
+    // a few pixels differently under a full parallel run.
+    await expect(page).toHaveScreenshot("plan-busy.png", { mask: [page.locator(".head")] });
+    expect(errors).toEqual([]);
+  });
+
+  test("voting signed in: each option says whether it clashes", async ({ page }) => {
+    await answerBusy(page, { status: 200, busy: BUSY });
+    const errors = await open(page, "share-over-claim");
+    await expect(page.locator(".clash")).toHaveText(["", "You're busy during 1 of these events"]);
+    await expect(page.locator(".clash").first()).toBeHidden();
+    expect(await asked(page)).toEqual(["/busy?from=2026-11-05&to=2026-12-12&tz=Europe%2FPrague"]);
+    expect(errors).toEqual([]);
+  });
+
+  test("a guest's page never asks", async ({ page }) => {
+    await answerBusy(page, { status: 200, busy: BUSY });
+    const errors = await open(page, "share-guest");
+    await expect(page.getByRole("button", { name: "Send my answer" })).toBeVisible();
+    expect(await asked(page)).toEqual([]);
+    await expect(page.locator(".clash:visible")).toHaveCount(0);
+    expect(errors).toEqual([]);
+  });
+
+  for (const status of [500, 0]) {
+    test(`no answer (${status === 0 ? "offline" : status}): nothing marked, nothing broken`, async ({
+      page,
+    }) => {
+      await answerBusy(page, { status, busy: BUSY });
+      const errors = await open(page, "plan-answer");
+      await expect.poll(async () => (await asked(page)).length).toBe(1);
+      await expect(page.locator(".dh.busy")).toHaveCount(0);
+      await expect(page.locator(".sheet .clash")).toBeHidden();
+      expect(errors).toEqual([]);
+    });
+  }
 });
 
 test.describe("without JavaScript", () => {

@@ -13,6 +13,7 @@ export const SCRIPT_HASHES: readonly string[] = [
   "sha256-ifuKO1T8Vg/qO2twwUmviNp1akRXwgQk4DZcpWtVKDE=",
   "sha256-VeO5M0gSYzkGL61C69kKmK83LS4rYXE/Y/YbskiZynM=",
   "sha256-to6JPZkUfWfQiXrrmnVXATfIzIPJqlnSwh2dzCjuWAM=",
+  "sha256-YQ9IFABwxU0PS7BYNh5XKwVXUsV23ZIHkDANGzKczsI=",
 ];
 
 /**

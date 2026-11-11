@@ -31,7 +31,7 @@ import { memberName, type ThreadAccess } from "../../plans/thread.js";
 import { type IssuedVoteLink, resolveVoteLink, VOTE_LINK_TTL_MS } from "../../plans/vote-link.js";
 import { dayLabel, spanText, whenText } from "../../plans/weeks.js";
 import { type Html, html, type Preview, renderPage } from "../layout.js";
-import { PLAN_STYLE } from "../plan-editor.js";
+import { busyAssets, busyAttrs, busyClash, PLAN_STYLE } from "../plan-editor.js";
 import type { AppEnv } from "../session.js";
 import { BUSY_LABEL, describeRRule, formatWhen } from "./events.js";
 
@@ -245,10 +245,10 @@ function planSummary(access: Voter, p: Plan): Html {
   const n = (a: Answer) => p.votes.filter((v) => v.answer === a).length;
   const what =
     e !== undefined && more.length === 0
-      ? html`<strong>${whenText(e)}</strong>${e.location === null ? "" : html`<br />📍 ${e.location}`}${
+      ? html`<strong>${whenText(e)}</strong>${busyClash(p.events)}${e.location === null ? "" : html`<br />📍 ${e.location}`}${
           e.description === null ? "" : html`<br /><span class="muted">${e.description}</span>`
         }`
-      : html`<strong>${p.name}</strong> · ${p.events.length} events, ${spanText(p.events)}`;
+      : html`<strong>${p.name}</strong> · ${p.events.length} events, ${spanText(p.events)}${busyClash(p.events)}`;
   return html`${what}<br /><span class="muted">${author === undefined ? "" : `from ${memberName(author)} · `}${n("yes")} yes · ${n("ifneedbe")} if need be · ${n("no")} no</span>`;
 }
 
@@ -296,11 +296,21 @@ export function answerPart(
   ${mine === null ? "" : html`<p class="muted">You said ${ANSWER_LABEL[mine]}. Tap another to change it.</p>`}`;
 }
 
+/**
+ * A vote link works without a session, and may be opened where someone else is signed in:
+ * busy times are the signed-in person's, so they show only when that is who it is for.
+ */
+function ownLink(c: Context<AppEnv>, access: ThreadAccess): boolean {
+  return c.get("signedIn")?.personId === access.personId;
+}
+
 async function votePage(
   storage: StoragePort,
   access: ThreadAccess,
   token: string,
   notice: Html | string,
+  /** Whether the signed-in person is the one this link is for: then busy times show (rc41). */
+  own: boolean,
 ): Promise<string> {
   const plans = await listPlans(storage, access);
   const onTable = plans.filter((p) => p.status === "on_table");
@@ -322,10 +332,10 @@ async function votePage(
   return linkPage(
     "Your vote",
     // The plan pages' look (rc19), so a link page and a plan page answer alike.
-    html`${PLAN_STYLE}<div class="pl">${notice}<h1>${access.thread.name}</h1>
+    html`${PLAN_STYLE}<div class="pl"${busyAttrs(own ? access.thread.tzid : null)}>${notice}<h1>${access.thread.name}</h1>
 ${body}
 ${notes === "" ? "" : html`<h2>Notes</h2>${notes}`}
-<p class="muted">This link is just for you — please don't forward it. No account needed.</p></div>`,
+<p class="muted">This link is just for you — please don't forward it. No account needed.</p></div>${own ? busyAssets() : ""}`,
     questionPreview(access.thread.name, onTable),
   );
 }
@@ -471,7 +481,7 @@ export function registerRespondRoutes(app: Hono<AppEnv>, deps: RespondRouteDeps)
       c.req.query("saved") === "1"
         ? html`<p><strong>Thanks — your vote is saved.</strong> You can change it any time with this link.</p>`
         : "";
-    return c.html(await votePage(deps.storage, access, token, notice));
+    return c.html(await votePage(deps.storage, access, token, notice, ownLink(c, access)));
   });
 
   app.post(VOTE_PATH, async (c) => {
@@ -485,7 +495,13 @@ export function registerRespondRoutes(app: Hono<AppEnv>, deps: RespondRouteDeps)
     const answers = readAnswers(form);
     const refuse = async (message: string, status: 400 | 409) =>
       c.html(
-        await votePage(deps.storage, access, token, html`<p class="error">${message}</p>`),
+        await votePage(
+          deps.storage,
+          access,
+          token,
+          html`<p class="error">${message}</p>`,
+          ownLink(c, access),
+        ),
         status,
       );
     if (answers === null) return refuse("Pick an answer first.", 400);

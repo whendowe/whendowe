@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import { html } from "./layout.js";
+import type { PlanEventLike } from "../plans/diff.js";
+import { BUSY_PATH, html } from "./layout.js";
 
 // The week-row editor (DESIGN §10 rc19): the plan pages' styles and, with JavaScript, the
 // script that lets a stretch be picked up and put down or dragged (slice P4).
@@ -80,6 +81,11 @@ export const PLAN_STYLE = html`<style>
   .pl .dh.grab { outline: 3px dashed var(--fg); outline-offset: 2px; z-index: 1; animation: pl-held 1s ease-in-out infinite alternate; }
   @keyframes pl-held { to { outline-offset: 4px; } }
   @media (prefers-reduced-motion: reduce) { .pl .dh.grab { animation: none; } }
+  /* Busy (rc41): a dot in the corner, in the neutral ink, so no option's colour claims it. */
+  .pl .dh.busy::after { content: ""; position: absolute; top: 3px; right: 3px; width: 6px; height: 6px; border-radius: 50%;
+    background: var(--fg); box-shadow: 0 0 0 1.5px var(--tile); }
+  .pl .clash { font-weight: 700; }
+  .pl span.clash::before { content: " · "; font-weight: 400; }
   .pl .rib { box-sizing: border-box; display: block; min-width: 0; padding: 3px 6px; border-radius: 6px; font-size: .78rem; line-height: 1.25;
     overflow: hidden; overflow-wrap: anywhere; position: relative; text-decoration: none; color: var(--fg); }
   .pl .rib small { font-weight: 400; font-size: .7rem; }
@@ -410,6 +416,191 @@ const EDITOR_SCRIPT = html`<script>
   document.addEventListener("touchmove", function (ev) { if (drag && drag.moving) ev.preventDefault(); }, { passive: false });
 })();
 </script>`;
+
+// Busy times while you choose (DESIGN §10 rc41): a plan's week rows, its day sheet, and
+// voting on a plan or a poll. The page carries data-busy (where to ask) and data-busy-tz
+// (the thread's zone, which every timed event in it is in) only when it is the signed-in
+// person choosing for themselves; this asks for the days on screen and then marks:
+//
+// - each day (.dh[data-k]) with something on: a dot, and ", busy 18:00–20:00" in its label;
+// - [data-busy-day="YYYY-MM-DD"]: "You're busy: 18:00–20:00" for the day the sheet shows;
+// - [data-busy-spans]: a vote option's events, "t:start/end" or "d:first/afterLast"
+//   separated by spaces, as "You're busy then" and the like when they clash.
+//
+// Advice only: until an answer comes, or if none does, nothing changes. Times are compared
+// as "YYYY-MM-DDTHH:MM" strings, which sort as the wall clock does in one zone.
+// Like the editor's, the script is a literal inside the html tag: no backtick, dollar-brace
+// or backslash. Its pure logic is published as globalThis.WhenDoWePlanBusy for unit tests.
+const BUSY_SCRIPT = html`<script>
+(function () {
+  "use strict";
+  var MS = 86400000, MAX_DAYS = 62, MAX_ASKS = 6;
+  var DATE = /^[0-9]{4}-[0-9]{2}-[0-9]{2}$/;
+  var MINUTE = /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}$/;
+  function pad(n) { return (n < 10 ? "0" : "") + n; }
+  function isDay(k) {
+    if (typeof k !== "string" || !DATE.test(k)) return false;
+    var d = new Date(k + "T00:00:00Z");
+    return !isNaN(d.getTime()) && iso(d) === k;
+  }
+  function iso(d) { return d.getUTCFullYear() + "-" + pad(d.getUTCMonth() + 1) + "-" + pad(d.getUTCDate()); }
+  function addDays(k, n) { return iso(new Date(Date.parse(k + "T00:00:00Z") + n * MS)); }
+  function isMinute(t) { return typeof t === "string" && MINUTE.test(t) && isDay(t.slice(0, 10)); }
+
+  /** The server's busy items as [a, z) wall-clock intervals; anything malformed is skipped. */
+  function spans(items) {
+    var out = [];
+    (Array.isArray(items) ? items : []).forEach(function (b) {
+      if (!b || typeof b !== "object") return;
+      var a, z;
+      if (b.allDay === true) {
+        if (!isDay(b.from) || !isDay(b.to)) return;
+        a = b.from + "T00:00"; z = addDays(b.to, 1) + "T00:00";
+      } else {
+        if (!isMinute(b.start) || !isMinute(b.end)) return;
+        a = b.start; z = b.end;
+      }
+      if (z > a) out.push({ a: a, z: z });
+    });
+    return out;
+  }
+  function meets(list, a, z) { return list.some(function (s) { return s.a < z && s.z > a; }); }
+  /** "18:00–20:00, all day": what is on day k, clipped to it, earliest first; "" if nothing. */
+  function dayText(list, k) {
+    var a = k + "T00:00", z = addDays(k, 1) + "T00:00", seen = {};
+    return list.filter(function (s) { return s.a < z && s.z > a; })
+      .map(function (s) { return { a: s.a < a ? a : s.a, z: s.z > z ? z : s.z }; })
+      .sort(function (x, y) { return x.a < y.a ? -1 : x.a > y.a ? 1 : x.z < y.z ? -1 : x.z > y.z ? 1 : 0; })
+      .map(function (s) {
+        return s.a === a && s.z === z ? "all day" : s.a.slice(11) + "–" + (s.z === z ? "24:00" : s.z.slice(11));
+      })
+      .filter(function (t) { if (seen[t]) return false; seen[t] = true; return true; })
+      .join(", ");
+  }
+  /** One event as "t:start/end" (timed) or "d:first/afterLast" (whole days); null if malformed. */
+  function wanted(item) {
+    var kind = item.slice(0, 2), parts = item.slice(2).split("/");
+    if (parts.length !== 2) return null;
+    if (kind === "t:" && isMinute(parts[0]) && isMinute(parts[1]) && parts[1] > parts[0])
+      return { days: false, a: parts[0], z: parts[1] };
+    if (kind === "d:" && isDay(parts[0]) && isDay(parts[1]) && parts[1] > parts[0])
+      return { days: true, a: parts[0], z: parts[1] };
+    return null;
+  }
+  function wantedAll(attr) {
+    var out = [];
+    String(attr).split(" ").forEach(function (item) { var w = wanted(item); if (w) out.push(w); });
+    return out;
+  }
+  /** What a vote option says, given its data-busy-spans; "" when it meets nothing. */
+  function clashText(list, attr) {
+    var ws = wantedAll(attr);
+    if (ws.length === 1 && ws[0].days) {
+      var n = 0;
+      for (var k = ws[0].a; k < ws[0].z; k = addDays(k, 1)) if (meets(list, k + "T00:00", addDays(k, 1) + "T00:00")) n++;
+      return n === 0 ? "" : "You're busy on " + n + " of these days";
+    }
+    var hit = ws.filter(function (w) { return w.days ? meets(list, w.a + "T00:00", w.z + "T00:00") : meets(list, w.a, w.z); }).length;
+    if (hit === 0) return "";
+    return ws.length === 1 ? "You're busy then" : "You're busy during " + hit + " of these events";
+  }
+  /** The days to ask for, first to last, in requests of at most MAX_DAYS days each. */
+  function asks(keys) {
+    var days = keys.filter(isDay).sort(), out = [];
+    if (days.length === 0) return out;
+    for (var k = days[0]; k <= days[days.length - 1] && out.length < MAX_ASKS; k = addDays(k, MAX_DAYS)) {
+      var to = addDays(k, MAX_DAYS - 1);
+      out.push({ from: k, to: to < days[days.length - 1] ? to : days[days.length - 1] });
+    }
+    return out;
+  }
+
+  globalThis.WhenDoWePlanBusy = { spans: spans, dayText: dayText, clashText: clashText, asks: asks };
+  if (typeof document === "undefined") return;
+
+  var box = document.querySelector("[data-busy][data-busy-tz]");
+  if (!box || typeof fetch !== "function") return;
+  var url = box.getAttribute("data-busy"), tz = box.getAttribute("data-busy-tz");
+  var cells = box.querySelectorAll(".dh[data-k]");
+  var days = box.querySelectorAll("[data-busy-day]");
+  var options = box.querySelectorAll("[data-busy-spans]");
+  var keys = [];
+  for (var i = 0; i < cells.length; i++) keys.push(cells[i].getAttribute("data-k"));
+  for (var j = 0; j < days.length; j++) keys.push(days[j].getAttribute("data-busy-day"));
+  for (var o = 0; o < options.length; o++) {
+    wantedAll(options[o].getAttribute("data-busy-spans")).forEach(function (w) {
+      keys.push(w.a.slice(0, 10));
+      keys.push(w.days ? addDays(w.z, -1) : w.z.slice(0, 10));
+    });
+  }
+  Promise.all(asks(keys).map(function (r) {
+    var q = "?from=" + r.from + "&to=" + r.to + "&tz=" + encodeURIComponent(tz);
+    return fetch(url + q, { credentials: "same-origin", headers: { Accept: "application/json" } })
+      .then(function (res) { return res.ok ? res.json() : null; })
+      .then(function (data) { return data && Array.isArray(data.busy) ? data.busy : []; })
+      .catch(function () { return []; });
+  })).then(function (answers) {
+    var list = spans([].concat.apply([], answers));
+    if (list.length === 0) return;
+    for (var c = 0; c < cells.length; c++) {
+      var text = dayText(list, cells[c].getAttribute("data-k"));
+      if (text === "") continue;
+      cells[c].classList.add("busy");
+      cells[c].setAttribute("aria-label", cells[c].getAttribute("aria-label") + ", busy " + text);
+    }
+    for (var d = 0; d < days.length; d++) {
+      var on = dayText(list, days[d].getAttribute("data-busy-day"));
+      if (on !== "") { days[d].textContent = "You're busy: " + on; days[d].hidden = false; }
+    }
+    for (var p = 0; p < options.length; p++) {
+      var says = clashText(list, options[p].getAttribute("data-busy-spans"));
+      if (says !== "") { options[p].textContent = says; options[p].hidden = false; }
+    }
+  });
+})();
+</script>`;
+
+/**
+ * Busy times for the person choosing (rc41): the attributes that turn the busy script on
+ * for a page, or nothing when someone else's choice is on screen.
+ */
+export function busyAttrs(tzid: string | null) {
+  return tzid === null ? "" : html` data-busy="${BUSY_PATH}" data-busy-tz="${tzid}"`;
+}
+
+type Timed = Pick<PlanEventLike, "allDay" | "startLocal" | "endLocal">;
+
+/** A vote option's events, for the busy script: "t:start/end" or "d:first/afterLast". */
+export function busySpans(events: readonly Timed[]): string {
+  // Stored times carry seconds (and dates may carry a time); the script compares minutes.
+  const cut = (e: Timed) => (e.allDay ? 10 : 16);
+  return events
+    .map(
+      (e) =>
+        `${e.allDay ? "d" : "t"}:${e.startLocal.slice(0, cut(e))}/${e.endLocal.slice(0, cut(e))}`,
+    )
+    .join(" ");
+}
+
+/**
+ * Where a vote option says it clashes, after its time ("· You're busy then"), or as a line
+ * of its own; empty and hidden until the script fills it.
+ */
+export function busyClash(events: readonly Timed[], line = false) {
+  return line
+    ? html`<p class="clash" data-busy-spans="${busySpans(events)}" hidden></p>`
+    : html`<span class="clash" data-busy-spans="${busySpans(events)}" hidden></span>`;
+}
+
+/** The day sheet's line: "You're busy: …", empty and hidden until the script fills it. */
+export function busyDay(day: string) {
+  return html`<p class="small clash" data-busy-day="${day}" hidden></p>`;
+}
+
+/** The busy script alone, for the pages that vote but have no week rows. */
+export function busyAssets() {
+  return BUSY_SCRIPT;
+}
 
 /** The plan pages' styles and the editor script, for a page that has week rows. */
 export function planAssets() {
