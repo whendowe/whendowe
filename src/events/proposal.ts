@@ -12,6 +12,7 @@ import {
   fieldEditStatements,
   flatten,
 } from "./event.js";
+import { shownEmailSql } from "./participation.js";
 
 // Change proposals — the `propose` tier (DESIGN §10 rc13, MVP-2 slice 2E-2; WORKFLOWS §3).
 // A `propose` participant's edit doesn't apply: it waits, attributed, for an `edit`
@@ -102,10 +103,10 @@ function toProposal(row: unknown, access: EventAccess): ChangeProposal {
 }
 
 const PROPOSAL_COLUMNS = `ecp.id, ecp.proposed_by, pp.email AS proposer_email,
-  pp.display_name AS proposer_name, px.handle AS proposer_handle, px.show_email AS proposer_show_email,
+  pp.display_name AS proposer_name, px.handle AS proposer_handle, ${shownEmailSql("px")} AS proposer_show_email,
   ecp.base_revision, ecp.fields, ecp.status, ecp.decided_by, dp.email AS decided_by_email,
   dp.display_name AS decided_by_name, dx.handle AS decided_by_handle,
-  dx.show_email AS decided_by_show_email, ecp.decided_at, ecp.created_at`;
+  ${shownEmailSql("dx")} AS decided_by_show_email, ecp.decided_at, ecp.created_at`;
 const PROPOSAL_FROM = `event_change_proposal ecp
   JOIN person pp ON pp.id = ecp.proposed_by
   LEFT JOIN event_participation px

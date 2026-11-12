@@ -13,6 +13,7 @@ import {
   groupDefaults,
   PARTICIPATION_COLUMNS,
   type Participation,
+  shownEmailSql,
   toParticipation,
 } from "./participation.js";
 
@@ -684,10 +685,10 @@ export async function listHistory(
   const rows = await storage.query({
     // An accepted proposal is applied only at its base revision, so it IS revision
     // base_revision + 1 — exactly one per revision, no extra column needed.
-    sql: `SELECT c.revision, c.actor, p.email, p.display_name, ap.handle, ap.show_email,
+    sql: `SELECT c.revision, c.actor, p.email, p.display_name, ap.handle, ${shownEmailSql("ap")} AS show_email,
                  ecp.proposed_by AS proposer_id, pp.email AS proposer_email,
                  pp.display_name AS proposer_display_name, xp.handle AS proposer_handle,
-                 xp.show_email AS proposer_show_email, c.diff, c.created_at
+                 ${shownEmailSql("xp")} AS proposer_show_email, c.diff, c.created_at
           FROM change_log c LEFT JOIN person p ON p.id = c.actor
             LEFT JOIN event_participation ap
               ON ap.canonical_event_id = c.canonical_event_id AND ap.person_id = c.actor
@@ -850,11 +851,14 @@ export type DeleteEventResult =
   /** Still ahead and still on: cancel it first, so its people are told (rc13). */
   | { readonly kind: "upcoming" }
   /** Mirrored into a calendar still (MVP-4): purged once the mirrors are gone. */
-  | { readonly kind: "mirrored" };
+  | { readonly kind: "mirrored" }
+  /** rc42: a verified event is removed for good only when everyone agrees (slice 6). */
+  | { readonly kind: "verified" };
 
 /** Whether this event may be deleted now, by this participant — for the page's buttons. */
 export function canDelete(access: EventAccess, now: string): DeleteEventResult["kind"] {
   if (access.participation.editTier !== "edit") return "forbidden";
+  if (access.event.verifiedAt !== null) return "verified";
   const live = access.event.status === "scheduled" || access.event.status === "proposed";
   return live && !isOver(access.event, now) ? "upcoming" : "deleted";
 }
@@ -889,13 +893,18 @@ export async function setEventRetention(
   storage: StoragePort,
   access: EventAccess,
   days: number,
-): Promise<boolean> {
-  if (access.participation.editTier !== "edit") return false;
+): Promise<"saved" | "forbidden" | "verified"> {
+  if (access.participation.editTier !== "edit") return "forbidden";
+  // rc42: on a verified event, keeping it shorter is removing it sooner — that needs
+  // everyone (slice 6). Longer is anyone's who may edit it. Checked in the statement too.
+  const verified = access.event.verifiedAt !== null;
+  if (verified && days < (await eventRetention(storage, access))) return "verified";
   await storage.batch([
     {
-      sql: "UPDATE canonical_event SET retain_days = ? WHERE id = ?",
-      params: [days, access.event.id],
+      sql: `UPDATE canonical_event SET retain_days = ?
+            WHERE id = ? AND (verified_at IS NULL OR retain_days <= ?)`,
+      params: [days, access.event.id, days],
     },
   ]);
-  return true;
+  return "saved";
 }

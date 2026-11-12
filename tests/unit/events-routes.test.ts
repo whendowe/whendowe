@@ -1829,6 +1829,89 @@ it("verified (rc42): made so at creation or by an editor; every page says so; no
   );
 });
 
+it("verified (rc42): addresses shown, nobody removed, not deleted or shortened; the mail says so", async () => {
+  const h = await harness();
+  const { dm, group } = await setup(h);
+  const ann = await join(h, dm, group, "ann@example.org", "view", "FULL");
+  const event = await createVia(h, dm, group, {
+    ...NIGHT,
+    start: "2101-01-01T19:00",
+    end: "2101-01-01T23:00",
+  });
+  const before = await text(h, event, ann);
+  expect(before).not.toContain("dm@example.org");
+  expect(await text(h, event, dm)).toContain(">Remove</button>");
+  expect(await text(h, event, dm)).toContain("Delete it for everyone");
+  const annId =
+    /name="person" value="([^"]+)" \/><button type="submit">Remove/.exec(
+      (await text(h, event, dm)).split("ann")[1] ?? "",
+    )?.[1] ?? "";
+  await h.app.request(`${event}/verify`, post({ csrf: dm.csrf }, dm.cookie));
+
+  // Her answer link's mail says her address is shown.
+  await sendLinks(h, dm, event);
+  expect([...h.sent].reverse().find((m) => m.to === "ann@example.org")?.text).toContain(
+    "your address is shown to the others on it",
+  );
+  // Each sees the others' addresses beside their names.
+  expect(await text(h, event, ann)).toContain("dm@example.org");
+  expect(await text(h, event, dm)).toContain("ann@example.org");
+
+  // No remove buttons, and a remove is refused; no delete link, and deleting is refused.
+  const asDm = await text(h, event, dm);
+  expect(asDm).not.toContain(">Remove</button>");
+  expect(asDm).not.toContain("Delete it for everyone");
+  expect(asDm).toContain("Answers here are verified: it can be kept longer, not shorter.");
+  const remove = await h.app.request(
+    `${event}/people/remove`,
+    post({ csrf: dm.csrf, person: annId }, dm.cookie),
+  );
+  expect(remove.status).toBe(409);
+  expect(await remove.text()).toContain(
+    "nobody removes anyone else. People can leave by themselves.",
+  );
+  await h.app.request(`${event}/cancel`, post({ csrf: dm.csrf }, dm.cookie));
+  const asks = await h.app.request(`${event}/delete`, { headers: { cookie: dm.cookie } });
+  expect(asks.status).toBe(409);
+  expect(await asks.text()).toContain(
+    "it stays as the record until everyone on it agrees to remove it",
+  );
+  expect((await h.app.request(`${event}/delete`, post({ csrf: dm.csrf }, dm.cookie))).status).toBe(
+    409,
+  );
+  expect((await h.app.request(event, { headers: { cookie: dm.cookie } })).status).toBe(200);
+
+  // Kept longer, yes; shorter, no.
+  const shorter = await h.app.request(
+    `${event}/retention`,
+    post({ csrf: dm.csrf, retain_days: "180" }, dm.cookie),
+  );
+  expect(shorter.status).toBe(409);
+  expect(await shorter.text()).toContain("it can be kept longer but not shorter");
+  expect(
+    (
+      await h.app.request(
+        `${event}/retention`,
+        post({ csrf: dm.csrf, retain_days: "730" }, dm.cookie),
+      )
+    ).status,
+  ).toBe(303);
+
+  // Someone added now is told in their mail that their address is shown.
+  const added = await createVia(h, dm, group, { ...NIGHT, verified: "on" });
+  await h.app.request(
+    `${added}/people`,
+    post(
+      { csrf: dm.csrf, email: "newcomer@example.org", editTier: "view", visibility: "FULL" },
+      dm.cookie,
+    ),
+  );
+  const mail = [...h.sent].reverse().find((m) => m.to === "newcomer@example.org");
+  expect(mail?.text).toContain(
+    "Answers here are verified: they count only from your own email or signed in, and your address is shown to the others on it.",
+  );
+});
+
 it("a group's organizers make its new events verified; a member sees that, and can't change it (rc42)", async () => {
   const h = await harness();
   const { dm, group } = await setup(h);

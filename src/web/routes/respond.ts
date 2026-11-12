@@ -710,6 +710,13 @@ export async function sendResponseLink(
       url.toString(),
       "",
       `This link is just for you and works for ${days} days; you can change your answer with it any time.`,
+      // rc42: the stated exception to rc21, said in the mail that adds someone.
+      ...(access.event.verifiedAt === null
+        ? []
+        : [
+            "",
+            "Answers here are verified: they count only from your own email or signed in, and your address is shown to the others on it.",
+          ]),
     ].join("\n"),
   });
 }
