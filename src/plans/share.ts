@@ -10,6 +10,7 @@ import {
   findThreadById,
   findThreadForMember,
   memberName,
+  OWN_ANSWERS_DEFAULT,
   type Thread,
   type ThreadAccess,
   ThreadInputError,
@@ -171,10 +172,10 @@ export async function joinByShareLink(
   const threadId = question.thread.id;
   await storage.batch([
     {
-      sql: `INSERT INTO plan_thread_member (thread_id, person_id, created_at)
-            SELECT ?, ?, ? WHERE ${LIVE}
+      sql: `INSERT INTO plan_thread_member (thread_id, person_id, created_at, own_answers_only)
+            SELECT ?, ?, ?, ${OWN_ANSWERS_DEFAULT} WHERE ${LIVE}
             ON CONFLICT DO NOTHING`,
-      params: [threadId, personId, now, ...liveParams(question, now)],
+      params: [threadId, personId, now, threadId, personId, ...liveParams(question, now)],
     },
   ]);
   const access = await findThreadForMember(storage, threadId, personId);

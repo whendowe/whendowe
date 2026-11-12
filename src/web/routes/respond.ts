@@ -34,6 +34,7 @@ import {
   type IssuedVoteLink,
   type ResolvedVoteLink,
   resolveVoteLink,
+  setThreadOwnAnswersOnly,
   VOTE_LINK_TTL_MS,
 } from "../../plans/vote-link.js";
 import { dayLabel, spanText, whenText } from "../../plans/weeks.js";
@@ -347,8 +348,18 @@ async function votePage(
   own: boolean,
   /** Who copied this link, for the page to say (rc42); null for a mailed or an older link. */
   givenBy: string | null,
+  /** Whether this link was mailed to them: only then may it change their own switch (rc42). */
+  mailed: boolean,
 ): Promise<string> {
   const plans = await listPlans(storage, access);
+  const ownSwitch = mailed
+    ? ownAnswersForm({
+        action: `${VOTE_PATH}/own-answers`,
+        hidden: { t: token },
+        on: access.members.find((m) => m.personId === access.personId)?.ownAnswersOnly === true,
+        where: "here",
+      })
+    : "";
   const onTable = plans.filter((p) => p.status === "on_table");
   const names = new Map(access.members.map((m) => [m.personId, memberName(m)]));
   const notes = noteList(await listNotes(storage, access), (id) => names.get(id) ?? "someone");
@@ -371,6 +382,7 @@ async function votePage(
     html`${PLAN_STYLE}<div class="pl"${busyAttrs(own ? access.thread.tzid : null)}>${notice}<h1>${access.thread.name}</h1>
 ${body}
 ${notes === "" ? "" : html`<h2>Notes</h2>${notes}`}
+${ownSwitch}
 <p class="muted">${
       givenBy === null ? "" : html`${givenBy} gave you this link, and your answer will say so. `
     }This link is just for you — please don't forward it. No account needed.</p></div>${own ? busyAssets() : ""}`,
@@ -552,6 +564,36 @@ export function registerRespondRoutes(app: Hono<AppEnv>, deps: RespondRouteDeps)
     return c.redirect(`${back.pathname}${back.search}`, 303);
   });
 
+  // rc42: "only my own email answers for me" in a thread, from the person's own mailed vote
+  // link. The domain refuses a copied link, whatever this page showed.
+  app.post(`${VOTE_PATH}/own-answers`, async (c) => {
+    sensitive(c);
+    const form = await c.req.parseBody();
+    const token = readToken(form.t);
+    const link = token === null ? null : await resolveVoteLink(deps.storage, token, deps.now());
+    if (token === null || link === null) return c.html(deadLink(), 404);
+    const saved = await setThreadOwnAnswersOnly(deps.storage, link.access, {
+      on: form.on === "1",
+      arrival: link.arrival,
+    });
+    if (saved === "forbidden")
+      return c.html(
+        await votePage(
+          deps.storage,
+          link.access,
+          token,
+          html`<p class="error">Only a link sent to your own address can change that.</p>`,
+          ownLink(c, link.access),
+          voteGivenBy(link),
+          false,
+        ),
+        403,
+      );
+    const back = new URL(VOTE_PATH, "http://placeholder");
+    back.searchParams.set("t", token);
+    return c.redirect(`${back.pathname}${back.search}`, 303);
+  });
+
   app.get(VOTE_PATH, async (c) => {
     sensitive(c);
     const token = readToken(c.req.query("t"));
@@ -563,7 +605,15 @@ export function registerRespondRoutes(app: Hono<AppEnv>, deps: RespondRouteDeps)
         ? html`<p><strong>Thanks — your vote is saved.</strong> You can change it any time with this link.</p>`
         : "";
     return c.html(
-      await votePage(deps.storage, access, token, notice, ownLink(c, access), voteGivenBy(link)),
+      await votePage(
+        deps.storage,
+        access,
+        token,
+        notice,
+        ownLink(c, access),
+        voteGivenBy(link),
+        link.arrival?.via === "mailed",
+      ),
     );
   });
 
@@ -586,6 +636,7 @@ export function registerRespondRoutes(app: Hono<AppEnv>, deps: RespondRouteDeps)
           html`<p class="error">${message}</p>`,
           ownLink(c, access),
           voteGivenBy(link),
+          link.arrival?.via === "mailed",
         ),
         status,
       );

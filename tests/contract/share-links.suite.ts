@@ -626,7 +626,10 @@ export function runShareLinksContract(makePort: () => Promise<StoragePort>): voi
       // The statement checks again, whatever the page that asked believed.
       const believed = (personId: string) => ({
         ...own,
-        members: [...own.members, { personId, shown: { name: "x", email: null }, guest: true }],
+        members: [
+          ...own.members,
+          { personId, shown: { name: "x", email: null }, guest: true, ownAnswersOnly: false },
+        ],
       });
       const asGuests = { ...own, members: own.members.map((m) => ({ ...m, guest: true })) };
       expect(await removeGuest(port, asGuests, f.david.id)).toEqual({ kind: "gone" });

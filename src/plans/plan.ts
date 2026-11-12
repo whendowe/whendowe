@@ -908,11 +908,13 @@ async function accept(
         ],
       },
       {
+        // rc42: each member's switch for their own answers comes with them.
         sql: `INSERT INTO event_participation
-                (canonical_event_id, person_id, edit_tier, visibility, response_kind, created_at)
+                (canonical_event_id, person_id, edit_tier, visibility, response_kind, created_at,
+                 own_answers_only)
               SELECT ?, m.person_id,
                 CASE WHEN m.person_id IN (SELECT value FROM json_each(?)) THEN 'edit' ELSE 'view' END,
-                'FULL', 'none', ?
+                'FULL', 'none', ?, m.own_answers_only
               FROM plan_thread_member m WHERE m.thread_id = ? AND ${guard}`,
         params: [eventId, editors, input.now, access.thread.id, ...g],
       },
@@ -920,8 +922,10 @@ async function accept(
       // at their usual terms — those in it when the thread started, never later (rc27).
       {
         sql: `INSERT INTO event_participation
-                (canonical_event_id, person_id, edit_tier, visibility, response_kind, created_at)
-              SELECT ?, gm.person_id, gm.default_edit_tier, gm.default_visibility, 'none', ?
+                (canonical_event_id, person_id, edit_tier, visibility, response_kind, created_at,
+                 own_answers_only)
+              SELECT ?, gm.person_id, gm.default_edit_tier, gm.default_visibility, 'none', ?,
+                gm.default_own_answers_only
               FROM group_member gm
               WHERE gm.group_id = ? AND gm.default_visibility = 'BUSY' AND gm.joined_at <= ?
                 AND gm.person_id NOT IN (SELECT person_id FROM plan_thread_member WHERE thread_id = ?)
