@@ -6,6 +6,7 @@ import {
   acceptPlan,
   addDraftEvent,
   createPollThread,
+  listPlans,
   sendDraft,
   startDraft,
   suggestTime,
@@ -538,6 +539,78 @@ it("the organizer copies a member's own link instead of emailing it: fresh, show
   expect(second).not.toBe(first);
   expect((await b.request(first)).status).toBe(404);
   expect((await b.request(second)).status).toBe(200);
+});
+
+it("votes say how they arrived (rc42): the emailed link, or the link the organizer copied", async () => {
+  const b = await browser({ now: () => NOW });
+  const f = await signedInPoll(b, ["david", "ana"]);
+  const [david = "", ana = ""] = f.rest.map((p) => p.id);
+  const [plan = ""] = f.planIds;
+  const linkIn = (text: string) => {
+    const url = new URL(
+      /https:\/\/[^\s"<]+\/vote\?t=[A-Za-z0-9_-]+/.exec(text)?.[0] ?? "https://x/",
+    );
+    return { path: `${url.pathname}${url.search}`, t: url.searchParams.get("t") ?? "" };
+  };
+  // Made signed in, the poll carries Mara's own yes, which says nothing extra.
+  const fresh = await (await b.request(`${f.thread}/p/${plan}`)).text();
+  expect(fresh).toMatch(/<span class="vote yes">[^<]+ yes<\/span>/);
+  expect(fresh).not.toMatch(/emailed link<|copied for|shared link<\/span>/);
+
+  // A vote from the plan's page, signed in, is recorded as that.
+  const late = f.planIds[1] ?? "";
+  await b.request(
+    `${f.thread}/p/${late}/vote`,
+    post({ csrf: (await home(b)).csrf, answer: "ifneedbe" }),
+  );
+  expect(
+    (await listPlans(b.storage, await f.as(f.mara.id))).find((p) => p.id === late)?.votes,
+  ).toMatchObject([{ answer: "ifneedbe", arrival: { via: "session", by: null } }]);
+
+  // Ana votes with the link she was mailed. Its page names nobody.
+  await sendLinks(b, f.thread);
+  const mailed = linkIn(b.sent.find((m) => m.to === "ana@example.org")?.text ?? "");
+  expect(await (await b.request(mailed.path)).text()).not.toContain("gave you this link");
+  expect((await vote(b, mailed.t, { [`plan_${plan}`]: "no" })).status).toBe(303);
+
+  // David votes with a link Mara copied. Its page says who gave it to him.
+  const copied = linkIn(
+    await (
+      await b.request(`${f.thread}/links/copy`, post({ csrf: (await home(b)).csrf, person: david }))
+    ).text(),
+  );
+  expect(await (await b.request(copied.path)).text()).toMatch(
+    /Guest \d+ gave you this link, and your answer will say so\. This link is just for you/,
+  );
+  expect((await vote(b, copied.t, { [`plan_${plan}`]: "ifneedbe" })).status).toBe(303);
+
+  // Mara, who copied it, reads "you" on the plan's page.
+  const shown = await (await b.request(`${f.thread}/p/${plan}`)).text();
+  expect(shown).toMatch(
+    /if need be <span class="muted">· by the link you copied for them<\/span><\/span>/,
+  );
+  expect(shown).toMatch(/ no <span class="muted">· by their emailed link<\/span><\/span>/);
+  expect(shown.match(/<span class="muted">· by /g)).toHaveLength(2); // not Mara's own
+
+  // Once whoever copied it is gone, the link's page says "Someone".
+  await b.storage.batch([
+    { sql: "UPDATE plan_vote_token SET issued_by = NULL WHERE person_id = ?", params: [david] },
+  ]);
+  expect(await (await b.request(copied.path)).text()).toContain("Someone gave you this link");
+  // Links and votes from before rc42 recorded nothing: the page opens, and no label shows.
+  await b.storage.batch([
+    {
+      sql: "UPDATE plan_vote_token SET origin = NULL WHERE person_id IN (?, ?)",
+      params: [david, ana],
+    },
+    { sql: "UPDATE plan_vote SET answered_via = NULL, answered_via_by = NULL", params: [] },
+  ]);
+  const older = await b.request(copied.path);
+  expect(older.status).toBe(200);
+  expect(await older.text()).not.toContain("gave you this link");
+  const unlabelled = await (await b.request(`${f.thread}/p/${plan}`)).text();
+  expect(unlabelled).toMatch(/<span class="vote ifneedbe">[^<]+ if need be<\/span>/);
+  expect(unlabelled).not.toMatch(/emailed link<|copied for/);
 });
 
 it("only the organizer copies links, and only a member's", async () => {

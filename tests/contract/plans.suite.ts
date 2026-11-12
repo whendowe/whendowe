@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+
 import { describe, expect, it } from "vitest";
 import type { StoragePort } from "../../src/db/port.js";
 import { findEventForParticipant, listEventsFor } from "../../src/events/event.js";
 import { listParticipants } from "../../src/events/participation.js";
+import { SIGNED_IN } from "../../src/events/response.js";
 import { findOrCreatePerson } from "../../src/people/person.js";
 import { diffPlans } from "../../src/plans/diff.js";
 import {
@@ -101,7 +103,9 @@ export function runPlansContract(makePort: () => Promise<StoragePort>): void {
       const planA = await sentPlan(port, m, sentA.planId);
       expect(planA.letter).toBe("A");
       expect(planA.name).toBe("Plan A");
-      expect(planA.votes).toEqual([{ personId: adam.id, answer: "yes", respondedAt: T0 }]);
+      expect(planA.votes).toEqual([
+        { personId: adam.id, answer: "yes", respondedAt: T0, arrival: SIGNED_IN },
+      ]);
 
       // Mara answers: the same events, sids and all, with the second week now Adam's.
       expect(
@@ -132,7 +136,12 @@ export function runPlansContract(makePort: () => Promise<StoragePort>): void {
 
       // Only one yes so far on B: still on the table. Adam's yes is the second.
       expect((await sentPlan(port, a, planB.id)).status).toBe("on_table");
-      const voted = await castVote(port, a, { planId: planB.id, answer: "yes", now: T2 });
+      const voted = await castVote(port, a, {
+        planId: planB.id,
+        answer: "yes",
+        now: T2,
+        arrival: SIGNED_IN,
+      });
       expect(voted).toEqual({ kind: "accepted", replaced: [planA.id] });
 
       const after = await listPlans(port, a);
@@ -161,12 +170,14 @@ export function runPlansContract(makePort: () => Promise<StoragePort>): void {
       expect((await listEventsFor(port, mara.id)).length).toBe(2);
 
       // Decided means decided: no more votes, no second accept.
-      expect((await castVote(port, m, { planId: planB.id, answer: "no", now: T2 })).kind).toBe(
-        "closed",
-      );
-      expect((await castVote(port, m, { planId: planA.id, answer: "yes", now: T2 })).kind).toBe(
-        "closed",
-      );
+      expect(
+        (await castVote(port, m, { planId: planB.id, answer: "no", now: T2, arrival: SIGNED_IN }))
+          .kind,
+      ).toBe("closed");
+      expect(
+        (await castVote(port, m, { planId: planA.id, answer: "yes", now: T2, arrival: SIGNED_IN }))
+          .kind,
+      ).toBe("closed");
     });
 
     it("a group: only the organizer accepts; alternatives go, other weeks stay", async () => {
@@ -206,10 +217,11 @@ export function runPlansContract(makePort: () => Promise<StoragePort>): void {
       if (pc.kind !== "sent" || pb.kind !== "sent") throw new Error();
 
       // Everyone's yes doesn't accept in a group; Bob can't accept; Ann can.
-      await castVote(port, b, { planId: pc.planId, answer: "yes", now: T1 });
-      expect((await castVote(port, a, { planId: pc.planId, answer: "yes", now: T1 })).kind).toBe(
-        "recorded",
-      );
+      await castVote(port, b, { planId: pc.planId, answer: "yes", now: T1, arrival: SIGNED_IN });
+      expect(
+        (await castVote(port, a, { planId: pc.planId, answer: "yes", now: T1, arrival: SIGNED_IN }))
+          .kind,
+      ).toBe("recorded");
       expect((await acceptPlan(port, b, { planId: pc.planId, now: T2 })).kind).toBe("forbidden");
       expect(await acceptPlan(port, a, { planId: pc.planId, now: T2 })).toEqual({
         kind: "accepted",
@@ -264,9 +276,10 @@ export function runPlansContract(makePort: () => Promise<StoragePort>): void {
       await clipDraft(port, m, { first: "2101-11-07", last: "2101-11-13", keep: true, now: T1 });
       const pm = await sendDraft(port, m, { now: T1 });
       if (pm.kind !== "sent") throw new Error();
-      expect((await castVote(port, a, { planId: pm.planId, answer: "yes", now: T1 })).kind).toBe(
-        "accepted",
-      );
+      expect(
+        (await castVote(port, a, { planId: pm.planId, answer: "yes", now: T1, arrival: SIGNED_IN }))
+          .kind,
+      ).toBe("accepted");
 
       // Adam's replaced plan: the rest is the second week.
       expect(

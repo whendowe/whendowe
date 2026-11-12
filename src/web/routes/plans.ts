@@ -9,6 +9,7 @@ import {
   UnreachableAddressError,
 } from "../../events/participation.js";
 import { type Answer, answerSchema } from "../../events/poll.js";
+import { SIGNED_IN } from "../../events/response.js";
 import { MailCapReachedError } from "../../mail/capped.js";
 import type { MailPort } from "../../mail/port.js";
 import { findGroupForMember, listGroupsFor, listMembers } from "../../people/group.js";
@@ -105,7 +106,7 @@ import {
   verifyFormCsrf,
 } from "../session.js";
 import { appearanceSection, saveAppearance } from "./account.js";
-import { EVENTS_PATH } from "./events.js";
+import { arrivalNote, EVENTS_PATH } from "./events.js";
 import { noteList, oneTime, sendVoteLink, sensitive, voteUrl } from "./respond.js";
 import { SHARE_PATH } from "./share.js";
 
@@ -241,9 +242,10 @@ function tally(v: View, p: Plan): string {
 }
 
 function votesLine(v: View, p: Plan): Html {
+  const names = new Map(v.access.members.map((m) => [m.personId, memberName(m)]));
   return html`<div class="votes">${v.access.members.map((m) => {
     const vote = p.votes.find((x) => x.personId === m.personId);
-    return html`<span class="vote ${vote?.answer ?? "none"}">${memberName(m)} ${vote === undefined ? "·" : ANSWER_WORD[vote.answer]}</span>`;
+    return html`<span class="vote ${vote?.answer ?? "none"}">${memberName(m)} ${vote === undefined ? "·" : ANSWER_WORD[vote.answer]}${vote === undefined ? "" : arrivalNote(vote.arrival, m.personId, v.access.personId, names)}</span>`;
   })}</div>`;
 }
 
@@ -1507,6 +1509,7 @@ ${
       planId,
       answer: answer.data,
       now: deps.now(),
+      arrival: SIGNED_IN,
     });
     if (result.kind === "closed" || result.kind === "invalid") {
       const v = await load(deps, r.access, r.me);

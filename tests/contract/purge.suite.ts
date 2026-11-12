@@ -283,7 +283,12 @@ export function runPurgeContract(makePort: () => Promise<StoragePort>): void {
       await addDraftEvent(port, await gate(adam.id), week("Sent"));
       const sent = await sendDraft(port, await gate(adam.id), { now: T0 });
       if (sent.kind !== "sent") throw new Error(sent.kind);
-      await castVote(port, await gate(mara.id), { planId: sent.planId, answer: "no", now: T0 });
+      await castVote(port, await gate(mara.id), {
+        planId: sent.planId,
+        answer: "no",
+        now: T0,
+        arrival: SIGNED_IN,
+      });
       await startDraft(port, await gate(adam.id), {
         fromId: null,
         rest: false,

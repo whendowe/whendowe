@@ -11,6 +11,7 @@ import {
   PollInputError,
   validateCandidates,
 } from "../events/poll.js";
+import { type Arrival, arrivalOf } from "../events/response.js";
 import { uuidv7 } from "../ids.js";
 import type { GroupMembership } from "../people/group.js";
 import { type PlanEventLike, sameTime } from "./diff.js";
@@ -48,6 +49,8 @@ export interface PlanVote {
   readonly personId: string;
   readonly answer: Answer;
   readonly respondedAt: string;
+  /** How it arrived (rc42); null from before that was recorded. */
+  readonly arrival: Arrival | null;
 }
 
 export interface Plan {
@@ -253,6 +256,8 @@ const voteRowSchema = z.object({
   person_id: z.string(),
   answer: answerSchema,
   responded_at: z.string(),
+  answered_via: z.string().nullable(),
+  answered_via_by: z.string().nullable(),
 });
 
 const PLAN_COLUMNS = `p.id, p.thread_id, p.author_id, p.name, p.message, p.answers_id, p.rest_of,
@@ -298,7 +303,7 @@ export async function listPlans(storage: StoragePort, access: ThreadAccess): Pro
   ).map((row) => eventRowSchema.parse(row));
   const votes = (
     await storage.query({
-      sql: `SELECT v.plan_id, v.person_id, v.answer, v.responded_at
+      sql: `SELECT v.plan_id, v.person_id, v.answer, v.responded_at, v.answered_via, v.answered_via_by
             FROM plan_vote v JOIN plan p ON p.id = v.plan_id WHERE ${scope}`,
       params,
     })
@@ -327,7 +332,12 @@ export async function listPlans(storage: StoragePort, access: ThreadAccess): Pro
       .sort(byTime),
     votes: votes
       .filter((v) => v.plan_id === p.id)
-      .map((v) => ({ personId: v.person_id, answer: v.answer, respondedAt: v.responded_at })),
+      .map((v) => ({
+        personId: v.person_id,
+        answer: v.answer,
+        respondedAt: v.responded_at,
+        arrival: arrivalOf(v.answered_via, v.answered_via_by),
+      })),
     letter: p.status === "draft" ? null : letterFor(sent++),
   }));
 }
@@ -719,8 +729,8 @@ export async function sendDraft(
       params: [name, input.now, input.now, draft.id, access.personId],
     },
     {
-      sql: `INSERT INTO plan_vote (plan_id, person_id, answer, responded_at)
-            SELECT ?, ?, 'yes', ? WHERE changes() = 1`,
+      sql: `INSERT INTO plan_vote (plan_id, person_id, answer, responded_at, answered_via)
+            SELECT ?, ?, 'yes', ?, 'session' WHERE changes() = 1`,
       params: [draft.id, access.personId, input.now],
     },
   ]);
@@ -750,17 +760,32 @@ export type VoteResult =
 export async function castVote(
   storage: StoragePort,
   access: ThreadAccess,
-  input: { readonly planId: string; readonly answer: Answer; readonly now: string },
+  input: {
+    readonly planId: string;
+    readonly answer: Answer;
+    readonly now: string;
+    /** How this vote arrived (rc42); null only for a link from before it was recorded. */
+    readonly arrival: Arrival | null;
+  },
 ): Promise<VoteResult> {
   const answer = answerSchema.safeParse(input.answer);
   if (!answer.success) return { kind: "invalid" };
   const written = await storage.query({
-    sql: `INSERT INTO plan_vote (plan_id, person_id, answer, responded_at)
-          SELECT p.id, ?, ?, ? FROM plan p WHERE p.id = ? AND p.thread_id = ? AND p.status = 'on_table'
+    sql: `INSERT INTO plan_vote (plan_id, person_id, answer, responded_at, answered_via, answered_via_by)
+          SELECT p.id, ?, ?, ?, ?, ? FROM plan p WHERE p.id = ? AND p.thread_id = ? AND p.status = 'on_table'
           ON CONFLICT (plan_id, person_id)
-            DO UPDATE SET answer = excluded.answer, responded_at = excluded.responded_at
+            DO UPDATE SET answer = excluded.answer, responded_at = excluded.responded_at,
+              answered_via = excluded.answered_via, answered_via_by = excluded.answered_via_by
           RETURNING plan_id`,
-    params: [access.personId, answer.data, input.now, input.planId, access.thread.id],
+    params: [
+      access.personId,
+      answer.data,
+      input.now,
+      input.arrival?.via ?? null,
+      input.arrival?.by ?? null,
+      input.planId,
+      access.thread.id,
+    ],
   });
   if (written.length === 0) return { kind: "closed" };
   if (!decidesByConsensus(access) || answer.data !== "yes") return { kind: "recorded" };
@@ -1031,8 +1056,8 @@ export async function suggestTime(
       ],
     },
     {
-      sql: `INSERT INTO plan_vote (plan_id, person_id, answer, responded_at)
-            SELECT ?, ?, 'yes', ? WHERE EXISTS (SELECT 1 FROM plan WHERE id = ?)`,
+      sql: `INSERT INTO plan_vote (plan_id, person_id, answer, responded_at, answered_via)
+            SELECT ?, ?, 'yes', ?, 'session' WHERE EXISTS (SELECT 1 FROM plan WHERE id = ?)`,
       params: [id, access.personId, input.now, id],
     },
   ]);
@@ -1122,7 +1147,7 @@ export async function createPollThread(
         description: f.description,
       }),
       {
-        sql: "INSERT INTO plan_vote (plan_id, person_id, answer, responded_at) VALUES (?, ?, 'yes', ?)",
+        sql: "INSERT INTO plan_vote (plan_id, person_id, answer, responded_at, answered_via) VALUES (?, ?, 'yes', ?, 'session')",
         params: [planId, input.creatorId, input.now],
       },
     );

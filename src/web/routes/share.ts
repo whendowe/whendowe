@@ -3,6 +3,7 @@ import type { Context, Hono } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import type { StoragePort } from "../../db/port.js";
 import type { Answer } from "../../events/poll.js";
+import { SHARED_LINK, SIGNED_IN } from "../../events/response.js";
 import { LOGIN_TOKEN_TTL_MS } from "../../people/login.js";
 import { normalizeEmail } from "../../people/person.js";
 import type { Plan } from "../../plans/plan.js";
@@ -370,7 +371,14 @@ export function registerShareRoutes(app: Hono<AppEnv>, deps: ShareRouteDeps): vo
       claimedNow = claimed.token;
       remember(c, deps, { threadId: q.thread.id, token: claimed.token });
     }
-    const refused = await applyAnswers(deps.storage, access, answers satisfies Answers, now);
+    const refused = await applyAnswers(
+      deps.storage,
+      access,
+      answers satisfies Answers,
+      now,
+      // Signed in, it is the account's own answer; otherwise a guest's, by the shared link (rc42).
+      who.kind === "account" ? SIGNED_IN : SHARED_LINK,
+    );
     if (refused !== null) {
       // Joined or claimed even so: the page now answers as that person.
       const as: Answering = who.kind === "guest" ? { kind: "claim", access } : who;

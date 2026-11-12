@@ -8,7 +8,7 @@ import {
   findEventForParticipant,
   setCancelled,
 } from "../../src/events/event.js";
-import { issueResponseLinks } from "../../src/events/response.js";
+import { issueResponseLinks, SIGNED_IN } from "../../src/events/response.js";
 import { createGroup, findGroupForMember } from "../../src/people/group.js";
 import { createInvite } from "../../src/people/invite.js";
 import { issueLoginToken } from "../../src/people/login.js";
@@ -196,7 +196,12 @@ export function runRetentionContract(makePort: () => Promise<StoragePort>): void
       });
       const sent = await sendDraft(port, t, { now: T0 });
       if (sent.kind !== "sent") throw new Error(sent.kind);
-      const voted = await castVote(port, a, { planId: sent.planId, answer: "yes", now: T0 });
+      const voted = await castVote(port, a, {
+        planId: sent.planId,
+        answer: "yes",
+        now: T0,
+        arrival: SIGNED_IN,
+      });
       expect(voted.kind).toBe("accepted");
       // Its event is kept two years (an editor's choice, R4b).
       await port.batch([

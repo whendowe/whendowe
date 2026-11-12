@@ -199,7 +199,12 @@ async function busyTom(port: StoragePort, tag: string) {
     await addDraftEvent(port, await gate(author), week(title, [tom.id]));
     const sent = await sendDraft(port, await gate(author), { now: T0 });
     if (sent.kind !== "sent") throw new Error(sent.kind);
-    await castVote(port, await gate(voter), { planId: sent.planId, answer: "ifneedbe", now: T0 });
+    await castVote(port, await gate(voter), {
+      planId: sent.planId,
+      answer: "ifneedbe",
+      now: T0,
+      arrival: SIGNED_IN,
+    });
   }
   await startDraft(port, await gate(tom.id), {
     fromId: null,

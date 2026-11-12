@@ -657,6 +657,9 @@ export const planVote = sqliteTable(
       .references(() => person.id, { onDelete: "cascade" }),
     answer: text("answer").notNull(),
     respondedAt: text("responded_at").notNull(),
+    // rc42: how this vote arrived (session | mailed | copied | shared) and who copied the link.
+    answeredVia: text("answered_via"),
+    answeredViaBy: text("answered_via_by").references(() => person.id, { onDelete: "set null" }),
   },
   (t) => [
     primaryKey({ columns: [t.planId, t.personId] }),
@@ -777,6 +780,9 @@ export const planVoteToken = sqliteTable(
       .references(() => person.id, { onDelete: "cascade" }),
     expiresAt: text("expires_at").notNull(),
     createdAt: text("created_at").notNull(),
+    // rc42: mailed | copied, and who copied it.
+    origin: text("origin"),
+    issuedBy: text("issued_by").references(() => person.id, { onDelete: "set null" }),
   },
   (t) => [unique("plan_vote_token_thread_person_uq").on(t.threadId, t.personId)],
 );

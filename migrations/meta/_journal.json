@@ -204,6 +204,13 @@
       "when": 1794481813607,
       "tag": "0028_answer_origin",
       "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "6",
+      "when": 1794491196174,
+      "tag": "0029_vote_origin",
+      "breakpoints": true
     }
   ]
 }
