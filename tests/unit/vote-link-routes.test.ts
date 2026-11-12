@@ -556,6 +556,8 @@ it("votes say how they arrived (rc42): the emailed link, or the link the organiz
   const fresh = await (await b.request(`${f.thread}/p/${plan}`)).text();
   expect(fresh).toMatch(/<span class="vote yes">[^<]+ yes<\/span>/);
   expect(fresh).not.toMatch(/emailed link<|copied for|shared link<\/span>/);
+  // Nobody else has voted: each is a dot, and nothing more.
+  expect(fresh.match(/<span class="vote none">[^<]+ ·<\/span>/g)).toHaveLength(2);
 
   // A vote from the plan's page, signed in, is recorded as that.
   const late = f.planIds[1] ?? "";
@@ -570,7 +572,10 @@ it("votes say how they arrived (rc42): the emailed link, or the link the organiz
   // Ana votes with the link she was mailed. Its page names nobody.
   await sendLinks(b, f.thread);
   const mailed = linkIn(b.sent.find((m) => m.to === "ana@example.org")?.text ?? "");
-  expect(await (await b.request(mailed.path)).text()).not.toContain("gave you this link");
+  // The line under the form starts with the link's own words: no one is named before them.
+  expect(await (await b.request(mailed.path)).text()).toContain(
+    '<p class="muted">This link is just for you',
+  );
   expect((await vote(b, mailed.t, { [`plan_${plan}`]: "no" })).status).toBe(303);
 
   // David votes with a link Mara copied. Its page says who gave it to him.
