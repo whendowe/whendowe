@@ -169,6 +169,36 @@ describe("VTIMEZONE (from the platform's zone data)", () => {
     ).toEqual(["TZOFFSETTO:+0545"]);
     expect(vtimezone("America/Sao_Paulo", 2026, 2026)).toContain("TZOFFSETTO:-0300");
   });
+
+  // Soak counterexample, 2026-11-10: a weekly event at 01:00 New York on 6 November 2101,
+  // the hour that happens twice. RFC 5545 §3.3.5 says the first; what makes the feed say
+  // so is the fall-back observance starting at 02:00 in the offset before it (-0400), so
+  // 01:00 is still daylight time. ical.js reads it as the second; the property allows that.
+  it("the fall-back hour: New York leaves -0400 at 02:00 local, so 01:00 is the first one", () => {
+    const body = serializeFeed({
+      name: "Feed",
+      host: "whendowe.example",
+      now: "2101-06-01T00:00:00Z",
+      entries: [
+        {
+          ...ENTRY,
+          tzid: "America/New_York",
+          startLocal: "2101-11-06T01:00:00",
+          endLocal: "2101-11-06T03:00:00",
+          rrule: "FREQ=WEEKLY;COUNT=4",
+        },
+      ],
+    }).split("\r\n");
+    expect(body).toContain("DTSTART;TZID=America/New_York:21011106T010000");
+    const fallBack = body.indexOf("DTSTART:21011106T020000");
+    expect(body.slice(fallBack - 1, fallBack + 4)).toEqual([
+      "BEGIN:STANDARD",
+      "DTSTART:21011106T020000",
+      "TZOFFSETFROM:-0400",
+      "TZOFFSETTO:-0500",
+      "END:STANDARD",
+    ]);
+  });
 });
 
 describe("the edges Stryker found", () => {

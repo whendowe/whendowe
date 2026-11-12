@@ -219,14 +219,32 @@ test("an independent parser reads every event back: text, tier and the instant i
         expect(ev.startDate.toString()).toBe(e.startLocal);
         expect(ev.endDate.toString()).toBe(e.endLocal);
       } else {
-        const at = (local: string) =>
-          Temporal.PlainDateTime.from(local)
-            .toZonedDateTime(e.tzid ?? "UTC")
-            .toInstant().epochMilliseconds;
-        expect(ev.startDate.toUnixTime() * 1000, `${e.startLocal} ${e.tzid}`).toBe(
-          at(e.startLocal),
-        );
-        expect(ev.endDate.toUnixTime() * 1000).toBe(at(e.endLocal));
+        // The instants a wall time can name: one, or two in a fall-back hour. RFC 5545
+        // §3.3.5 picks the first; ical.js picks the second (on every fall-back, not only
+        // far-future ones), so on that hour it is no oracle for which one. The VTIMEZONE
+        // that decides it per the RFC is pinned in tests/unit/ics.test.ts instead.
+        const candidates = (local: string) =>
+          [
+            ...new Set(
+              (["earlier", "later"] as const).map(
+                (disambiguation) =>
+                  Temporal.PlainDateTime.from(local)
+                    .toZonedDateTime(e.tzid ?? "UTC", { disambiguation })
+                    .toInstant().epochMilliseconds,
+              ),
+            ),
+          ].sort((a, b) => a - b);
+        const readsBack = (got: typeof ev.startDate, local: string) => {
+          const want = candidates(local);
+          if (want.length === 1)
+            expect(got.toUnixTime() * 1000, `${local} ${e.tzid}`).toBe(want[0]);
+          else {
+            expect(want, `${local} ${e.tzid}`).toContain(got.toUnixTime() * 1000);
+            expect(got.toString()).toBe(local);
+          }
+        };
+        readsBack(ev.startDate, e.startLocal);
+        readsBack(ev.endDate, e.endLocal);
       }
       expect(ev.isRecurring()).toBe(e.rrule !== null);
     }
