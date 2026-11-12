@@ -186,6 +186,25 @@ export function appearanceForm(v: AppearanceView): Html {
 </form></details>`;
 }
 
+/**
+ * "Only my own email answers for me" (DESIGN §10 rc42): one checkbox and a save. `hidden`
+ * carries the form's proof — a CSRF token signed in, the link's token on a mailed link.
+ */
+export function ownAnswersForm(v: {
+  readonly action: string;
+  readonly hidden: Readonly<Record<string, string>>;
+  readonly on: boolean;
+  /** "here", or "on new events from this group". */
+  readonly where: string;
+}): Html {
+  return html`<form method="post" action="${v.action}" class="wd-own">${Object.entries(
+    v.hidden,
+  ).map(([name, value]) => html`<input type="hidden" name="${name}" value="${value}" />`)}
+  <p><label><input type="checkbox" name="on" value="1"${v.on ? html` checked` : ""} /> Only my own email answers for me ${v.where}</label> <button type="submit">Save</button><br />
+  <span class="muted">Then nobody can copy a link that answers as you. Links sent to your address, and signing in, still work.</span></p>
+</form>`;
+}
+
 /** How long something is kept, and — for whoever may change it — the form (DESIGN §10 rc23). */
 export interface RetentionView {
   readonly days: number;

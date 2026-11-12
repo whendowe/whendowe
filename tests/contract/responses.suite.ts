@@ -7,6 +7,7 @@ import {
   editEvent,
   findEventForParticipant,
 } from "../../src/events/event.js";
+import { addParticipant, removeParticipant } from "../../src/events/participation.js";
 import {
   acknowledge,
   addFeedback,
@@ -21,8 +22,13 @@ import {
   revokeUndeliveredLink,
   SIGNED_IN,
   setAttendance,
+  setOwnAnswersOnly,
 } from "../../src/events/response.js";
-import { createGroup, findGroupForMember } from "../../src/people/group.js";
+import {
+  createGroup,
+  findGroupForMember,
+  setDefaultOwnAnswersOnly,
+} from "../../src/people/group.js";
 import { acceptInvite, createInvite } from "../../src/people/invite.js";
 import { findOrCreatePerson } from "../../src/people/person.js";
 
@@ -339,6 +345,141 @@ export function runResponsesContract(makePort: () => Promise<StoragePort>): void
       const after = await arrivals();
       expect(after.attendance[ann]).toBeNull();
       expect(after.notes.at(-1)).toEqual([ann, null]);
+    });
+
+    it("only my own email (rc42): no copy, copied links dead, set only by the person themselves", async () => {
+      const port = await makePort();
+      const { dm, membership, ann, bob } = await table(port, "own");
+      // Ann's default for this group is on; Bob's is not.
+      await setDefaultOwnAnswersOnly(port, membership, ann, true);
+      const event = await createEvent(port, {
+        creatorId: dm.id,
+        group: membership,
+        fields: SESSION,
+        now: T0,
+      });
+      const asDm = await access(port, event.id, dm.id);
+      expect((await access(port, event.id, ann)).participation.ownAnswersOnly).toBe(true);
+      expect((await access(port, event.id, bob)).participation.ownAnswersOnly).toBe(false);
+
+      // Nobody copies Ann's link; a mailed one she still gets, and it works.
+      const copyAnn = await issueResponseLinks(port, asDm, { now: T0, only: ann, copy: true });
+      expect(copyAnn).toMatchObject({ kind: "issued", links: [] });
+      const mailed = await issueResponseLinks(port, asDm, { now: T0 });
+      if (mailed.kind !== "issued") throw new Error(mailed.kind);
+      const tokenOf = (links: typeof mailed.links, who: string) =>
+        links.find((l) => l.personId === who)?.token ?? "";
+      expect(await resolveResponseLink(port, tokenOf(mailed.links, ann), T0)).not.toBeNull();
+
+      // Bob's link is copied. From it, he can't turn the switch on: that's what it guards.
+      const copied = await issueResponseLinks(port, asDm, { now: T0, only: bob, copy: true });
+      if (copied.kind !== "issued") throw new Error(copied.kind);
+      const bobCopied = await resolveResponseLink(port, tokenOf(copied.links, bob), T0);
+      if (bobCopied === null) throw new Error("expected link");
+      expect(
+        await setOwnAnswersOnly(port, bobCopied.access, { on: true, arrival: bobCopied.arrival }),
+      ).toBe("forbidden");
+      expect(await setOwnAnswersOnly(port, bobCopied.access, { on: true, arrival: null })).toBe(
+        "forbidden",
+      );
+      expect((await access(port, event.id, bob)).participation.ownAnswersOnly).toBe(false);
+
+      // Signed in, he can. His copied link stops working, and stays dead when he turns it off.
+      const asBob = await access(port, event.id, bob);
+      expect(await setOwnAnswersOnly(port, asBob, { on: true, arrival: SIGNED_IN })).toBe("saved");
+      expect(await resolveResponseLink(port, tokenOf(copied.links, bob), T0)).toBeNull();
+      expect(
+        await setOwnAnswersOnly(port, await access(port, event.id, bob), {
+          on: false,
+          arrival: SIGNED_IN,
+        }),
+      ).toBe("saved");
+      expect(await resolveResponseLink(port, tokenOf(copied.links, bob), T0)).toBeNull();
+
+      // From a mailed link Ann turns hers off, and a copy can be made again.
+      const annMailed = await resolveResponseLink(port, tokenOf(mailed.links, ann), T0);
+      if (annMailed === null) throw new Error("expected link");
+      expect(
+        await setOwnAnswersOnly(port, annMailed.access, { on: false, arrival: annMailed.arrival }),
+      ).toBe("saved");
+      const again = await issueResponseLinks(port, asDm, { now: T0, only: ann, copy: true });
+      expect(again.kind === "issued" ? again.links.map((l) => l.personId) : []).toEqual([ann]);
+
+      // Back on: a link from before links said how they were made doesn't answer as her either.
+      await setOwnAnswersOnly(port, await access(port, event.id, ann), {
+        on: true,
+        arrival: SIGNED_IN,
+      });
+      const fresh = await issueResponseLinks(port, asDm, {
+        now: later(RESPONSE_RESEND_INTERVAL_MS + 1),
+        only: ann,
+      });
+      if (fresh.kind !== "issued") throw new Error(fresh.kind);
+      const t = tokenOf(fresh.links, ann);
+      expect(
+        await resolveResponseLink(port, t, later(RESPONSE_RESEND_INTERVAL_MS + 1)),
+      ).not.toBeNull();
+      await port.batch([
+        {
+          sql: "UPDATE response_token SET origin = NULL WHERE canonical_event_id = ? AND person_id = ?",
+          params: [event.id, ann],
+        },
+      ]);
+      expect(await resolveResponseLink(port, t, later(RESPONSE_RESEND_INTERVAL_MS + 1))).toBeNull();
+      // Turning it on withdrew that link too: off again, it doesn't come back.
+      await setOwnAnswersOnly(port, await access(port, event.id, ann), {
+        on: true,
+        arrival: SIGNED_IN,
+      });
+      await setOwnAnswersOnly(port, await access(port, event.id, ann), {
+        on: false,
+        arrival: SIGNED_IN,
+      });
+      expect(await resolveResponseLink(port, t, later(RESPONSE_RESEND_INTERVAL_MS + 1))).toBeNull();
+
+      // Her default turned off again, the next event from the group starts with it off.
+      await setDefaultOwnAnswersOnly(port, membership, ann, false);
+      const next = await createEvent(port, {
+        creatorId: dm.id,
+        group: membership,
+        fields: SESSION,
+        now: T0,
+      });
+      expect((await access(port, next.id, ann)).participation.ownAnswersOnly).toBe(false);
+    });
+
+    it("someone added later brings their group default for their own answers (rc42)", async () => {
+      const port = await makePort();
+      const { dm, membership, ann } = await table(port, "own-add");
+      const event = await createEvent(port, {
+        creatorId: dm.id,
+        group: membership,
+        fields: SESSION,
+        now: T0,
+      });
+      const asDm = await access(port, event.id, dm.id);
+      // Ann was on it from the start, before her default changed: hers stays as it was.
+      await setDefaultOwnAnswersOnly(port, membership, ann, true);
+      expect((await access(port, event.id, ann)).participation.ownAnswersOnly).toBe(false);
+      // Removed and added again by address, she brings her group's default.
+      expect((await removeParticipant(port, asDm, { personId: ann, now: T0 })).kind).toBe(
+        "removed",
+      );
+      const readd = async (email: string) =>
+        (
+          await addParticipant(port, asDm, {
+            email,
+            editTier: "view",
+            visibility: "FULL",
+            now: later(1),
+          })
+        ).kind;
+      expect(await readd("resp-ann-own-add@example.org")).toBe("added");
+      expect((await access(port, event.id, ann)).participation.ownAnswersOnly).toBe(true);
+      // Someone outside the group has no default: off.
+      expect(await readd("resp-carl-own-add@example.org")).toBe("added");
+      const carl = await findOrCreatePerson(port, "resp-carl-own-add@example.org", { now: T0 });
+      expect((await access(port, event.id, carl.id)).participation.ownAnswersOnly).toBe(false);
     });
 
     it("agreeing and acknowledging record how they arrived too (rc42)", async () => {

@@ -310,12 +310,15 @@ export async function issueResponseLinks(
               JOIN canonical_event e ON e.id = ep.canonical_event_id
             WHERE ep.canonical_event_id = ? AND ep.visibility <> 'HIDDEN' AND ep.person_id <> ?
               AND ${PARTY_RULE} AND (? IS NULL OR ep.person_id = ?)
+              AND (? = 0 OR ep.own_answers_only = 0)
             ORDER BY p.email`,
       params: [
         access.event.id,
         access.participation.personId,
         input.only ?? null,
         input.only ?? null,
+        // rc42: nobody copies a link for someone who takes answers only from their own email.
+        input.copy === true ? 1 : 0,
       ],
     })
   ).map((row) => recipientRowSchema.parse(row));
@@ -413,7 +416,41 @@ export async function resolveResponseLink(
   const row = tokenRowSchema.parse(rows[0]);
   const access = await findEventForParticipant(storage, row.canonical_event_id, row.person_id);
   if (access === null || access.participation.visibility === "HIDDEN") return null;
+  // rc42: with "only my own email" on, only a link we mailed them answers as them — not a
+  // copied one, nor one from before links said how they were made.
+  if (access.participation.ownAnswersOnly && row.origin !== "mailed") return null;
   return { access, action: row.action, arrival: arrivalOf(row.origin, row.issued_by) };
+}
+
+/**
+ * "Only my own email answers for me" on this event (DESIGN §10 rc42), set by the person
+ * themselves: signed in, or by a link mailed to them — never by a copied link, which is
+ * what it guards against. Turning it on also withdraws any copied link of theirs.
+ */
+export async function setOwnAnswersOnly(
+  storage: StoragePort,
+  access: EventAccess,
+  input: { readonly on: boolean; readonly arrival: Arrival | null },
+): Promise<"saved" | "forbidden"> {
+  const via = input.arrival?.via;
+  if (via !== "session" && via !== "mailed") return "forbidden";
+  const { event, participation } = access;
+  await storage.batch([
+    {
+      sql: "UPDATE event_participation SET own_answers_only = ? WHERE canonical_event_id = ? AND person_id = ?",
+      params: [input.on ? 1 : 0, event.id, participation.personId],
+    },
+    ...(input.on
+      ? [
+          {
+            sql: `DELETE FROM response_token
+                  WHERE canonical_event_id = ? AND person_id = ? AND (origin IS NULL OR origin <> 'mailed')`,
+            params: [event.id, participation.personId],
+          },
+        ]
+      : []),
+  ]);
+  return "saved";
 }
 
 // --- Agreement & acknowledgment (slice 2E-1, DESIGN §10 rc13) -----------------------------

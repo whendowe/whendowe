@@ -218,10 +218,13 @@ function copyAppearance(eventId: string, groupId: string): SqlStatement {
           SET handle = (SELECT m.handle FROM group_member m
                         WHERE m.group_id = ? AND m.person_id = event_participation.person_id),
               show_email = (SELECT m.show_email FROM group_member m
-                            WHERE m.group_id = ? AND m.person_id = event_participation.person_id)
+                            WHERE m.group_id = ? AND m.person_id = event_participation.person_id),
+              -- rc42: and their default for "only my own email answers for me".
+              own_answers_only = (SELECT m.default_own_answers_only FROM group_member m
+                                  WHERE m.group_id = ? AND m.person_id = event_participation.person_id)
           WHERE canonical_event_id = ?
             AND person_id IN (SELECT person_id FROM group_member WHERE group_id = ?)`,
-    params: [groupId, groupId, eventId, groupId],
+    params: [groupId, groupId, groupId, eventId, groupId],
   };
 }
 

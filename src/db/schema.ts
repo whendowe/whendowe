@@ -287,6 +287,8 @@ export const groupMember = sqliteTable(
     // their account's handle; their address is shown to the others only if show_email = 1.
     handle: text("handle"),
     showEmail: integer("show_email").notNull().default(0),
+    // rc42: the default for "only my own email answers for me" on what is made from the group.
+    defaultOwnAnswersOnly: integer("default_own_answers_only").notNull().default(0),
   },
   (t) => [
     unique("group_member_uq").on(t.groupId, t.personId),
@@ -370,6 +372,8 @@ export const eventParticipation = sqliteTable(
     responseStateViaBy: text("response_state_via_by").references(() => person.id, {
       onDelete: "set null",
     }),
+    // rc42: "only my own email answers for me" here; a person sets it, never an organizer.
+    ownAnswersOnly: integer("own_answers_only").notNull().default(0),
   },
   (t) => [
     unique("event_participation_uq").on(t.canonicalEventId, t.personId),

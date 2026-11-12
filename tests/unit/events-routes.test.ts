@@ -1668,6 +1668,102 @@ it("the pages say how an answer arrived (rc42): the emailed link, or the link so
   expect(await older.text()).not.toContain("gave you this link");
 });
 
+it("only my own email (rc42): set from the group, a signed-in page or a mailed link; never copied", async () => {
+  const h = await harness();
+  const { dm, group } = await setup(h);
+  const ann = await join(h, dm, group, "ann@example.org", "view", "FULL");
+  const bob = await join(h, dm, group, "bob@example.org", "view", "FULL");
+
+  // Ann turns her default on in the group; it is hers, so the form shows it checked to her.
+  const forged = await h.app.request(
+    `${group}/own-answers`,
+    post({ csrf: "x", on: "1" }, ann.cookie),
+  );
+  expect(forged.status).toBe(403);
+  await h.app.request(`${group}/own-answers`, post({ csrf: ann.csrf, on: "1" }, ann.cookie));
+  const box =
+    /<input type="checkbox" name="on" value="1"( checked)? \/> Only my own email answers for me on new events from this group/;
+  expect(
+    box.exec(await (await h.app.request(group, { headers: { cookie: ann.cookie } })).text())?.[1],
+  ).toBe(" checked");
+  expect(
+    box.exec(await (await h.app.request(group, { headers: { cookie: bob.cookie } })).text())?.[1],
+  ).toBeUndefined();
+
+  // On the event made from it, the organizer sees why there's no copy for Ann.
+  const event = await createVia(h, dm, group);
+  const asDm = await text(h, event, dm);
+  expect(asDm.split("bob")[0]).toContain("· takes answers only from their own email");
+  expect(asDm.match(/>Copy their link</g)).toHaveLength(1); // Bob's only
+  const idOf = (name: string) =>
+    /name="person" value="([^"]+)" \/><button type="submit">Remove/.exec(
+      asDm.split(name)[1] ?? "",
+    )?.[1] ?? "";
+  const refused = await h.app.request(
+    `${event}/people/link`,
+    post({ csrf: dm.csrf, person: idOf("ann") }, dm.cookie),
+  );
+  expect(refused.status).toBe(409);
+  expect(await refused.text()).toContain(
+    "takes answers only from their own email. You can still send them their link by email.",
+  );
+
+  // Bob's link is copied. Its page offers no switch, and posting one anyway is refused.
+  const copied = await (
+    await h.app.request(
+      `${event}/people/link`,
+      post({ csrf: dm.csrf, person: idOf("bob") }, dm.cookie),
+    )
+  ).text();
+  const url = new URL(
+    /https:\/\/[^\s"<]+\/respond\?t=[A-Za-z0-9_-]+/.exec(copied)?.[0] ?? "https://x/",
+  );
+  const copiedLink = `${url.pathname}${url.search}`;
+  expect(await (await h.app.request(copiedLink)).text()).not.toContain("Only my own email");
+  const fromCopy = await h.app.request(
+    "/respond/own-answers",
+    post({ t: tokenOf(copiedLink), on: "1" }),
+  );
+  expect(fromCopy.status).toBe(403);
+  expect(await fromCopy.text()).toContain("Only a link sent to your own address can change that.");
+
+  // Signed in, he turns it on: the copied link dies, and the DM sees why.
+  const here =
+    /<input type="checkbox" name="on" value="1"( checked)? \/> Only my own email answers for me here/;
+  expect(here.exec(await text(h, event, bob))?.[1]).toBeUndefined();
+  expect(
+    (await h.app.request(`${event}/own-answers`, post({ csrf: "x", on: "1" }, bob.cookie))).status,
+  ).toBe(403);
+  await h.app.request(`${event}/own-answers`, post({ csrf: bob.csrf, on: "1" }, bob.cookie));
+  expect(here.exec(await text(h, event, bob))?.[1]).toBe(" checked");
+  expect((await h.app.request(copiedLink)).status).toBe(404);
+  expect((await text(h, event, dm)).match(/takes answers only from their own email/g)).toHaveLength(
+    2,
+  );
+  expect(await text(h, event, dm)).not.toContain(">Copy their link<");
+
+  // Ann, from the link mailed to her, sees hers on and turns it off: her copy button returns.
+  await sendLinks(h, dm, event);
+  const mailed = linkFor(h, "ann@example.org");
+  expect(here.exec(await (await h.app.request(mailed)).text())?.[1]).toBe(" checked");
+  const off = await h.app.request("/respond/own-answers", post({ t: tokenOf(mailed) }));
+  expect(off.status).toBe(303);
+  expect(off.headers.get("location")).toBe(mailed);
+  expect(here.exec(await (await h.app.request(mailed)).text())?.[1]).toBeUndefined();
+  expect((await text(h, event, dm)).match(/>Copy their link</g)).toHaveLength(1);
+  expect((await h.app.request("/respond/own-answers", post({ t: "nope", on: "1" }))).status).toBe(
+    404,
+  );
+
+  // Signed in, Bob turns his off again; Ann turns her group default off.
+  await h.app.request(`${event}/own-answers`, post({ csrf: bob.csrf }, bob.cookie));
+  expect(here.exec(await text(h, event, bob))?.[1]).toBeUndefined();
+  await h.app.request(`${group}/own-answers`, post({ csrf: ann.csrf }, ann.cookie));
+  expect(
+    box.exec(await (await h.app.request(group, { headers: { cookie: ann.cookie } })).text())?.[1],
+  ).toBeUndefined();
+});
+
 it("a cancelled event offers no link to copy; someone not on it gets none; HIDDEN has no button", async () => {
   const h = await harness();
   const { dm, group } = await setup(h);

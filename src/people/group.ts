@@ -252,3 +252,35 @@ export async function setGroupRetention(
   ]);
   return true;
 }
+
+/**
+ * A member's default for "only my own email answers for me" (DESIGN §10 rc42), copied onto
+ * the events made from the group afterwards. Their own, so no one else's: the caller is
+ * the member, by their membership.
+ */
+export async function setDefaultOwnAnswersOnly(
+  storage: StoragePort,
+  membership: GroupMembership,
+  personId: string,
+  on: boolean,
+): Promise<void> {
+  await storage.batch([
+    {
+      sql: "UPDATE group_member SET default_own_answers_only = ? WHERE group_id = ? AND person_id = ?",
+      params: [on ? 1 : 0, membership.group.id, personId],
+    },
+  ]);
+}
+
+/** Whether this member's default is on, for the group page's form. */
+export async function defaultOwnAnswersOnly(
+  storage: StoragePort,
+  groupId: string,
+  personId: string,
+): Promise<boolean> {
+  const rows = await storage.query({
+    sql: "SELECT default_own_answers_only AS on_ FROM group_member WHERE group_id = ? AND person_id = ?",
+    params: [groupId, personId],
+  });
+  return rows[0]?.on_ === 1;
+}
