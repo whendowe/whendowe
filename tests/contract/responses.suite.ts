@@ -6,6 +6,8 @@ import {
   type EventAccess,
   editEvent,
   findEventForParticipant,
+  listHistory,
+  setVerified,
 } from "../../src/events/event.js";
 import { addParticipant, removeParticipant } from "../../src/events/participation.js";
 import {
@@ -28,6 +30,7 @@ import {
   createGroup,
   findGroupForMember,
   setDefaultOwnAnswersOnly,
+  setGroupDefaultVerified,
 } from "../../src/people/group.js";
 import { acceptInvite, createInvite } from "../../src/people/invite.js";
 import { findOrCreatePerson } from "../../src/people/person.js";
@@ -446,6 +449,178 @@ export function runResponsesContract(makePort: () => Promise<StoragePort>): void
         now: T0,
       });
       expect((await access(port, next.id, ann)).participation.ownAnswersOnly).toBe(false);
+    });
+
+    it("verified (rc42): made so by an editor, once; logged; no copies; copied links dead", async () => {
+      const port = await makePort();
+      const { dm, membership, ann, bob } = await table(port, "ver");
+      const event = await createEvent(port, {
+        creatorId: dm.id,
+        group: membership,
+        fields: SESSION,
+        now: T0,
+      });
+      expect(event.verifiedAt).toBeNull();
+      const asDm = await access(port, event.id, dm.id);
+      const copied = await issueResponseLinks(port, asDm, { now: T0, only: bob, copy: true });
+      if (copied.kind !== "issued") throw new Error(copied.kind);
+      const mailed = await issueResponseLinks(port, asDm, { now: T0, only: ann });
+      if (mailed.kind !== "issued") throw new Error(mailed.kind);
+
+      // A link from before rc42 recorded how links were made (here the DM's own, standing in).
+      await port.batch([
+        {
+          sql: `INSERT INTO response_token (token_hash, canonical_event_id, person_id, action, expires_at, created_at)
+                VALUES ('pre-rc42', ?, ?, 'attend', ?, ?)`,
+          params: [event.id, dm.id, later(RESPONSE_TOKEN_TTL_MS), T0],
+        },
+      ]);
+      const origins = async () =>
+        (
+          await port.query({
+            sql: "SELECT origin FROM response_token WHERE canonical_event_id = ? ORDER BY origin",
+            params: [event.id],
+          })
+        ).map((r) => r.origin);
+
+      // Only an editor; once.
+      expect(await setVerified(port, await access(port, event.id, ann), later(1))).toBe(
+        "forbidden",
+      );
+      expect(await origins()).toEqual([null, "copied", "mailed"]);
+      expect((await access(port, event.id, dm.id)).event.verifiedAt).toBeNull();
+      expect(await setVerified(port, asDm, later(1))).toBe("verified");
+      const after = await access(port, event.id, dm.id);
+      expect(after.event.verifiedAt).toBe(later(1));
+      expect(after.event.revision).toBe(2);
+      expect(await setVerified(port, after, later(2))).toBe("already");
+      expect((await access(port, event.id, dm.id)).event).toMatchObject({
+        verifiedAt: later(1),
+        revision: 2,
+      });
+      // Every tier's history says so, attributed.
+      const history = await listHistory(port, after);
+      expect(history.find((h) => h.revision === 2)).toMatchObject({
+        revision: 2,
+        actorId: dm.id,
+        change: { verified: { before: 0, after: 1 } },
+      });
+      expect(history).toHaveLength(2);
+
+      // Verifying withdrew every link not known to be mailed, so turning it off can't revive one.
+      expect(await origins()).toEqual(["mailed"]);
+      // Bob's copied link is gone; Ann's mailed one works; nobody's link is copied now.
+      expect(await resolveResponseLink(port, copied.links[0]?.token ?? "", later(2))).toBeNull();
+      const annLink = await resolveResponseLink(port, mailed.links[0]?.token ?? "", later(2));
+      expect(annLink?.arrival).toEqual({ via: "mailed", by: null });
+      const again = await issueResponseLinks(port, after, { now: later(2), only: ann, copy: true });
+      expect(again).toMatchObject({ kind: "issued", links: [] });
+      // A link from before rc42 recorded how it was made doesn't answer here either.
+      await port.batch([
+        {
+          sql: "UPDATE response_token SET origin = NULL WHERE canonical_event_id = ? AND person_id = ?",
+          params: [event.id, ann],
+        },
+      ]);
+      expect(await resolveResponseLink(port, mailed.links[0]?.token ?? "", later(2))).toBeNull();
+    });
+
+    it("verified (rc42): only a mailed link or signed in counts, for every kind of answer", async () => {
+      const port = await makePort();
+      const { dm, membership, ann, bob } = await table(port, "ver-ans");
+      const event = await createEvent(port, {
+        creatorId: dm.id,
+        group: membership,
+        fields: SESSION,
+        now: T0,
+        verified: true,
+        requests: new Map([[ann, "accept"]]),
+      });
+      expect(event.verifiedAt).toBe(T0);
+      expect(
+        (await listHistory(port, await access(port, event.id, dm.id)))[0]?.change,
+      ).toMatchObject({
+        verified: { before: null, after: 1 },
+      });
+      const copiedBy = { via: "copied", by: dm.id } as const;
+      const asAnn = await access(port, event.id, ann);
+      for (const arrival of [copiedBy, null])
+        expect(await answerProposal(port, asAnn, { answer: "accept", now: T0, arrival })).toEqual({
+          kind: "forbidden",
+        });
+      expect(
+        (await answerProposal(port, asAnn, { answer: "accept", now: T0, arrival: SIGNED_IN })).kind,
+      ).toBe("recorded");
+      const asBob = await access(port, event.id, bob);
+      for (const arrival of [copiedBy, null]) {
+        expect(await setAttendance(port, asBob, { attendance: "going", now: T0, arrival })).toEqual(
+          {
+            kind: "forbidden",
+          },
+        );
+        expect(await addFeedback(port, asBob, { body: "hi", now: T0, arrival })).toEqual({
+          kind: "forbidden",
+        });
+      }
+      const mailedBy = { via: "mailed", by: null } as const;
+      expect(
+        (await setAttendance(port, asBob, { attendance: "going", now: T0, arrival: mailedBy }))
+          .kind,
+      ).toBe("recorded");
+      expect(
+        (await addFeedback(port, asBob, { body: "hi", now: T0, arrival: SIGNED_IN })).kind,
+      ).toBe("recorded");
+      // Acknowledging too, after a material change asks for it.
+      const ackd = await createEvent(port, {
+        creatorId: dm.id,
+        group: membership,
+        fields: SESSION,
+        now: T0,
+        verified: true,
+        requests: new Map([[bob, "ack"]]),
+      });
+      const bobAck = await access(port, ackd.id, bob);
+      expect(await acknowledge(port, bobAck, { now: T0, arrival: copiedBy })).toEqual({
+        kind: "forbidden",
+      });
+      expect((await acknowledge(port, bobAck, { now: T0, arrival: mailedBy })).kind).toBe(
+        "recorded",
+      );
+    });
+
+    it("a group's organizers make its new events verified; members can't (rc42)", async () => {
+      const port = await makePort();
+      const { dm, membership, ann } = await table(port, "ver-grp");
+      const before = await createEvent(port, {
+        creatorId: dm.id,
+        group: membership,
+        fields: SESSION,
+        now: T0,
+      });
+      const annMembership = await findGroupForMember(port, membership.group.id, ann);
+      if (annMembership === null) throw new Error("membership");
+      expect(await setGroupDefaultVerified(port, annMembership, true)).toBe(false);
+      expect(
+        (await createEvent(port, { creatorId: dm.id, group: membership, fields: SESSION, now: T0 }))
+          .verifiedAt,
+      ).toBeNull();
+      expect(await setGroupDefaultVerified(port, membership, true)).toBe(true);
+      const made = await createEvent(port, {
+        creatorId: ann,
+        group: annMembership,
+        fields: SESSION,
+        now: later(1),
+        verified: false,
+      });
+      expect(made.verifiedAt).toBe(later(1));
+      expect((await access(port, made.id, ann)).event.verifiedAt).toBe(later(1));
+      // What was made before keeps its own; off again, new events aren't.
+      expect((await access(port, before.id, dm.id)).event.verifiedAt).toBeNull();
+      await setGroupDefaultVerified(port, membership, false);
+      expect(
+        (await createEvent(port, { creatorId: dm.id, group: membership, fields: SESSION, now: T0 }))
+          .verifiedAt,
+      ).toBeNull();
     });
 
     it("someone added later brings their group default for their own answers (rc42)", async () => {

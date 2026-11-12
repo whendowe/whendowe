@@ -78,6 +78,8 @@ export const canonicalEvent = sqliteTable(
     updatedAt: text("updated_at").notNull(),
     // rc21: purged this many days after it is past (§10 *Retention*); copied from its group.
     retainDays: integer("retain_days").notNull().default(365),
+    // rc42: verified — answers count only from a mailed link or signed in. Null = not verified.
+    verifiedAt: text("verified_at"),
   },
   (t) => [
     index("canonical_event_group_idx").on(t.groupId),
@@ -267,6 +269,8 @@ export const personGroup = sqliteTable("person_group", {
   createdAt: text("created_at").notNull(),
   // rc21: how long its events are kept once past (§10 *Retention*); events copy it.
   retainDays: integer("retain_days").notNull().default(365),
+  // rc42: events made from the group start verified (its organizers set it).
+  defaultVerified: integer("default_verified").notNull().default(0),
 });
 
 export const groupMember = sqliteTable(

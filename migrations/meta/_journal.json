@@ -232,6 +232,13 @@
       "when": 1794504068723,
       "tag": "0032_thread_own_answers_only",
       "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "6",
+      "when": 1794509932187,
+      "tag": "0033_verified_events",
+      "breakpoints": true
     }
   ]
 }

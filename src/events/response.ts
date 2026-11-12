@@ -45,6 +45,16 @@ export interface Arrival {
   readonly by: string | null;
 }
 export const SIGNED_IN: Arrival = { via: "session", by: null };
+
+/**
+ * Whether an answer that arrived this way counts here (rc42): any way, unless the event is
+ * verified or the person takes answers only from their own email — then only signed in or
+ * by a link mailed to them. The links are refused before this; this is the backstop.
+ */
+export function arrivalCounts(access: EventAccess, arrival: Arrival | null): boolean {
+  if (access.event.verifiedAt === null && !access.participation.ownAnswersOnly) return true;
+  return arrival?.via === "session" || arrival?.via === "mailed";
+}
 export const SHARED_LINK: Arrival = { via: "shared", by: null };
 
 /** What a stored answer says about its arrival; null from before rc42, when it wasn't recorded. */
@@ -74,6 +84,7 @@ export async function setAttendance(
   },
 ): Promise<ResponseResult> {
   if (access.participation.visibility === "HIDDEN") return { kind: "forbidden" };
+  if (!arrivalCounts(access, input.arrival)) return { kind: "forbidden" };
   const written = await storage.query({
     sql: `UPDATE event_participation
           SET attendance = ?, responded_at = ?, attendance_via = ?, attendance_via_by = ?
@@ -105,6 +116,7 @@ export async function addFeedback(
   },
 ): Promise<ResponseResult> {
   if (access.participation.visibility === "HIDDEN") return { kind: "forbidden" };
+  if (!arrivalCounts(access, input.arrival)) return { kind: "forbidden" };
   const body = input.body.trim();
   if (body === "") return { kind: "invalid", reason: "Write something first." };
   if (body.length > FEEDBACK_MAX_LENGTH) {
@@ -310,7 +322,7 @@ export async function issueResponseLinks(
               JOIN canonical_event e ON e.id = ep.canonical_event_id
             WHERE ep.canonical_event_id = ? AND ep.visibility <> 'HIDDEN' AND ep.person_id <> ?
               AND ${PARTY_RULE} AND (? IS NULL OR ep.person_id = ?)
-              AND (? = 0 OR ep.own_answers_only = 0)
+              AND (? = 0 OR (ep.own_answers_only = 0 AND e.verified_at IS NULL))
             ORDER BY p.email`,
       params: [
         access.event.id,
@@ -416,9 +428,10 @@ export async function resolveResponseLink(
   const row = tokenRowSchema.parse(rows[0]);
   const access = await findEventForParticipant(storage, row.canonical_event_id, row.person_id);
   if (access === null || access.participation.visibility === "HIDDEN") return null;
-  // rc42: with "only my own email" on, only a link we mailed them answers as them — not a
-  // copied one, nor one from before links said how they were made.
-  if (access.participation.ownAnswersOnly && row.origin !== "mailed") return null;
+  // rc42: with "only my own email" on, or on a verified event, only a link we mailed them
+  // answers as them — not a copied one, nor one from before links said how they were made.
+  const guarded = access.participation.ownAnswersOnly || access.event.verifiedAt !== null;
+  if (guarded && row.origin !== "mailed") return null;
   return { access, action: row.action, arrival: arrivalOf(row.origin, row.issued_by) };
 }
 
@@ -481,6 +494,7 @@ export async function answerProposal(
   const { event, participation } = access;
   if (participation.visibility === "HIDDEN" || participation.responseKind !== "accept")
     return { kind: "forbidden" };
+  if (!arrivalCounts(access, input.arrival)) return { kind: "forbidden" };
   if (event.status !== "proposed") return { kind: "closed" };
   const state: ResponseState = input.answer === "accept" ? "accepted" : "declined";
   const actor = {
@@ -556,6 +570,7 @@ export async function acknowledge(
   input: { readonly now: string; readonly arrival: Arrival | null },
 ): Promise<ResponseResult> {
   if (access.participation.visibility === "HIDDEN") return { kind: "forbidden" };
+  if (!arrivalCounts(access, input.arrival)) return { kind: "forbidden" };
   if (!needsAcknowledgment(access))
     return { kind: "invalid", reason: "There's nothing to acknowledge." };
   const written = await storage.query({

@@ -41,7 +41,7 @@ import { dayLabel, spanText, whenText } from "../../plans/weeks.js";
 import { type Html, html, ownAnswersForm, type Preview, renderPage } from "../layout.js";
 import { busyAssets, busyAttrs, busyClash, PLAN_STYLE } from "../plan-editor.js";
 import type { AppEnv } from "../session.js";
-import { BUSY_LABEL, describeRRule, formatWhen } from "./events.js";
+import { BUSY_LABEL, describeRRule, formatWhen, verifiedLine } from "./events.js";
 
 // Account-less responses (MVP-2 slice 2D; WORKFLOWS §2: responding never requires an
 // account). The emailed link IS the person, for one event and one question:
@@ -153,7 +153,7 @@ function header(access: EventAccess): Html {
     canSee(participation.visibility, "location") && event.location !== null
       ? html`<p>📍 ${event.location}</p>`
       : "";
-  return html`<h1>${title}</h1>${when}${where}`;
+  return html`<h1>${title}</h1>${verifiedLine(event)}${when}${where}`;
 }
 
 function respondPage(
@@ -218,7 +218,7 @@ function respondPage(
 
   // rc42: only from a link mailed to them can a person change this here.
   const own =
-    link.arrival?.via === "mailed"
+    link.arrival?.via === "mailed" && access.event.verifiedAt === null
       ? ownAnswersForm({
           action: `${RESPOND_PATH}/own-answers`,
           hidden: { t: token },

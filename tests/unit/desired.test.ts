@@ -26,6 +26,7 @@ function event(overrides: Partial<CanonicalEventRow> = {}): CanonicalEventRow {
     createdAt: NOW,
     updatedAt: NOW,
     retainDays: 365,
+    verifiedAt: null,
     ...overrides,
   };
 }
