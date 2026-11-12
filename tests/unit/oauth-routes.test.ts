@@ -935,6 +935,15 @@ it("signs a new Gmail address up, and while signed in adds it as another account
   const res = await finishSignIn(h, h.session);
   expect(res.status).toBe(303);
   expect(await people(h)).toEqual(["ann@gmail.com", OWNER_EMAIL]);
+  // The session records how it was made (rc42): Google here, a sign-in link for the owner's.
+  const via = await h.storage.query({
+    sql: "SELECT p.email, s.via FROM session s JOIN person p ON p.id = s.person_id ORDER BY p.email",
+    params: [],
+  });
+  expect(via).toEqual([
+    { email: "ann@gmail.com", via: "google" },
+    { email: OWNER_EMAIL, via: "magic" },
+  ]);
   const home = await (
     await h.app.request("/", { headers: { cookie: sessionCookie(res) ?? "" } })
   ).text();

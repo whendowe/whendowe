@@ -215,7 +215,7 @@ export function runOptOutContract(makePort: () => Promise<StoragePort>): void {
     it("an address that has signed in can't be deleted from a link, and nothing is written", async () => {
       const port = await makePort();
       const kim = await findOrCreatePerson(port, "kim-d@example.org", { now: T0 });
-      await createSession(port, kim.id, { now: T0 });
+      await createSession(port, kim.id, { now: T0, via: "magic" });
       const before = await everywhere(port);
       expect(await deleteEverything(port, "kim-d@example.org", T0)).toBe(false);
       expect(await everywhere(port)).toBe(before);

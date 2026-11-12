@@ -32,7 +32,7 @@ async function harness(cap?: MailCap) {
       now,
     },
   });
-  return { app, sent };
+  return { app, sent, storage };
 }
 
 type H = Awaited<ReturnType<typeof harness>>;
@@ -297,6 +297,71 @@ it("each member chooses a name per group, and whether this group sees their addr
     post({ csrf: dm.csrf, handle: "x".repeat(41) }, dm.cookie),
   );
   expect(bad.status).toBe(400);
+});
+
+const viaOf = async (h: H, email: string) =>
+  (
+    await h.storage.query({
+      sql: "SELECT s.via FROM session s JOIN person p ON p.id = s.person_id WHERE p.email = ? ORDER BY s.created_at",
+      params: [email],
+    })
+  ).map((r) => String(r.via));
+
+it("an invite to an account that has signed in joins it, and never signs it in (rc42)", async () => {
+  const h = await harness();
+  const dm = await signIn(h, "inv-dm42@example.org");
+  const group = await createGroupVia(h, dm, "Thursday Table");
+  const ann = await signIn(h, "ann42@example.org"); // Ann has an account already
+  await inviteVia(h, dm, group, "ann42@example.org");
+  const link = inviteLink(h);
+
+  // The page says what will happen: joining, then a sign-in of her own.
+  const preview = await (await h.app.request(`${link.pathname}${link.search}`)).text();
+  expect(preview).toContain("Joining adds ann42@example.org to the group.");
+  expect(preview).toContain("you then sign in as that address");
+  expect(preview).not.toContain("Joining also signs");
+  // Opened in the DM's own signed-in browser, it doesn't promise to sign that browser in either.
+  const inDms = await (
+    await h.app.request(`${link.pathname}${link.search}`, { headers: { cookie: dm.cookie } })
+  ).text();
+  expect(inDms).toContain("Joining adds ann42@example.org to the group.");
+  expect(inDms).not.toContain("signs this browser in");
+
+  // Accepted on a browser that isn't hers (a forwarded invite): joined, no session.
+  const joined = await h.app.request("/invite", post({ t: link.searchParams.get("t") ?? "" }));
+  expect(joined.status).toBe(200);
+  expect(joined.headers.get("set-cookie")).toBeNull();
+  const text = await joined.text();
+  expect(text).toContain("You've joined “Thursday Table”");
+  expect(text).toContain(`<a href="${SIGN_IN_PATH}">Sign in</a> to see it.`);
+  expect(await viaOf(h, "ann42@example.org")).toEqual(["magic"]);
+  // Signed in her own way, she is a member.
+  const page = await (await h.app.request(group, { headers: { cookie: ann.cookie } })).text();
+  expect(page).toMatch(/\(you\)/);
+});
+
+it("signed in as that account already, accepting joins at once; a newcomer's invite session says so (rc42)", async () => {
+  const h = await harness();
+  const dm = await signIn(h, "inv-dm43@example.org");
+  const group = await createGroupVia(h, dm, "G");
+  const ben = await signIn(h, "ben43@example.org");
+  await inviteVia(h, dm, group, "ben43@example.org");
+  const t = inviteLink(h).searchParams.get("t") ?? "";
+  const res = await h.app.request("/invite", post({ t }, ben.cookie));
+  expect(res.status).toBe(303);
+  expect(res.headers.get("location")).toBe(group);
+  expect(res.headers.get("set-cookie")).toBeNull(); // the session he has is kept as it is
+  expect(await viaOf(h, "ben43@example.org")).toEqual(["magic"]);
+
+  // A newcomer is signed in by the invite, and the session records that it was.
+  await inviteVia(h, dm, group, "new43@example.org");
+  const fresh = await h.app.request(
+    "/invite",
+    post({ t: inviteLink(h).searchParams.get("t") ?? "" }),
+  );
+  expect(fresh.status).toBe(303);
+  expect(await viaOf(h, "new43@example.org")).toEqual(["invite"]);
+  expect(await viaOf(h, "inv-dm43@example.org")).toEqual(["magic"]);
 });
 
 // rc18 (DESIGN §13): this used to sign the other account out. A browser now holds

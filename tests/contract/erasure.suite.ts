@@ -225,7 +225,7 @@ async function busyTom(port: StoragePort, tag: string) {
     now: T0,
   });
 
-  await createSession(port, tom.id, { now: T0 });
+  await createSession(port, tom.id, { now: T0, via: "magic" });
   await issueLoginToken(port, tom.email, { now: T0 });
   return { tom, mara, lena, adam, jam, asked, shared, alone, poll, group, thread };
 }
@@ -308,7 +308,7 @@ export function runErasureContract(makePort: () => Promise<StoragePort>): void {
     it("asking signs out everywhere and waits 7 days; the pass erases it on the day (rc22)", async () => {
       const port = await makePort();
       const f = await busyTom(port, "wait");
-      const first = await createSession(port, f.tom.id, { now: T0 });
+      const first = await createSession(port, f.tom.id, { now: T0, via: "magic" });
       const asked = await requestDeletion(port, f.tom.id, T0);
       expect(Date.parse(asked.eraseAfter) - Date.parse(T0)).toBe(DELETION_WAIT_MS);
       // Every session is gone, the asking one included.
@@ -320,7 +320,7 @@ export function runErasureContract(makePort: () => Promise<StoragePort>): void {
       expect((await peekDeletion(port, again.token))?.email).toBe(f.tom.email);
 
       // Signed in during the wait, the session knows the day.
-      const during = await createSession(port, f.tom.id, { now: T1 });
+      const during = await createSession(port, f.tom.id, { now: T1, via: "magic" });
       const [account] = await resolveAccounts(port, [during.token], { now: T1 });
       expect(account?.deletesAt).toBe(asked.eraseAfter);
 

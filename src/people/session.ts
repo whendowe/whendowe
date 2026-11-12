@@ -28,10 +28,17 @@ export interface ResolvedSession {
   readonly csrfToken: string;
 }
 
+/**
+ * How a session was made (DESIGN §10 rc42): a sign-in link, Google, or a group invite to an
+ * address that had never signed in. A record for the history and the account page, never a gate.
+ */
+export const sessionViaSchema = z.enum(["magic", "google", "invite"]);
+export type SessionVia = z.infer<typeof sessionViaSchema>;
+
 export async function createSession(
   storage: StoragePort,
   personId: string,
-  options: { readonly now: string; readonly newId?: () => string },
+  options: { readonly now: string; readonly via: SessionVia; readonly newId?: () => string },
 ): Promise<NewSession> {
   const { token, hash } = await issueToken();
   const sessionId = (options.newId ?? (() => uuidv7()))();
@@ -40,9 +47,9 @@ export async function createSession(
   const expiresAt = new Date(t + SESSION_TTL_MS).toISOString();
   await storage.batch([
     {
-      sql: `INSERT INTO session (id, token_hash, person_id, created_at, expires_at)
-            VALUES (?, ?, ?, ?, ?)`,
-      params: [sessionId, hash, personId, options.now, expiresAt],
+      sql: `INSERT INTO session (id, token_hash, person_id, created_at, expires_at, via)
+            VALUES (?, ?, ?, ?, ?, ?)`,
+      params: [sessionId, hash, personId, options.now, expiresAt, options.via],
     },
     // The first session marks the person as having signed in (rc24).
     {
