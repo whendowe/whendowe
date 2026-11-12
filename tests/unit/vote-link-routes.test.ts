@@ -6,6 +6,7 @@ import {
   acceptPlan,
   addDraftEvent,
   createPollThread,
+  listPlans,
   sendDraft,
   startDraft,
   suggestTime,
@@ -555,6 +556,16 @@ it("votes say how they arrived (rc42): the emailed link, or the link the organiz
   const fresh = await (await b.request(`${f.thread}/p/${plan}`)).text();
   expect(fresh).toMatch(/<span class="vote yes">[^<]+ yes<\/span>/);
   expect(fresh).not.toMatch(/emailed link<|copied for|shared link<\/span>/);
+
+  // A vote from the plan's page, signed in, is recorded as that.
+  const late = f.planIds[1] ?? "";
+  await b.request(
+    `${f.thread}/p/${late}/vote`,
+    post({ csrf: (await home(b)).csrf, answer: "ifneedbe" }),
+  );
+  expect(
+    (await listPlans(b.storage, await f.as(f.mara.id))).find((p) => p.id === late)?.votes,
+  ).toMatchObject([{ answer: "ifneedbe", arrival: { via: "session", by: null } }]);
 
   // Ana votes with the link she was mailed. Its page names nobody.
   await sendLinks(b, f.thread);
