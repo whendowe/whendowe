@@ -18,6 +18,7 @@ import {
   type ResolvedLink,
   resolveResponseLink,
   setAttendance,
+  setOwnAnswersOnly,
 } from "../../events/response.js";
 import type { MailPort } from "../../mail/port.js";
 import { addVoteNote, listNotes, type PlanNote } from "../../plans/note.js";
@@ -36,7 +37,7 @@ import {
   VOTE_LINK_TTL_MS,
 } from "../../plans/vote-link.js";
 import { dayLabel, spanText, whenText } from "../../plans/weeks.js";
-import { type Html, html, type Preview, renderPage } from "../layout.js";
+import { type Html, html, ownAnswersForm, type Preview, renderPage } from "../layout.js";
 import { busyAssets, busyAttrs, busyClash, PLAN_STYLE } from "../plan-editor.js";
 import type { AppEnv } from "../session.js";
 import { BUSY_LABEL, describeRRule, formatWhen } from "./events.js";
@@ -214,10 +215,21 @@ function respondPage(
 </form>`
     : question;
 
+  // rc42: only from a link mailed to them can a person change this here.
+  const own =
+    link.arrival?.via === "mailed"
+      ? ownAnswersForm({
+          action: `${RESPOND_PATH}/own-answers`,
+          hidden: { t: token },
+          on: participation.ownAnswersOnly,
+          where: "here",
+        })
+      : "";
   return linkPage(
     "Your answer",
     html`${notice}${header(access)}
 ${form}
+${own}
 <p class="muted">${
       givenBy === null ? "" : html`${givenBy} gave you this link, and your answer will say so. `
     }This link is just for you — please don't forward it. No account needed.</p>`,
@@ -510,6 +522,33 @@ export function registerRespondRoutes(app: Hono<AppEnv>, deps: RespondRouteDeps)
     const back = new URL(RESPOND_PATH, "http://placeholder");
     back.searchParams.set("t", token);
     back.searchParams.set("saved", "1");
+    return c.redirect(`${back.pathname}${back.search}`, 303);
+  });
+
+  // rc42: "only my own email answers for me", from the person's own mailed link. The
+  // domain refuses a copied link, whatever this page showed.
+  app.post(`${RESPOND_PATH}/own-answers`, async (c) => {
+    sensitive(c);
+    const form = await c.req.parseBody();
+    const token = readToken(form.t);
+    const link = token === null ? null : await resolveResponseLink(deps.storage, token, deps.now());
+    if (token === null || link === null) return c.html(deadLink(), 404);
+    const saved = await setOwnAnswersOnly(deps.storage, link.access, {
+      on: form.on === "1",
+      arrival: link.arrival,
+    });
+    if (saved === "forbidden")
+      return c.html(
+        respondPage(
+          link,
+          token,
+          html`<p class="error">Only a link sent to your own address can change that.</p>`,
+          await givenBy(deps.storage, link),
+        ),
+        403,
+      );
+    const back = new URL(RESPOND_PATH, "http://placeholder");
+    back.searchParams.set("t", token);
     return c.redirect(`${back.pathname}${back.search}`, 303);
   });
 

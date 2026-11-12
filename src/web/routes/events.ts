@@ -61,6 +61,7 @@ import {
   revokeUndeliveredLink,
   SIGNED_IN,
   setAttendance,
+  setOwnAnswersOnly,
 } from "../../events/response.js";
 import { MailCapReachedError } from "../../mail/capped.js";
 import type { MailPort } from "../../mail/port.js";
@@ -93,6 +94,7 @@ import {
   EVENTS_PATH,
   type Html,
   html,
+  ownAnswersForm,
   retentionSection,
   SHARE_BUTTONS,
   who,
@@ -1008,6 +1010,7 @@ function peopleSection(
     actionFor(access) !== null &&
     p.personId !== access.participation.personId &&
     p.visibility !== "HIDDEN";
+  // rc42: someone who takes answers only from their own email has no link to copy.
   return html`<h2>Taking part</h2><ul>${people.map(
     (p) =>
       html`<li>${who(p.shown)}${p.editTier === "edit" ? html` <span class="muted">· can edit</span>` : ""}${
@@ -1015,9 +1018,11 @@ function peopleSection(
           ? html` <form method="post" action="${EVENTS_PATH}/${event.id}/people/remove" style="display:inline"><input type="hidden" name="csrf" value="${csrf}" /><input type="hidden" name="person" value="${p.personId}" /><button type="submit">Remove</button></form>`
           : ""
       }${
-        copyable(p)
-          ? html` <form method="post" action="${EVENTS_PATH}/${event.id}/people/link" style="display:inline"><input type="hidden" name="csrf" value="${csrf}" /><input type="hidden" name="person" value="${p.personId}" /><button type="submit">Copy their link</button></form>`
-          : ""
+        copyable(p) && p.ownAnswersOnly
+          ? html` <span class="muted">· takes answers only from their own email</span>`
+          : copyable(p)
+            ? html` <form method="post" action="${EVENTS_PATH}/${event.id}/people/link" style="display:inline"><input type="hidden" name="csrf" value="${csrf}" /><input type="hidden" name="person" value="${p.personId}" /><button type="submit">Copy their link</button></form>`
+            : ""
       }</li>`,
   )}</ul>
 ${
@@ -1107,6 +1112,7 @@ ${await requestsSection(deps, access, csrf)}
 ${await proposalsSection(deps, access, csrf)}
 ${people.length === 0 ? "" : peopleSection(access, people, csrf)}
 ${see("participants") ? await appearanceSection(deps.storage, { kind: "event", id: event.id }, { personId: participation.personId, csrfToken: csrf }, `${EVENTS_PATH}/${event.id}/me`, "event") : ""}
+${ownAnswersForm({ action: `${EVENTS_PATH}/${event.id}/own-answers`, hidden: { csrf }, on: participation.ownAnswersOnly, where: "here" })}
 ${await responsesSection(deps, access, csrf)}
 ${retentionSection({
   days: await eventRetention(deps.storage, access),
@@ -1577,6 +1583,19 @@ ${pollForm(`/groups/${membership.group.id}/polls`, csrf, values, error, peopleFi
     return saveAppearance(c, deps.storage, { kind: "event", id }, `${EVENTS_PATH}/${id}`);
   });
 
+  // rc42: the person's own switch, signed in. A mailed link sets it too (respond.ts).
+  app.post(`${EVENTS_PATH}/:id/own-answers`, async (c) => {
+    const me = requireSignedIn(c);
+    if (me instanceof Response) return me;
+    const form = await c.req.parseBody();
+    if (!(await verifyFormCsrf(me, form))) return rejectedPage(c, form);
+    const access = await findEventForParticipant(deps.storage, c.req.param("id"), me.personId);
+    if (access === null || access.participation.visibility === "HIDDEN")
+      return c.html(notFound(c), 404);
+    await setOwnAnswersOnly(deps.storage, access, { on: form.on === "1", arrival: SIGNED_IN });
+    return c.redirect(`${EVENTS_PATH}/${access.event.id}`, 303);
+  });
+
   app.post(`${EVENTS_PATH}/:id/attendance`, async (c) => {
     const me = requireSignedIn(c);
     if (me instanceof Response) return me;
@@ -1796,6 +1815,20 @@ ${pollForm(`/groups/${membership.group.id}/polls`, csrf, values, error, peopleFi
     if (access === null || access.participation.visibility === "HIDDEN")
       return c.html(notFound(c), 404);
     const personId = str(form, "person");
+    const them = (await listParticipants(deps.storage, access.event.id)).find(
+      (p) => p.personId === personId,
+    );
+    if (them?.ownAnswersOnly === true)
+      return c.html(
+        await eventPage(
+          c,
+          deps,
+          access,
+          me.csrfToken,
+          `${them.shown.name} takes answers only from their own email. You can still send them their link by email.`,
+        ),
+        409,
+      );
     const issued = await issueResponseLinks(deps.storage, access, {
       now: deps.now(),
       only: personId,

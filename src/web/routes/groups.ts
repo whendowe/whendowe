@@ -6,12 +6,14 @@ import { MailCapReachedError } from "../../mail/capped.js";
 import type { MailPort } from "../../mail/port.js";
 import {
   createGroup,
+  defaultOwnAnswersOnly,
   findGroupForMember,
   type GroupMembership,
   groupRetention,
   leaveGroup,
   listGroupsFor,
   listMembers,
+  setDefaultOwnAnswersOnly,
   setGroupRetention,
 } from "../../people/group.js";
 import {
@@ -24,7 +26,7 @@ import {
 } from "../../people/invite.js";
 import { appearanceIn, normalizeEmail } from "../../people/person.js";
 import { retainDaysSchema } from "../../privacy/retention.js";
-import { cappedText, GROUPS_PATH, html, retentionSection, who } from "../layout.js";
+import { cappedText, GROUPS_PATH, html, ownAnswersForm, retentionSection, who } from "../layout.js";
 import {
   type AppEnv,
   notVisible,
@@ -202,6 +204,7 @@ ${events.length === 0 ? html`<p class="muted">Nothing planned yet.</p>` : html`<
 ${await feedSection(deps, { personId: me.personId, groupId: membership.group.id }, me.csrfToken)}
 ${await sharedLinksSection(deps, membership, me.csrfToken)}
 ${await appearanceSection(deps.storage, { kind: "group", id: membership.group.id }, me, `${GROUPS_PATH}/${membership.group.id}/me`, "group")}
+${ownAnswersForm({ action: `${GROUPS_PATH}/${membership.group.id}/own-answers`, hidden: { csrf: me.csrfToken }, on: await defaultOwnAnswersOnly(deps.storage, membership.group.id, me.personId), where: "on new events from this group" })}
 ${membership.role === "organizer" ? inviteForm(membership, me.csrfToken, null) : ""}
 ${retentionSection({
   days: await groupRetention(deps.storage, membership.group.id),
@@ -270,6 +273,18 @@ ${
     if (membership === null) return c.notFound();
     const id = membership.group.id;
     return saveAppearance(c, deps.storage, { kind: "group", id }, `${GROUPS_PATH}/${id}`);
+  });
+
+  // rc42: a member's default for their own answers, copied onto events made afterwards.
+  app.post(`${GROUPS_PATH}/:id/own-answers`, async (c) => {
+    const me = requireSignedIn(c);
+    if (me instanceof Response) return me;
+    const form = await c.req.parseBody();
+    if (!(await verifyFormCsrf(me, form))) return rejectedPage(c, form);
+    const membership = await findGroupForMember(deps.storage, c.req.param("id"), me.personId);
+    if (membership === null) return c.notFound();
+    await setDefaultOwnAnswersOnly(deps.storage, membership, me.personId, form.on === "1");
+    return c.redirect(`${GROUPS_PATH}/${membership.group.id}`, 303);
   });
 
   // Retention (DESIGN §10 rc23): organizers only; the domain refuses anyone else too.

@@ -47,11 +47,13 @@ export interface Participation {
   /** What the organizer asked this person for, and their answer so far. */
   readonly responseKind: ResponseKind;
   readonly responseState: ResponseState | null;
+  /** rc42: "only my own email answers for me" here: no copied link answers as them. */
+  readonly ownAnswersOnly: boolean;
 }
 
 /** The SQL column list toParticipation reads, aliased `ep`. */
 export const PARTICIPATION_COLUMNS =
-  "ep.canonical_event_id, ep.person_id, ep.edit_tier, ep.visibility, ep.attendance, ep.response_kind, ep.response_state";
+  "ep.canonical_event_id, ep.person_id, ep.edit_tier, ep.visibility, ep.attendance, ep.response_kind, ep.response_state, ep.own_answers_only";
 
 export interface ParticipantView extends Participation {
   /** As the event's people see them (DESIGN §10 rc21): a handle, an address only if shown. */
@@ -97,6 +99,7 @@ export const participationRowSchema = z.object({
   attendance: z.enum(["going", "maybe", "not_going"]).nullable(),
   response_kind: responseKindSchema,
   response_state: responseStateSchema.nullable(),
+  own_answers_only: z.number(),
 });
 
 export function toParticipation(row: unknown): Participation {
@@ -109,6 +112,7 @@ export function toParticipation(row: unknown): Participation {
     attendance: r.attendance,
     responseKind: r.response_kind,
     responseState: r.response_state,
+    ownAnswersOnly: r.own_answers_only === 1,
   };
 }
 
@@ -265,10 +269,22 @@ export async function addParticipant(
       ],
     },
     {
-      sql: `INSERT INTO event_participation (canonical_event_id, person_id, edit_tier, visibility, response_kind, created_at)
-            SELECT ?, ?, ?, ?, 'none', ?
+      // rc42: someone in the event's group brings their default for their own answers.
+      sql: `INSERT INTO event_participation
+              (canonical_event_id, person_id, edit_tier, visibility, response_kind, created_at, own_answers_only)
+            SELECT ?, ?, ?, ?, 'none', ?,
+              coalesce((SELECT default_own_answers_only FROM group_member WHERE group_id = ? AND person_id = ?), 0)
             WHERE EXISTS (SELECT 1 FROM event_participant_change WHERE id = ?)`,
-      params: [eventId, person.id, input.editTier, input.visibility, input.now, changeId],
+      params: [
+        eventId,
+        person.id,
+        input.editTier,
+        input.visibility,
+        input.now,
+        access.event.groupId,
+        person.id,
+        changeId,
+      ],
     },
   ]);
   const written = await storage.query({
