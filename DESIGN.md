@@ -1660,14 +1660,21 @@ say so where it matters.
 - **Every answer records how it arrived — always, everywhere.**
   - An answer link is `mailed` (we sent it to the person's address) or `copied` (an organizer took
     it, rc36), and a copied link remembers who copied it. Each answer — attendance, an
-    acknowledgement or acceptance, a slot vote, a plan vote, a feedback note — stores how its
-    latest state arrived: `session`, `mailed`, `copied`, or `shared` for a shared link's guest
-    (rc25).
+    acknowledgement or acceptance, a plan vote, a feedback note — stores how its latest state
+    arrived: `session`, `mailed`, `copied`, or `shared` for a shared link's guest (rc25).
+    (Event polls and their slot votes went in rc35; a vote is a plan vote.)
+  - As built (slices 1a, 1b; owner, 2026-11-12): the yes that making a poll, suggesting a time
+    or sending a draft gives its author is `session`, since all three need one. Answering
+    signed in on a shared link's page is `session` too — it is the account's own answer; only a
+    guest with a claimed name is `shared`. A guest's answer that moves to an account (rc30) keeps
+    `shared`: a label changes only with a new answer. A note left with a vote (`plan_note`) is not
+    an answer and carries no label.
   - The history says it, to everyone who can see the entry (attribution is the product, 2E):
     "Jana said yes · by the link Adam copied for her", "… · by her emailed link". A signed-in
     answer says nothing extra. Answers from before rc42 say nothing either: it wasn't recorded.
-  - The answer page says it to the person answering: "Adam sent you this link." And the
-    organizer's page says "answered with the link you copied", never just "answered".
+  - The answer page says it to the person answering, for a copied link: "Adam gave you this
+    link, and your answer will say so." And the organizer's page says "by the link you copied for
+    them", never just the answer. Once whoever copied it is erased, both say "someone".
   - Nothing here stops anything. A casual group never meets it unless someone looks.
 - **A person can say "only my own email answers for me".**
   - A switch on each event and thread you are on, with a default per group (`group_member`, like
@@ -1760,9 +1767,13 @@ ALTER TABLE response_token      ADD origin    text;                        -- ma
 ALTER TABLE response_token      ADD issued_by text REFERENCES person(id);  -- copied: by whom
 ALTER TABLE plan_vote_token     ADD origin    text;
 ALTER TABLE plan_vote_token     ADD issued_by text REFERENCES person(id);
--- On every answer row (event_participation, slot_response, plan_vote, event_feedback):
+-- On every answer row (plan_vote, event_feedback):
 --   answered_via    text                          -- session | mailed | copied | shared
 --   answered_via_by text REFERENCES person(id)    -- copied: who copied the link
+-- event_participation holds two answers, so two pairs: attendance_via(_by) for attendance,
+-- response_state_via(_by) for accepting and acknowledging.
+-- As built (0028, 0029): every *_by and issued_by is ON DELETE SET NULL, so erasing whoever
+-- copied a link leaves "someone".
 ALTER TABLE event_participation ADD own_answers_only integer NOT NULL DEFAULT 0;
 ALTER TABLE plan_thread_member  ADD own_answers_only integer NOT NULL DEFAULT 0;
 ALTER TABLE group_member        ADD default_own_answers_only integer NOT NULL DEFAULT 0;
