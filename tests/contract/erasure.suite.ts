@@ -10,7 +10,7 @@ import {
 } from "../../src/events/event.js";
 import { addParticipant, listParticipants } from "../../src/events/participation.js";
 import { proposeChange } from "../../src/events/proposal.js";
-import { addFeedback, issueResponseLinks } from "../../src/events/response.js";
+import { addFeedback, issueResponseLinks, SIGNED_IN } from "../../src/events/response.js";
 import { createGroup, findGroupForMember } from "../../src/people/group.js";
 import { acceptInvite, createInvite } from "../../src/people/invite.js";
 import { issueLoginToken } from "../../src/people/login.js";
@@ -89,7 +89,11 @@ async function busyTom(port: StoragePort, tag: string) {
     now: T0,
     people: [{ personId: tom.id, editTier: "propose", visibility: "FULL" }],
   });
-  await addFeedback(port, await access(port, jam.id, tom.id), { body: "bringing rope", now: T0 });
+  await addFeedback(port, await access(port, jam.id, tom.id), {
+    arrival: SIGNED_IN,
+    body: "bringing rope",
+    now: T0,
+  });
   await proposeChange(port, await access(port, jam.id, tom.id), {
     fields: { ...DINNER, location: "Tom's place" },
     now: T0,

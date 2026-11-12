@@ -17,7 +17,7 @@ import {
   proposeChange,
   withdrawChange,
 } from "../../src/events/proposal.js";
-import { acknowledge, listRequests } from "../../src/events/response.js";
+import { acknowledge, listRequests, SIGNED_IN } from "../../src/events/response.js";
 import { createGroup, findGroupForMember } from "../../src/people/group.js";
 import { acceptInvite, createInvite, type EditTier } from "../../src/people/invite.js";
 import { findOrCreatePerson, guestName } from "../../src/people/person.js";
@@ -219,7 +219,10 @@ export function runProposalsContract(makePort: () => Promise<StoragePort>): void
     it("an accepted material change asks for acknowledgment again", async () => {
       const port = await makePort();
       const f = await dinner(port, "reack", true);
-      await acknowledge(port, await access(port, f.eventId, f.petra), { now: T1 });
+      await acknowledge(port, await access(port, f.eventId, f.petra), {
+        arrival: SIGNED_IN,
+        now: T1,
+      });
       const id = await proposed(port, f.eventId, f.david);
       await decideProposal(port, await access(port, f.eventId, f.mara), {
         proposalId: id,

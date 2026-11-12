@@ -3,7 +3,7 @@ import type { Context, Hono } from "hono";
 import { z } from "zod";
 import type { StoragePort } from "../../db/port.js";
 import type { EventAccess } from "../../events/event.js";
-import { canSee } from "../../events/participation.js";
+import { canSee, listParticipants } from "../../events/participation.js";
 import { type Answer, answerSchema } from "../../events/poll.js";
 import {
   type Attendance,
@@ -148,7 +148,13 @@ function header(access: EventAccess): Html {
   return html`<h1>${title}</h1>${when}${where}`;
 }
 
-function respondPage(link: ResolvedLink, token: string, notice: Html | string): string {
+function respondPage(
+  link: ResolvedLink,
+  token: string,
+  notice: Html | string,
+  /** For a copied link (rc42): the name of whoever copied it, "someone" once they're gone. */
+  givenBy: string | null,
+): string {
   const { access, action } = link;
   const { event, participation } = access;
   // A vote link is a consent proposal's (rc13); an event-poll's links closed with it (rc35).
@@ -206,8 +212,18 @@ function respondPage(link: ResolvedLink, token: string, notice: Html | string): 
     "Your answer",
     html`${notice}${header(access)}
 ${form}
-<p class="muted">This link is just for you — please don't forward it. No account needed.</p>`,
+<p class="muted">${
+      givenBy === null ? "" : html`${givenBy} gave you this link, and your answer will say so. `
+    }This link is just for you — please don't forward it. No account needed.</p>`,
   );
+}
+
+/** Who copied this link, for the page to say (rc42); null for a mailed or an older link. */
+async function givenBy(storage: StoragePort, link: ResolvedLink): Promise<string | null> {
+  if (link.arrival?.via !== "copied") return null;
+  const by = link.arrival.by;
+  const people = by === null ? [] : await listParticipants(storage, link.access.event.id);
+  return people.find((p) => p.personId === by)?.shown.name ?? "Someone";
 }
 
 // --- A thread's vote link (DESIGN §10 rc26) ---------------------------------------------
@@ -414,7 +430,7 @@ export function registerRespondRoutes(app: Hono<AppEnv>, deps: RespondRouteDeps)
       c.req.query("saved") === "1"
         ? html`<p><strong>Thanks — your answer is saved.</strong> You can change it any time with this link.</p>`
         : "";
-    return c.html(respondPage(link, token, notice));
+    return c.html(respondPage(link, token, notice, await givenBy(deps.storage, link)));
   });
 
   app.post(RESPOND_PATH, async (c) => {
@@ -426,9 +442,10 @@ export function registerRespondRoutes(app: Hono<AppEnv>, deps: RespondRouteDeps)
     // re-checked at the moment of acting, not trusted from when the page was rendered.
     const link = token === null ? null : await resolveResponseLink(deps.storage, token, now);
     if (token === null || link === null) return c.html(deadLink(), 404);
-    const { access, action } = link;
+    const { access, action, arrival } = link;
+    const copier = await givenBy(deps.storage, link);
     const problem = (message: string, status: 400 | 409) =>
-      c.html(respondPage(link, token, html`<p class="error">${message}</p>`), status);
+      c.html(respondPage(link, token, html`<p class="error">${message}</p>`, copier), status);
 
     let answered = false;
     if (action === "vote" && access.participation.responseKind === "accept") {
@@ -436,7 +453,11 @@ export function registerRespondRoutes(app: Hono<AppEnv>, deps: RespondRouteDeps)
         form.decision === "accept" || form.decision === "decline" ? form.decision : null;
       if (decision !== null) {
         answered = true;
-        const result = await answerProposal(deps.storage, access, { answer: decision, now });
+        const result = await answerProposal(deps.storage, access, {
+          answer: decision,
+          now,
+          arrival,
+        });
         if (result.kind !== "recorded") return problem("This has already been settled.", 409);
       }
     } else {
@@ -446,13 +467,14 @@ export function registerRespondRoutes(app: Hono<AppEnv>, deps: RespondRouteDeps)
         const result = await setAttendance(deps.storage, access, {
           attendance: attendance.data,
           now,
+          arrival,
         });
         if (result.kind !== "recorded")
           return problem("This event can't take answers any more.", 409);
       }
       if (form.ack === "on" && needsAcknowledgment(access)) {
         answered = true;
-        const result = await acknowledge(deps.storage, access, { now });
+        const result = await acknowledge(deps.storage, access, { now, arrival });
         if (result.kind !== "recorded")
           return problem("This event can't take answers any more.", 409);
       }
@@ -460,7 +482,7 @@ export function registerRespondRoutes(app: Hono<AppEnv>, deps: RespondRouteDeps)
     const note = typeof form.note === "string" ? form.note : "";
     if (!answered && note.trim() === "") return problem("Pick an answer first.", 400);
     if (note.trim() !== "") {
-      const result = await addFeedback(deps.storage, access, { body: note, now });
+      const result = await addFeedback(deps.storage, access, { body: note, now, arrival });
       if (result.kind === "invalid") return problem(result.reason, 400);
       if (result.kind !== "recorded") return problem("This event can't take notes any more.", 409);
     }

@@ -46,6 +46,7 @@ import {
   withdrawChange,
 } from "../../events/proposal.js";
 import {
+  type Arrival,
   type Attendance,
   acknowledge,
   actionFor,
@@ -58,6 +59,7 @@ import {
   needsAcknowledgment,
   RESPONSE_TOKEN_TTL_MS,
   revokeUndeliveredLink,
+  SIGNED_IN,
   setAttendance,
 } from "../../events/response.js";
 import { MailCapReachedError } from "../../mail/capped.js";
@@ -127,6 +129,36 @@ export interface EventRouteDeps {
 }
 
 export const BUSY_LABEL = "Busy";
+
+/**
+ * How an answer arrived, said after it (DESIGN §10 rc42): nothing for a signed-in answer or
+ * one from before this was recorded; otherwise the emailed link, or the link someone copied
+ * and who. Shown to everyone who sees the answer — attribution is the product (2E).
+ */
+export function arrivalNote(
+  arrival: Arrival | null,
+  subjectId: string,
+  viewerId: string,
+  names: ReadonlyMap<string, string>,
+): Html | string {
+  if (arrival === null || arrival.via === "session") return "";
+  const mine = subjectId === viewerId;
+  if (arrival.via === "mailed")
+    return html` <span class="muted">· by ${mine ? "your" : "their"} emailed link</span>`;
+  const by =
+    arrival.by === null
+      ? "someone"
+      : arrival.by === viewerId
+        ? "you"
+        : (names.get(arrival.by) ?? "someone");
+  return html` <span class="muted">· by the link ${by} copied for ${mine ? "you" : "them"}</span>`;
+}
+
+/** Everyone on the event by id, for naming who copied a link. */
+async function namesOn(deps: EventRouteDeps, eventId: string): Promise<Map<string, string>> {
+  const people = await listParticipants(deps.storage, eventId);
+  return new Map(people.map((p) => [p.personId, p.shown.name]));
+}
 /** A poll's own path, for one made with people by email alone (DESIGN rc15). */
 export const POLLS_PATH = "/polls";
 
@@ -651,6 +683,9 @@ async function responsesSection(
   const { event, participation } = access;
   const names = canSee(participation.visibility, "participants");
   const responses = await listResponses(deps.storage, access);
+  const arrivalNames = await namesOn(deps, event.id);
+  const via = (arrival: Arrival | null, subjectId: string) =>
+    arrivalNote(arrival, subjectId, participation.personId, arrivalNames);
   const count = (a: Attendance) => responses.attendance.filter((r) => r.attendance === a).length;
   const notes = names
     ? responses.feedback
@@ -670,7 +705,7 @@ async function responsesSection(
   const tally = scheduled
     ? html`<p class="muted">${count("going")} going · ${count("maybe")} maybe · ${count("not_going")} can't make it</p>${
         names && responses.attendance.length > 0
-          ? html`<ul>${responses.attendance.map((r) => html`<li>${who(r.shown)}: ${ATTENDANCE_LABEL[r.attendance]}</li>`)}</ul>`
+          ? html`<ul>${responses.attendance.map((r) => html`<li>${who(r.shown)}: ${ATTENDANCE_LABEL[r.attendance]}${via(r.arrival, r.personId)}</li>`)}</ul>`
           : ""
       }`
     : "";
@@ -692,13 +727,14 @@ async function responsesSection(
       : "";
   return html`${scheduled ? html`<h2>Are you coming?</h2>${attendanceForm}${tally}` : ""}
 <h2>Notes</h2>
-${notes.length === 0 ? html`<p class="muted">No notes yet.</p>` : html`<ul>${notes.map((n) => html`<li><span class="muted">${n.at.slice(0, 16).replace("T", " ")}</span> · ${who(n.shown)}: <span style="white-space:pre-wrap">${n.body}</span></li>`)}</ul>`}
+${notes.length === 0 ? html`<p class="muted">No notes yet.</p>` : html`<ul>${notes.map((n) => html`<li><span class="muted">${n.at.slice(0, 16).replace("T", " ")}</span> · ${who(n.shown)}: <span style="white-space:pre-wrap">${n.body}</span>${via(n.arrival, n.personId)}</li>`)}</ul>`}
 ${noteForm}
 ${sendLinks}`;
 }
 
 // --- Agreement & acknowledgment (slice 2E-1) -----------------------------------------
 
+const GIVEN_STATES: ReadonlySet<string> = new Set(["accepted", "declined", "acknowledged"]);
 const STATE_LABEL: Record<string, string> = {
   pending: "not answered yet",
   accepted: "agreed ✓",
@@ -736,6 +772,7 @@ async function requestsSection(
   const requests = (await listRequests(deps.storage, access)).filter(
     (r) => names || r.personId === me,
   );
+  const namesById = await namesOn(deps, event.id);
 
   const mine: Html[] = [];
   if (event.status === "proposed" && participation.responseKind === "accept") {
@@ -766,6 +803,9 @@ ${button(event.id, "acknowledge", csrf, again ? "I've seen the change" : "Seen i
               r.at === null
                 ? ""
                 : html` <span class="muted">${r.at.slice(0, 16).replace("T", " ")}</span>`
+            }${
+              // Only on an answer they gave: "asked to look again" is ours, not theirs.
+              GIVEN_STATES.has(r.state) ? arrivalNote(r.arrival, r.personId, me, namesById) : ""
             }</li>`,
         )}</ul>`;
   return html`${mine}${list}${organizer.length === 0 ? "" : html`<p>${organizer}</p>`}`;
@@ -1558,6 +1598,7 @@ ${pollForm(`/groups/${membership.group.id}/polls`, csrf, values, error, peopleFi
     const result = await setAttendance(deps.storage, access, {
       attendance: attendance.data,
       now: deps.now(),
+      arrival: SIGNED_IN,
     });
     if (result.kind !== "recorded")
       return c.html(
@@ -1578,6 +1619,7 @@ ${pollForm(`/groups/${membership.group.id}/polls`, csrf, values, error, peopleFi
     const result = await addFeedback(deps.storage, access, {
       body: str(form, "note"),
       now: deps.now(),
+      arrival: SIGNED_IN,
     });
     switch (result.kind) {
       case "recorded":
@@ -1907,11 +1949,15 @@ ${pollForm(`/groups/${membership.group.id}/polls`, csrf, values, error, peopleFi
   lifecycle("answer", async (access, form, now) => {
     const answer = form.answer === "accept" || form.answer === "decline" ? form.answer : null;
     if (answer === null) return { kind: "invalid" };
-    const result = await answerProposal(deps.storage, access, { answer, now });
+    const result = await answerProposal(deps.storage, access, {
+      answer,
+      now,
+      arrival: SIGNED_IN,
+    });
     return result.kind === "recorded" ? { kind: "done", status: result.status } : result;
   });
   lifecycle("acknowledge", async (access, _form, now) => {
-    const result = await acknowledge(deps.storage, access, { now });
+    const result = await acknowledge(deps.storage, access, { now, arrival: SIGNED_IN });
     if (result.kind === "recorded") return { kind: "done", status: access.event.status };
     return result.kind === "invalid" ? { kind: "invalid" } : result;
   });

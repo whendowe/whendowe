@@ -1589,6 +1589,54 @@ it("an editor copies a person's link instead of emailing it: fresh each time, sh
     ).toBe(404);
 });
 
+it("the pages say how an answer arrived (rc42): the emailed link, or the link someone copied", async () => {
+  const h = await harness();
+  const { dm, group } = await setup(h);
+  const ann = await join(h, dm, group, "ann@example.org", "view", "FULL");
+  await join(h, dm, group, "bob@example.org", "view", "FULL");
+  const event = await createVia(h, dm, group);
+
+  // Bob answers with the link he was mailed. Its page names nobody.
+  await sendLinks(h, dm, event);
+  const bobLink = linkFor(h, "bob@example.org");
+  expect(await (await h.app.request(bobLink)).text()).not.toContain("gave you this link");
+  await h.app.request(bobLink, post({ t: tokenOf(bobLink), attendance: "maybe" }));
+
+  // Ann answers with a link the DM copied. Her page says who gave it to her.
+  const annId = /name="person" value="([^"]+)" \/><button type="submit">Copy their link/.exec(
+    (await text(h, event, dm)).split("ann")[1] ?? "",
+  )?.[1];
+  if (annId === undefined) throw new Error("no copy button for ann");
+  const copied = await (
+    await h.app.request(`${event}/people/link`, post({ csrf: dm.csrf, person: annId }, dm.cookie))
+  ).text();
+  const url = new URL(/https:\/\/[^\s"<]+\/respond\?t=[A-Za-z0-9_-]+/.exec(copied)?.[0] ?? "");
+  const annLink = `${url.pathname}${url.search}`;
+  expect(await (await h.app.request(annLink)).text()).toContain(
+    "dm gave you this link, and your answer will say so.",
+  );
+  await h.app.request(
+    annLink,
+    post({ t: tokenOf(annLink), attendance: "going", note: "see you there" }),
+  );
+
+  // The DM, who copied it, reads "you"; Ann reads the DM's name, and "for you".
+  const asDm = await text(h, event, dm);
+  expect(asDm).toContain("· by the link you copied for them</span>");
+  expect(asDm).toContain("· by their emailed link</span>");
+  expect(asDm.match(/by the link you copied for them/g)).toHaveLength(2); // the answer and the note
+  const asAnn = await text(h, event, ann);
+  expect(asAnn).toContain("· by the link dm copied for you</span>");
+  expect(asAnn).toContain("· by their emailed link</span>");
+
+  // Signed in, an answer says nothing extra, and replaces the label on that answer only.
+  await h.app.request(
+    `${event}/attendance`,
+    post({ csrf: ann.csrf, attendance: "maybe" }, ann.cookie),
+  );
+  expect((await text(h, event, dm)).match(/by the link you copied for them/g)).toHaveLength(1);
+});
+
 it("a cancelled event offers no link to copy; someone not on it gets none; HIDDEN has no button", async () => {
   const h = await harness();
   const { dm, group } = await setup(h);
