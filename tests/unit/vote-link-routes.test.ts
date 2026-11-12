@@ -677,6 +677,85 @@ it("only my own email in a thread (rc42): from the thread page or a mailed vote 
   );
 });
 
+it("a verified thread (rc42): its decider verifies it; its pages say so; no sharing or copying", async () => {
+  const b = await browser({ now: () => NOW });
+  const f = await signedInPoll(b, ["david", "ana"]);
+  const LINE = "<strong>Answers here are verified:</strong> each person's own email, or signed in.";
+  const csrf = async () => (await home(b)).csrf;
+  const before = await (await b.request(f.thread)).text();
+  expect(before).toContain("Verify answers here");
+  expect(before).toContain(`action="${f.thread}/share"`);
+  expect(before).toContain("Their own links");
+  expect(before).not.toContain(LINE);
+  expect((await b.request(`${f.thread}/verify`, post({ csrf: "x" }))).status).toBe(403);
+  await sendLinks(b, f.thread);
+  const mailed =
+    /https:\/\/[^\s"<]+\/vote\?t=[A-Za-z0-9_-]+/.exec(
+      b.sent.find((m) => m.to === "ana@example.org")?.text ?? "",
+    )?.[0] ?? "";
+  const done = await b.request(`${f.thread}/verify`, post({ csrf: await csrf() }));
+  expect(done.status).toBe(303);
+
+  const page = await (await b.request(f.thread)).text();
+  expect(page).toContain(LINE);
+  expect(page).not.toContain("Verify answers here");
+  expect(page).not.toContain(`action="${f.thread}/share"`);
+  expect(page).not.toContain("Their own links");
+  expect(page).not.toContain("Only my own email answers for me here");
+  expect(page).toContain("david@example.org"); // addresses beside names
+  const share = await b.request(`${f.thread}/share`, post({ csrf: await csrf() }));
+  expect(share.status).toBe(409);
+  expect(await share.text()).toContain(
+    "there is no shared link: everyone answers by their own email or signed in.",
+  );
+  const url = new URL(mailed);
+  const vote = await (await b.request(`${url.pathname}${url.search}`)).text();
+  expect(vote).toContain(LINE);
+  expect(vote).not.toContain("Only my own email answers for me here");
+});
+
+it("a member who doesn't decide can't verify a thread; the new-plan and poll forms offer it (rc42)", async () => {
+  const b = await browser({ now: () => NOW });
+  const f = await signedInPoll(b, ["david", "ana"]);
+  await addAccount(b, "david@example.org");
+  const asDavid = await (await b.request(f.thread)).text();
+  expect(asDavid).not.toContain("Verify answers here");
+  const refused = await b.request(`${f.thread}/verify`, post({ csrf: (await home(b)).csrf }));
+  expect(refused.status).toBe(403);
+  expect(await refused.text()).toContain("Only whoever decides it verifies it.");
+  expect(await (await b.request(`${PLANS_PATH}/new`)).text()).toContain('name="verified"');
+  expect(await (await b.request("/polls/new")).text()).toContain('name="verified"');
+  const poll = await b.request(
+    "/polls",
+    post({
+      csrf: (await home(b)).csrf,
+      title: "Board meeting",
+      tzid: "UTC",
+      start_0: "2101-11-21T10:00",
+      end_0: "2101-11-21T11:00",
+      verified: "on",
+    }),
+  );
+  expect(poll.status).toBe(303);
+  const pollPath = (poll.headers.get("location") ?? "").replace(/#.*/, "");
+  expect(await (await b.request(pollPath)).text()).toContain("Answers here are verified");
+  // Made verified from the plan form, it opens verified.
+  const made = await b.request(
+    PLANS_PATH,
+    post({
+      csrf: (await home(b)).csrf,
+      name: "Board",
+      tzid: "UTC",
+      email: "ana@example.org",
+      verified: "on",
+    }),
+  );
+  expect(made.status).toBe(303);
+  expect(await (await b.request(made.headers.get("location") ?? "")).text()).toContain(
+    "Answers here are verified",
+  );
+});
+
 it("only the organizer copies links, and only a member's", async () => {
   const b = await browser({ now: () => NOW });
   const f = await signedInPoll(b, ["david"]);

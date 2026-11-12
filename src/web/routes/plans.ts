@@ -47,11 +47,13 @@ import {
 } from "../../plans/share.js";
 import {
   createThread,
+  deciders,
   decidesByConsensus,
   findThreadForMember,
   leaveThread,
   listThreadsFor,
   memberName,
+  setThreadVerified,
   type ThreadAccess,
   ThreadInputError,
 } from "../../plans/thread.js";
@@ -108,8 +110,15 @@ import {
   verifyFormCsrf,
 } from "../session.js";
 import { appearanceSection, saveAppearance } from "./account.js";
-import { arrivalNote, EVENTS_PATH } from "./events.js";
-import { noteList, oneTime, sendVoteLink, sensitive, voteUrl } from "./respond.js";
+import { arrivalNote, EVENTS_PATH, verifiedField } from "./events.js";
+import {
+  noteList,
+  oneTime,
+  sendVoteLink,
+  sensitive,
+  threadVerifiedLine,
+  voteUrl,
+} from "./respond.js";
 import { SHARE_PATH } from "./share.js";
 
 // Plan pages (DESIGN §10 rc19, slices P2–P3): a thread, a plan, and your draft. Every read
@@ -449,10 +458,25 @@ ${shareBox("Message to paste", pasteMessage(v, v.sharedUrl))}${SHARE_BUTTONS}
  * Who answered from the shared link and hasn't confirmed (rc30), for the organizer: each
  * can be removed, and the name is then free again.
  */
+/** rc42: making a thread verified, for whoever decides it. One way for now. */
+function verifyThreadForm(v: View): Html {
+  return html`<details class="wd-verify"><summary>Verify answers here</summary>
+<form method="post" action="${threadPath(v.access.thread.id)}/verify">
+  <input type="hidden" name="csrf" value="${v.csrf}" />
+  <p>From then on a vote counts only from a link sent to that person's own address, or signed in. Nobody can copy a vote link, links already copied stop working, and the shared link is turned off: anyone who joined by it stays listed and can't answer any more.</p>
+  <p>Everyone in it then sees each person's email address, not only their name, and nobody removes anyone else. What it agrees is verified too. Turning it off again will need everyone in it to agree.</p>
+  <p><button type="submit">Verify answers here</button></p>
+</form></details>`;
+}
+
 function guestsSection(v: View): Html | string {
   const guests = v.access.members.filter((m) => m.guest);
   if (guests.length === 0 || v.access.thread.organizerId !== v.access.personId) return "";
   const here = `${threadPath(v.access.thread.id)}/guests/remove`;
+  // rc42: in a verified thread a guest stays listed, can't answer, and isn't removed.
+  if (v.access.thread.verifiedAt !== null)
+    return html`<section class="guests" id="guests"><h3 class="group-h">Not confirmed</h3>
+<p class="muted small">They answered from the shared link before answers here were verified, and can't answer any more: ${guests.map(memberName).join(", ")}.</p></section>`;
   return html`<section class="guests" id="guests"><h3 class="group-h">Not confirmed</h3>
 <p class="muted small">They answered from the shared link without an account. Removing one takes their answers with them and frees the name.</p>
 ${guests.map(
@@ -512,7 +536,10 @@ function threadPage(v: View, day: string | null, notice: string | null = null): 
     ],
   ];
   return shell(
-    html`<div class="head"><div><div class="l1">${t.name}</div><div class="l2">${v.access.members.map(memberName).join(", ")} · ${decideHint(v)}</div></div><span></span></div>
+    html`<div class="head"><div><div class="l1">${t.name}</div><div class="l2">${v.access.members
+      // An address only where shown: its owner chose to (rc21), or the thread is verified (rc42).
+      .map((m) => (m.shown.email === null ? memberName(m) : `${memberName(m)} (${m.shown.email})`))
+      .join(", ")} · ${decideHint(v)}</div></div><span></span></div>
 ${
   waiting.length > 0
     ? html`<h3>Waiting for your vote</h3><div class="choose">${waiting.map(
@@ -538,9 +565,11 @@ ${
         : ""
     }</div>
 ${notice === null ? "" : html`<p class="notice">${notice}</p>`}
-${onTable.length > 0 && t.organizerId === v.access.personId ? shareSection(v) : ""}
+${threadVerifiedLine(t)}
+${t.verifiedAt === null && onTable.length > 0 && t.organizerId === v.access.personId ? shareSection(v) : ""}
 ${guestsSection(v)}
-${ownLinksSection(v)}
+${t.verifiedAt === null ? ownLinksSection(v) : ""}
+${t.verifiedAt === null && deciders(v.access).includes(v.access.personId) ? verifyThreadForm(v) : ""}
 ${groups.map(([title, ps]) =>
   ps.length === 0 ? "" : html`<h3 class="group-h">${title}</h3>${ps.map((p) => planRow(v, p))}`,
 )}
@@ -1006,7 +1035,7 @@ const EMAIL_ROWS = 8;
 async function newThreadForm(
   deps: PlanRouteDeps,
   me: SignedIn,
-  values: { name: string; tzid: string; emails: readonly string[] },
+  values: { name: string; tzid: string; emails: readonly string[]; verified?: boolean },
   error: string | null,
 ): Promise<Html> {
   const groups = await listGroupsFor(deps.storage, me.personId);
@@ -1031,6 +1060,7 @@ ${
       )}</select></label>`
 }
 </fieldset>
+${verifiedField(values.verified === true, false, "plan")}
 <div class="row"><button class="primary" type="submit">Start</button><a class="btn" href="${PLANS_PATH}">Cancel</a></div>
 </form>
 ${ZONE_GUESS}</div>`;
@@ -1158,6 +1188,7 @@ export function registerPlanRoutes(app: Hono<AppEnv>, deps: PlanRouteDeps): void
       emails: strs(form, "email")
         .map((e) => e.trim())
         .filter((e) => e !== ""),
+      verified: form.verified === "on",
     };
     const again = async (error: string) =>
       c.html(page(c, "Start planning", await newThreadForm(deps, me, values, error)), 400);
@@ -1196,6 +1227,7 @@ export function registerPlanRoutes(app: Hono<AppEnv>, deps: PlanRouteDeps): void
         tzid: values.tzid === "" ? "UTC" : values.tzid,
         creatorId: me.personId,
         memberIds,
+        verified: values.verified,
         now: deps.now(),
       });
       return c.redirect(threadPath(thread.id), 303);
@@ -1224,12 +1256,15 @@ export function registerPlanRoutes(app: Hono<AppEnv>, deps: PlanRouteDeps): void
       `${threadPath(id)}/me`,
       "plan",
     );
-    const own = ownAnswersForm({
-      action: `${threadPath(id)}/own-answers`,
-      hidden: { csrf: me.csrfToken },
-      on: access.members.find((m) => m.personId === access.personId)?.ownAnswersOnly === true,
-      where: "here",
-    });
+    const own =
+      access.thread.verifiedAt !== null
+        ? ""
+        : ownAnswersForm({
+            action: `${threadPath(id)}/own-answers`,
+            hidden: { csrf: me.csrfToken },
+            on: access.members.find((m) => m.personId === access.personId)?.ownAnswersOnly === true,
+            where: "here",
+          });
     return c.html(
       page(
         c,
@@ -1334,6 +1369,14 @@ export function registerPlanRoutes(app: Hono<AppEnv>, deps: PlanRouteDeps): void
       return renderThread(c, r.access, r.me, "Only the organizer shares a link.", 403);
     if (issued.kind === "closed")
       return renderThread(c, r.access, r.me, "Nothing is on the table to vote on.", 409);
+    if (issued.kind === "verified")
+      return renderThread(
+        c,
+        r.access,
+        r.me,
+        "Answers here are verified, so there is no shared link: everyone answers by their own email or signed in.",
+        409,
+      );
     // The page carries the link: never cached, never sent on as a referrer (§13).
     sensitive(c);
     const url = new URL(SHARE_PATH, deps.publicBaseUrl);
@@ -1403,6 +1446,14 @@ export function registerPlanRoutes(app: Hono<AppEnv>, deps: PlanRouteDeps): void
       return renderThread(c, r.access, r.me, "Only the organizer removes someone.", 403);
     if (removed.kind === "gone")
       return renderThread(c, r.access, r.me, "They aren't a guest here any more.", 409);
+    if (removed.kind === "verified")
+      return renderThread(
+        c,
+        r.access,
+        r.me,
+        "Answers here are verified, so nobody removes anyone else.",
+        409,
+      );
     const fresh = await findThreadForMember(deps.storage, r.access.thread.id, r.me.personId);
     return renderThread(
       c,
@@ -1460,6 +1511,15 @@ ${
       on: r.form.on === "1",
       arrival: SIGNED_IN,
     });
+    return c.redirect(threadPath(r.access.thread.id), 303);
+  });
+
+  // rc42: making a thread verified, by whoever decides it.
+  app.post(`${PLANS_PATH}/:thread/verify`, async (c) => {
+    const r = await posting(c);
+    if (r instanceof Response) return r;
+    if ((await setThreadVerified(deps.storage, r.access, deps.now())) === "forbidden")
+      return renderThread(c, r.access, r.me, "Only whoever decides it verifies it.", 403);
     return c.redirect(threadPath(r.access.thread.id), 303);
   });
 

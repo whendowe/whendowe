@@ -68,7 +68,8 @@ export async function issueVoteLinks(
       sql: `SELECT m.person_id, p.email FROM plan_thread_member m JOIN person p ON p.id = m.person_id
             WHERE m.thread_id = ? AND m.person_id <> ? AND p.guest_at IS NULL AND p.erased_at IS NULL
               AND (? IS NULL OR m.person_id = ?)
-              AND (? = 0 OR m.own_answers_only = 0)
+              AND (? = 0 OR (m.own_answers_only = 0
+                             AND (SELECT t.verified_at FROM plan_thread t WHERE t.id = m.thread_id) IS NULL))
             ORDER BY p.email`,
       params: [
         access.thread.id,
@@ -164,7 +165,8 @@ export async function resolveVoteLink(
   if (access === null) return null;
   // rc42: with "only my own email" on, only a link we mailed them votes as them.
   const me = access.members.find((m) => m.personId === access.personId);
-  if (me?.ownAnswersOnly === true && row.origin !== "mailed") return null;
+  const guarded = me?.ownAnswersOnly === true || access.thread.verifiedAt !== null;
+  if (guarded && row.origin !== "mailed") return null;
   return { access, arrival: arrivalOf(row.origin, row.issued_by) };
 }
 

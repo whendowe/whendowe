@@ -21,6 +21,7 @@ import {
   memberName,
   type ThreadAccess,
   threadStatements,
+  verifiedAtBirth,
 } from "./thread.js";
 
 // Plans (DESIGN §10 rc19, slice P1): several events proposed, compared and accepted as
@@ -747,6 +748,8 @@ export type DecideResult =
 
 export type VoteResult =
   | { readonly kind: "recorded" }
+  /** rc42: by a way that doesn't count here (a verified thread, or "only my own email"). */
+  | { readonly kind: "forbidden" }
   /** With two members, this vote was the second yes. */
   | { readonly kind: "accepted"; readonly replaced: readonly string[] }
   | { readonly kind: "closed" }
@@ -770,9 +773,21 @@ export async function castVote(
 ): Promise<VoteResult> {
   const answer = answerSchema.safeParse(input.answer);
   if (!answer.success) return { kind: "invalid" };
+  // rc42: in a verified thread, or for someone who takes answers only from their own email,
+  // only signed in or a mailed link counts. The links are refused before this; a backstop.
+  const guarded =
+    access.thread.verifiedAt !== null ||
+    access.members.some((m) => m.personId === access.personId && m.ownAnswersOnly);
+  const via = input.arrival?.via;
+  if (guarded && via !== "session" && via !== "mailed") return { kind: "forbidden" };
   const written = await storage.query({
     sql: `INSERT INTO plan_vote (plan_id, person_id, answer, responded_at, answered_via, answered_via_by)
           SELECT p.id, ?, ?, ?, ?, ? FROM plan p WHERE p.id = ? AND p.thread_id = ? AND p.status = 'on_table'
+            -- rc42: checked again here, so a page opened before it was verified can't vote.
+            AND (? IN ('session', 'mailed') OR (
+              (SELECT t.verified_at FROM plan_thread t WHERE t.id = p.thread_id) IS NULL
+              AND NOT EXISTS (SELECT 1 FROM plan_thread_member m
+                              WHERE m.thread_id = p.thread_id AND m.person_id = ? AND m.own_answers_only = 1)))
           ON CONFLICT (plan_id, person_id)
             DO UPDATE SET answer = excluded.answer, responded_at = excluded.responded_at,
               answered_via = excluded.answered_via, answered_via_by = excluded.answered_via_by
@@ -785,6 +800,8 @@ export async function castVote(
       input.arrival?.by ?? null,
       input.planId,
       access.thread.id,
+      input.arrival?.via ?? null,
+      access.personId,
     ],
   });
   if (written.length === 0) return { kind: "closed" };
@@ -886,9 +903,12 @@ async function accept(
         // The thread's group, if any, is the event's provenance and gives its period (rc27).
         sql: `INSERT INTO canonical_event
                 (id, revision, origin, owner_id, group_id, title, description, location, all_day,
-                 start_local, end_local, tzid, rrule, status, created_at, updated_at, retain_days)
+                 start_local, end_local, tzid, rrule, status, created_at, updated_at, retain_days,
+                 verified_at)
               SELECT ?, 1, 'user_edit', ?, g.id, ?, ?, ?, ?, ?, ?, ?, NULL, 'scheduled', ?, ?,
-                     coalesce(g.retain_days, 365)
+                     coalesce(g.retain_days, 365),
+                     -- rc42: what a verified thread agrees is a verified event.
+                     CASE WHEN (SELECT verified_at FROM plan_thread WHERE id = ?) IS NULL THEN NULL ELSE ? END
               FROM (SELECT 1) LEFT JOIN person_group g ON g.id = ?
               WHERE ${guard}`,
         params: [
@@ -902,6 +922,8 @@ async function accept(
           e.endLocal,
           tzid,
           input.now,
+          input.now,
+          access.thread.id,
           input.now,
           access.thread.groupId,
           ...g,
@@ -945,7 +967,16 @@ async function accept(
         params: [
           eventId,
           input.actorId,
-          JSON.stringify(diff({}, { ...flatten(fields), status: "scheduled" })),
+          JSON.stringify(
+            diff(
+              {},
+              {
+                ...flatten(fields),
+                status: "scheduled",
+                ...(access.thread.verifiedAt === null ? {} : { verified: 1 }),
+              },
+            ),
+          ),
           input.now,
           ...g,
         ],
@@ -1089,6 +1120,8 @@ export async function createPollThread(
     readonly candidates: readonly CandidateTimeInput[];
     /** People named by address (resolveInvitees): members, whatever terms were typed. */
     readonly people?: readonly string[];
+    /** rc42: a verified poll; a group whose organizers say so makes it verified anyway. */
+    readonly verified?: boolean;
     readonly now: string;
     readonly newId?: () => string;
   },
@@ -1116,6 +1149,11 @@ export async function createPollThread(
     groupId: input.group?.group.id ?? null,
     // Nobody else yet is a poll made to be shared (rc29).
     alone: true,
+    verified: await verifiedAtBirth(
+      storage,
+      input.group?.group.id ?? null,
+      input.verified === true,
+    ),
     now: input.now,
     newId,
   });
