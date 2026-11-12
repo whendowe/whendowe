@@ -254,6 +254,25 @@ export async function setGroupRetention(
 }
 
 /**
+ * Whether events made from the group start verified (DESIGN §10 rc42). Its organizers
+ * set it; it changes nothing already made.
+ */
+export async function setGroupDefaultVerified(
+  storage: StoragePort,
+  membership: GroupMembership,
+  on: boolean,
+): Promise<boolean> {
+  if (membership.role !== "organizer") return false;
+  await storage.batch([
+    {
+      sql: "UPDATE person_group SET default_verified = ? WHERE id = ?",
+      params: [on ? 1 : 0, membership.group.id],
+    },
+  ]);
+  return true;
+}
+
+/**
  * A member's default for "only my own email answers for me" (DESIGN §10 rc42), copied onto
  * the events made from the group afterwards. Their own, so no one else's: the caller is
  * the member, by their membership.

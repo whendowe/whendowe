@@ -116,6 +116,11 @@ export interface CanonicalEvent extends EventFields {
   readonly groupId: string | null;
   readonly createdAt: string;
   readonly updatedAt: string;
+  /**
+   * rc42: when it was made verified — answers count only from a link mailed to the person
+   * or signed in; null when it isn't (DESIGN §10 *Who really answered*).
+   */
+  readonly verifiedAt: string | null;
 }
 
 /** Proof that a person participates in an event, with their terms. */
@@ -140,6 +145,7 @@ const eventRowSchema = z.object({
   rrule: z.string().nullable(),
   created_at: z.string(),
   updated_at: z.string(),
+  verified_at: z.string().nullable(),
 });
 
 /**
@@ -153,7 +159,7 @@ export const PARTY_RULE = `(e.status NOT IN ('proposed', 'declined', 'withdrawn'
   OR e.owner_id = ep.person_id OR ep.response_kind IN ('accept', 'slot_vote'))`;
 
 const EVENT_COLUMNS = `e.id, e.revision, e.status, e.owner_id, e.group_id, e.title, e.description,
-  e.location, e.all_day, e.start_local, e.end_local, e.tzid, e.rrule, e.created_at, e.updated_at`;
+  e.location, e.all_day, e.start_local, e.end_local, e.tzid, e.rrule, e.created_at, e.updated_at, e.verified_at`;
 
 function toEvent(row: unknown): CanonicalEvent {
   const r = eventRowSchema.parse(row);
@@ -173,6 +179,7 @@ function toEvent(row: unknown): CanonicalEvent {
     rrule: r.rrule,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
+    verifiedAt: r.verified_at,
   };
 }
 
@@ -212,6 +219,18 @@ function logRow(
  * An event made from a group COPIES each member's name and address choice there, as it
  * copies their tiers (DESIGN §10 rc21, rc15): a copy, never a live link.
  */
+/** Whether a group's organizers make its events verified from birth (rc42). */
+export async function groupDefaultVerified(
+  storage: StoragePort,
+  groupId: string,
+): Promise<boolean> {
+  const rows = await storage.query({
+    sql: "SELECT default_verified FROM person_group WHERE id = ?",
+    params: [groupId],
+  });
+  return rows[0]?.default_verified === 1;
+}
+
 function copyAppearance(eventId: string, groupId: string): SqlStatement {
   return {
     sql: `UPDATE event_participation
@@ -256,6 +275,8 @@ export async function createEvent(
     readonly fields: EventFieldsInput;
     readonly now: string;
     readonly newId?: () => string;
+    /** rc42: made verified; a group whose organizers set its default makes it so anyway. */
+    readonly verified?: boolean;
     /**
      * Who must agree ("accept") or should acknowledge ("ack") — DESIGN §10 rc13. Anyone
      * asked to agree makes the event a `proposed` one until the last of them accepts.
@@ -278,15 +299,19 @@ export async function createEvent(
   const status: EventStatus = [...requests.values()].includes("accept") ? "proposed" : "scheduled";
   const fields = eventFieldsSchema.parse(input.fields);
   const id = (input.newId ?? (() => uuidv7()))();
+  const verified =
+    input.verified === true ||
+    (input.group !== null && (await groupDefaultVerified(storage, input.group.group.id)));
 
   await storage.batch([
     {
       sql: `INSERT INTO canonical_event
               (id, revision, origin, owner_id, group_id, title, description, location, all_day,
-               start_local, end_local, tzid, rrule, status, created_at, updated_at, retain_days)
+               start_local, end_local, tzid, rrule, status, created_at, updated_at, retain_days,
+               verified_at)
             VALUES (?, 1, 'user_edit', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                     -- Kept as long as its group keeps events (§10 rc21 *Retention*).
-                    coalesce((SELECT retain_days FROM person_group WHERE id = ?), 365))`,
+                    coalesce((SELECT retain_days FROM person_group WHERE id = ?), 365), ?)`,
       params: [
         id,
         input.creatorId,
@@ -303,6 +328,7 @@ export async function createEvent(
         input.now,
         input.now,
         input.group?.group.id ?? null,
+        verified ? input.now : null,
       ],
     },
     {
@@ -328,7 +354,13 @@ export async function createEvent(
       };
     }),
     ...(input.group === null ? [] : [copyAppearance(id, input.group.group.id)]),
-    logRow(id, 1, input.creatorId, diff({}, { ...flatten(fields), status }), input.now),
+    logRow(
+      id,
+      1,
+      input.creatorId,
+      diff({}, { ...flatten(fields), status, ...(verified ? { verified: 1 } : {}) }),
+      input.now,
+    ),
   ]);
 
   return {
@@ -340,7 +372,48 @@ export async function createEvent(
     groupId: input.group?.group.id ?? null,
     createdAt: input.now,
     updatedAt: input.now,
+    verifiedAt: verified ? input.now : null,
   };
+}
+
+/**
+ * Make an event verified (DESIGN §10 rc42): from now on an answer counts only from a link
+ * mailed to the person or signed in. Any editor may; it is logged as a revision every tier
+ * sees, like a status. Copied links (and links from before rc42 recorded how they were
+ * made) are withdrawn in the same batch. Turning it off needs everyone, which comes later.
+ */
+export async function setVerified(
+  storage: StoragePort,
+  access: EventAccess,
+  now: string,
+): Promise<"verified" | "already" | "forbidden"> {
+  if (access.participation.editTier !== "edit") return "forbidden";
+  const eventId = access.event.id;
+  await storage.batch([
+    {
+      sql: `UPDATE canonical_event SET verified_at = ?, revision = revision + 1, updated_at = ?
+            WHERE id = ? AND verified_at IS NULL`,
+      params: [now, now, eventId],
+    },
+    {
+      sql: `INSERT INTO change_log (canonical_event_id, revision, actor, source, diff, created_at)
+            SELECT ?, (SELECT revision FROM canonical_event WHERE id = ?), ?, 'ui', ?, ?
+            WHERE changes() = 1`,
+      params: [
+        eventId,
+        eventId,
+        access.participation.personId,
+        JSON.stringify(diff({ verified: 0 }, { verified: 1 })),
+        now,
+      ],
+    },
+    {
+      sql: `DELETE FROM response_token
+            WHERE canonical_event_id = ? AND (origin IS NULL OR origin <> 'mailed')`,
+      params: [eventId],
+    },
+  ]);
+  return access.event.verifiedAt === null ? "verified" : "already";
 }
 
 /** The event IF the person takes part in it; null for "missing" and "not yours" alike. */

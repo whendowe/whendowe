@@ -173,6 +173,7 @@ export function partOfField(field: string): EventPart | "status" | null {
     case "rrule": // which dates a series falls on is its time
       return "time";
     case "status":
+    case "verified": // rc42: whether answers here are verified is for everyone on it
       return "status";
     default:
       // An unknown field is hidden from everyone below FULL: failing closed means a

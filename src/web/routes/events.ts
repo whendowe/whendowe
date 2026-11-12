@@ -14,12 +14,14 @@ import {
   eventFieldsSchema,
   eventRetention,
   findEventForParticipant,
+  groupDefaultVerified,
   type HistoryEntry,
   isOver,
   listEventsFor,
   listHistory,
   setCancelled,
   setEventRetention,
+  setVerified,
   type TransitionResult,
   withdrawProposal,
 } from "../../events/event.js";
@@ -904,6 +906,7 @@ function editHeading(proposing: boolean): Html {
 }
 
 function renderHistoryValue(field: string, v: string | number | null): string {
+  if (field === "verified") return v === 1 ? "verified" : "not verified";
   if (field === "rrule") return v === null ? "doesn't repeat" : describeRRule(String(v));
   return v === null ? "—" : String(v);
 }
@@ -972,6 +975,30 @@ function seriesSection(event: CanonicalEvent, now: string): Html | string {
   }`;
 }
 
+/** rc42: the line every page of a verified event carries, under its title. */
+export function verifiedLine(event: CanonicalEvent): Html | string {
+  return event.verifiedAt === null
+    ? ""
+    : html`<p class="wd-verified"><strong>Answers here are verified:</strong> each person's own email, or signed in.</p>`;
+}
+
+/** rc42: making an event verified, for its editors. One way for now: off needs everyone. */
+function verifyForm(eventId: string, csrf: string): Html {
+  return html`<details class="wd-verify"><summary>Verify answers here</summary>
+<form method="post" action="${EVENTS_PATH}/${eventId}/verify">
+  <input type="hidden" name="csrf" value="${csrf}" />
+  <p>From then on an answer counts only from a link sent to that person's own address, or signed in. Nobody can copy a link that answers for someone, and links already copied stop working. Turning it off again will need everyone on it to agree.</p>
+  <p><button type="submit">Verify answers here</button></p>
+</form></details>`;
+}
+
+/** rc42: on a new event, whether it is verified; fixed when its group's organizers say so. */
+function verifiedField(checked: boolean, groupDefault: boolean): Html {
+  return groupDefault
+    ? html`<p class="muted">Events from this group are verified: answers count only from each person's own email, or signed in.</p>`
+    : html`<p><label><input type="checkbox" name="verified"${checked ? html` checked` : ""} /> Verified: answers count only from each person's own email, or signed in</label></p>`;
+}
+
 /** One edit in the trail, already filtered to the fields this viewer may see. */
 function historyEntry(
   h: HistoryEntry & { readonly fields: [string, HistoryEntry["change"][string]][] },
@@ -1007,6 +1034,7 @@ function peopleSection(
   // Their own answer link, to send in a chat instead of by email (rc36).
   const copyable = (p: ParticipantView) =>
     editing &&
+    event.verifiedAt === null &&
     actionFor(access) !== null &&
     p.personId !== access.participation.personId &&
     p.visibility !== "HIDDEN";
@@ -1095,6 +1123,7 @@ async function eventPage(
     see("title") ? event.title : BUSY_LABEL,
     html`<p>${event.groupId === null ? html`<a href="/">← Your events</a>` : html`<a href="/groups/${event.groupId}">← Back to the group</a>`}</p>
 <h1>${see("title") ? event.title : BUSY_LABEL}${statusBadge(access)}</h1>
+${verifiedLine(event)}
 ${notice === null ? "" : html`<p class="error">${notice}</p>`}
 <p>${formatWhen(event)}</p>
 ${seriesSection(event, deps.now())}
@@ -1112,7 +1141,8 @@ ${await requestsSection(deps, access, csrf)}
 ${await proposalsSection(deps, access, csrf)}
 ${people.length === 0 ? "" : peopleSection(access, people, csrf)}
 ${see("participants") ? await appearanceSection(deps.storage, { kind: "event", id: event.id }, { personId: participation.personId, csrfToken: csrf }, `${EVENTS_PATH}/${event.id}/me`, "event") : ""}
-${ownAnswersForm({ action: `${EVENTS_PATH}/${event.id}/own-answers`, hidden: { csrf }, on: participation.ownAnswersOnly, where: "here" })}
+${event.verifiedAt === null ? ownAnswersForm({ action: `${EVENTS_PATH}/${event.id}/own-answers`, hidden: { csrf }, on: participation.ownAnswersOnly, where: "here" }) : ""}
+${event.verifiedAt === null && participation.editTier === "edit" ? verifyForm(event.id, csrf) : ""}
 ${await responsesSection(deps, access, csrf)}
 ${retentionSection({
   days: await eventRetention(deps.storage, access),
@@ -1146,7 +1176,12 @@ export function registerEventRoutes(app: Hono<AppEnv>, deps: EventRouteDeps): vo
     csrf: string,
     meId: string,
     membership: GroupMembership | null,
-    form: { values: FormValues; rows: readonly PersonRow[]; asks: ReadonlyMap<string, Request> },
+    form: {
+      values: FormValues;
+      rows: readonly PersonRow[];
+      asks: ReadonlyMap<string, Request>;
+      verified: boolean;
+    },
     error: string | null,
   ) =>
     page(
@@ -1155,10 +1190,10 @@ export function registerEventRoutes(app: Hono<AppEnv>, deps: EventRouteDeps): vo
       membership === null
         ? html`<p><a href="/">← Your events</a></p>
 <h1>New event</h1>
-${eventForm(EVENTS_PATH, csrf, form.values, "", error, "Create event", "FULL", peopleFieldset(form.rows, true, LEAD_ALONE))}`
+${eventForm(EVENTS_PATH, csrf, form.values, "", error, "Create event", "FULL", html`${peopleFieldset(form.rows, true, LEAD_ALONE)}${verifiedField(form.verified, false)}`)}`
         : html`<p><a href="/groups/${membership.group.id}">← ${membership.group.name}</a></p>
 <h1>New event for ${membership.group.name}</h1>
-${eventForm(`/groups/${membership.group.id}/events`, csrf, form.values, "", error, "Create event", "FULL", html`${await requestsFieldset(deps, membership, meId, form.asks)}${peopleFieldset(form.rows, true, leadFor(membership))}`)}`,
+${eventForm(`/groups/${membership.group.id}/events`, csrf, form.values, "", error, "Create event", "FULL", html`${await requestsFieldset(deps, membership, meId, form.asks)}${peopleFieldset(form.rows, true, leadFor(membership))}${verifiedField(form.verified, await groupDefaultVerified(deps.storage, membership.group.id))}`)}`,
     );
 
   const createEventFrom = async (c: Context<AppEnv>, groupId: string | null) => {
@@ -1172,9 +1207,17 @@ ${eventForm(`/groups/${membership.group.id}/events`, csrf, form.values, "", erro
     const values = readForm(form);
     const asks = readRequests(form);
     const { rows, bad } = readPeople(form);
+    const verified = form.verified === "on";
     const again = async (error: string) =>
       c.html(
-        await newEventPage(c, me.csrfToken, me.personId, membership, { values, rows, asks }, error),
+        await newEventPage(
+          c,
+          me.csrfToken,
+          me.personId,
+          membership,
+          { values, rows, asks, verified },
+          error,
+        ),
         400,
       );
     if (bad.length > 0) return again(badPeople(bad));
@@ -1193,6 +1236,7 @@ ${eventForm(`/groups/${membership.group.id}/events`, csrf, form.values, "", erro
         now: deps.now(),
         requests: new Map([...asks, ...asked]),
         people,
+        verified,
       });
       return c.redirect(`${EVENTS_PATH}/${event.id}`, 303);
     } catch (error) {
@@ -1200,7 +1244,7 @@ ${eventForm(`/groups/${membership.group.id}/events`, csrf, form.values, "", erro
     }
   };
 
-  const NOTHING = { values: EMPTY, rows: [], asks: new Map<string, Request>() };
+  const NOTHING = { values: EMPTY, rows: [], asks: new Map<string, Request>(), verified: false };
 
   app.get(`${EVENTS_PATH}/new`, async (c) => {
     const me = requireSignedIn(c);
@@ -1583,6 +1627,23 @@ ${pollForm(`/groups/${membership.group.id}/polls`, csrf, values, error, peopleFi
     return saveAppearance(c, deps.storage, { kind: "event", id }, `${EVENTS_PATH}/${id}`);
   });
 
+  // rc42: making the event verified, by an editor.
+  app.post(`${EVENTS_PATH}/:id/verify`, async (c) => {
+    const me = requireSignedIn(c);
+    if (me instanceof Response) return me;
+    const form = await c.req.parseBody();
+    if (!(await verifyFormCsrf(me, form))) return rejectedPage(c, form);
+    const access = await findEventForParticipant(deps.storage, c.req.param("id"), me.personId);
+    if (access === null || access.participation.visibility === "HIDDEN")
+      return c.html(notFound(c), 404);
+    if ((await setVerified(deps.storage, access, deps.now())) === "forbidden")
+      return c.html(
+        await eventPage(c, deps, access, me.csrfToken, "Only people who can edit it verify it."),
+        403,
+      );
+    return c.redirect(`${EVENTS_PATH}/${access.event.id}`, 303);
+  });
+
   // rc42: the person's own switch, signed in. A mailed link sets it too (respond.ts).
   app.post(`${EVENTS_PATH}/:id/own-answers`, async (c) => {
     const me = requireSignedIn(c);
@@ -1815,6 +1876,17 @@ ${pollForm(`/groups/${membership.group.id}/polls`, csrf, values, error, peopleFi
     if (access === null || access.participation.visibility === "HIDDEN")
       return c.html(notFound(c), 404);
     const personId = str(form, "person");
+    if (access.event.verifiedAt !== null)
+      return c.html(
+        await eventPage(
+          c,
+          deps,
+          access,
+          me.csrfToken,
+          "Answers here are verified, so links are only emailed, never copied.",
+        ),
+        409,
+      );
     const them = (await listParticipants(deps.storage, access.event.id)).find(
       (p) => p.personId === personId,
     );

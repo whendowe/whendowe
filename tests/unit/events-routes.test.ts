@@ -1764,6 +1764,111 @@ it("only my own email (rc42): set from the group, a signed-in page or a mailed l
   ).toBeUndefined();
 });
 
+it("verified (rc42): made so at creation or by an editor; every page says so; no copies", async () => {
+  const h = await harness();
+  const { dm, group } = await setup(h);
+  const ann = await join(h, dm, group, "ann@example.org", "view", "FULL");
+  await join(h, dm, group, "bob@example.org", "view", "FULL");
+  const grandma = await join(h, dm, group, "grandma@example.org", "view", "BUSY");
+  const LINE = "<strong>Answers here are verified:</strong> each person's own email, or signed in.";
+
+  // The new-event form offers it; ticked, the event is verified from the start.
+  const form = await (
+    await h.app.request(`${group}/events/new`, { headers: { cookie: dm.cookie } })
+  ).text();
+  expect(form).toContain('<input type="checkbox" name="verified" />');
+  const born = await createVia(h, dm, group, { ...NIGHT, verified: "on" });
+  const bornPage = await text(h, born, dm);
+  expect(bornPage).toContain(LINE);
+  expect(bornPage).not.toContain(">Copy their link<");
+  expect(bornPage).not.toContain("Only my own email answers for me here");
+  expect(bornPage).not.toContain("Verify answers here");
+
+  // An ordinary one: its editor may verify it, a viewer may not.
+  const event = await createVia(h, dm, group);
+  expect(await text(h, event, dm)).toContain("Verify answers here");
+  expect(await text(h, event, ann)).not.toContain("Verify answers here");
+  expect(await text(h, event, ann)).not.toContain(LINE);
+  const asViewer = await h.app.request(`${event}/verify`, post({ csrf: ann.csrf }, ann.cookie));
+  expect(asViewer.status).toBe(403);
+  expect(await asViewer.text()).toContain("Only people who can edit it verify it.");
+  expect((await h.app.request(`${event}/verify`, post({ csrf: "x" }, dm.cookie))).status).toBe(403);
+  await sendLinks(h, dm, event);
+  const mailed = linkFor(h, "ann@example.org");
+  const done = await h.app.request(`${event}/verify`, post({ csrf: dm.csrf }, dm.cookie));
+  expect(done.status).toBe(303);
+  expect(done.headers.get("location")).toBe(event);
+
+  // Every page says so: the event's, for each tier that sees it, and the answer link's.
+  const page = await text(h, event, ann);
+  expect(page).toContain(LINE);
+  expect(page).toMatch(/verified: not verified → verified/);
+  // Even someone who sees only busy time is told, and by whom, as with a status.
+  const busy = await text(h, event, grandma);
+  expect(busy).toContain(LINE);
+  expect(busy).toMatch(/verified: not verified → verified/);
+  const answerPage = await (await h.app.request(mailed)).text();
+  expect(answerPage).toContain(LINE);
+  expect(answerPage).not.toContain("Only my own email answers for me here");
+
+  // No copy button, and a copy attempt is refused.
+  const asDm = await text(h, event, dm);
+  expect(asDm).not.toContain(">Copy their link<");
+  expect(asDm).not.toContain("Verify answers here");
+  const annId =
+    /name="person" value="([^"]+)" \/><button type="submit">Remove/.exec(
+      asDm.split("ann")[1] ?? "",
+    )?.[1] ?? "";
+  const copy = await h.app.request(
+    `${event}/people/link`,
+    post({ csrf: dm.csrf, person: annId }, dm.cookie),
+  );
+  expect(copy.status).toBe(409);
+  expect(await copy.text()).toContain(
+    "Answers here are verified, so links are only emailed, never copied.",
+  );
+});
+
+it("a group's organizers make its new events verified; a member sees that, and can't change it (rc42)", async () => {
+  const h = await harness();
+  const { dm, group } = await setup(h);
+  const ann = await join(h, dm, group, "ann@example.org", "view", "FULL");
+  const asAnn = async () =>
+    (await h.app.request(group, { headers: { cookie: ann.cookie } })).text();
+  expect(await asAnn()).toContain(
+    "New events in this group aren't verified unless whoever makes one says so.",
+  );
+  expect(await asAnn()).not.toContain(`action="${group}/verified"`);
+  const refused = await h.app.request(
+    `${group}/verified`,
+    post({ csrf: ann.csrf, on: "1" }, ann.cookie),
+  );
+  expect(refused.status).toBe(403);
+  expect(
+    (await h.app.request(`${group}/verified`, post({ csrf: "x", on: "1" }, dm.cookie))).status,
+  ).toBe(403);
+
+  await h.app.request(`${group}/verified`, post({ csrf: dm.csrf, on: "1" }, dm.cookie));
+  expect(await asAnn()).toContain("New events in this group are verified");
+  const box =
+    /<input type="checkbox" name="on" value="1"( checked)? \/> Verify answers on new events/;
+  expect(
+    box.exec(await (await h.app.request(group, { headers: { cookie: dm.cookie } })).text())?.[1],
+  ).toBe(" checked");
+  // The new-event form says so instead of asking; the event is verified however it's sent.
+  const form = await (
+    await h.app.request(`${group}/events/new`, { headers: { cookie: dm.cookie } })
+  ).text();
+  expect(form).toContain("Events from this group are verified");
+  expect(form).not.toContain('name="verified"');
+  expect(await text(h, await createVia(h, dm, group), dm)).toContain("Answers here are verified");
+  // Off again: new events are ordinary.
+  await h.app.request(`${group}/verified`, post({ csrf: dm.csrf }, dm.cookie));
+  expect(await text(h, await createVia(h, dm, group), dm)).not.toContain(
+    "Answers here are verified",
+  );
+});
+
 it("a cancelled event offers no link to copy; someone not on it gets none; HIDDEN has no button", async () => {
   const h = await harness();
   const { dm, group } = await setup(h);

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import type { Context, Hono } from "hono";
 import type { StoragePort } from "../../db/port.js";
-import { listGroupEvents } from "../../events/event.js";
+import { groupDefaultVerified, listGroupEvents } from "../../events/event.js";
 import { MailCapReachedError } from "../../mail/capped.js";
 import type { MailPort } from "../../mail/port.js";
 import {
@@ -14,6 +14,7 @@ import {
   listGroupsFor,
   listMembers,
   setDefaultOwnAnswersOnly,
+  setGroupDefaultVerified,
   setGroupRetention,
 } from "../../people/group.js";
 import {
@@ -26,7 +27,15 @@ import {
 } from "../../people/invite.js";
 import { appearanceIn, normalizeEmail } from "../../people/person.js";
 import { retainDaysSchema } from "../../privacy/retention.js";
-import { cappedText, GROUPS_PATH, html, ownAnswersForm, retentionSection, who } from "../layout.js";
+import {
+  cappedText,
+  GROUPS_PATH,
+  type Html,
+  html,
+  ownAnswersForm,
+  retentionSection,
+  who,
+} from "../layout.js";
 import {
   type AppEnv,
   notVisible,
@@ -97,6 +106,24 @@ ${notice}
 function sensitive(c: { header: (name: string, value: string) => void }): void {
   c.header("Referrer-Policy", "no-referrer");
   c.header("Cache-Control", "no-store");
+}
+
+/** rc42: whether new events start verified — shown to everyone, set by organizers. */
+async function verifiedDefault(
+  storage: StoragePort,
+  membership: GroupMembership,
+  csrf: string,
+): Promise<Html | string> {
+  const on = await groupDefaultVerified(storage, membership.group.id);
+  const said = on
+    ? html`New events in this group are verified: answers count only from each person's own email, or signed in.`
+    : html`New events in this group aren't verified unless whoever makes one says so.`;
+  if (membership.role !== "organizer") return html`<p class="muted">${said}</p>`;
+  return html`<form method="post" action="${GROUPS_PATH}/${membership.group.id}/verified">
+  <input type="hidden" name="csrf" value="${csrf}" />
+  <p><label><input type="checkbox" name="on" value="1"${on ? html` checked` : ""} /> Verify answers on new events from this group</label> <button type="submit">Save</button><br />
+  <span class="muted">Events already made keep theirs.</span></p>
+</form>`;
 }
 
 function inviteExpired(c: Context<AppEnv>) {
@@ -219,6 +246,7 @@ ${retentionSection({
         }
       : null,
 })}
+${await verifiedDefault(deps.storage, membership, me.csrfToken)}
 <p class="muted"><a href="${GROUPS_PATH}/${membership.group.id}/leave">Leave this group</a></p>`,
       ),
     );
@@ -273,6 +301,19 @@ ${
     if (membership === null) return c.notFound();
     const id = membership.group.id;
     return saveAppearance(c, deps.storage, { kind: "group", id }, `${GROUPS_PATH}/${id}`);
+  });
+
+  // rc42: whether the group's new events start verified; its organizers'.
+  app.post(`${GROUPS_PATH}/:id/verified`, async (c) => {
+    const me = requireSignedIn(c);
+    if (me instanceof Response) return me;
+    const form = await c.req.parseBody();
+    if (!(await verifyFormCsrf(me, form))) return rejectedPage(c, form);
+    const membership = await findGroupForMember(deps.storage, c.req.param("id"), me.personId);
+    if (membership === null) return c.notFound();
+    if (!(await setGroupDefaultVerified(deps.storage, membership, form.on === "1")))
+      return c.html(page(c, "Not allowed", html`<h1>Only organizers change that</h1>`), 403);
+    return c.redirect(`${GROUPS_PATH}/${membership.group.id}`, 303);
   });
 
   // rc42: a member's default for their own answers, copied onto events made afterwards.
