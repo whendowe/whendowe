@@ -15,7 +15,7 @@ import {
   listParticipantChanges,
 } from "../../src/events/participation.js";
 import { proposeChange } from "../../src/events/proposal.js";
-import { addFeedback, issueResponseLinks } from "../../src/events/response.js";
+import { addFeedback, issueResponseLinks, SIGNED_IN } from "../../src/events/response.js";
 import { createGroup, findGroupForMember, leaveGroup } from "../../src/people/group.js";
 import { acceptInvite, createInvite } from "../../src/people/invite.js";
 import { findOrCreatePerson } from "../../src/people/person.js";
@@ -94,7 +94,11 @@ async function busyDinner(port: StoragePort, tag: string) {
   });
   if (added.kind !== "added") throw new Error(added.kind);
   const ann = added.personId;
-  await addFeedback(port, await access(port, event.id, ann), { body: "might be late", now: T0 });
+  await addFeedback(port, await access(port, event.id, ann), {
+    arrival: SIGNED_IN,
+    body: "might be late",
+    now: T0,
+  });
   await issueResponseLinks(port, await access(port, event.id, mara.id), { now: T0 });
   await proposeChange(port, await access(port, event.id, ann), {
     fields: { ...DINNER, startLocal: "2101-11-20T19:00", endLocal: "2101-11-20T21:00" },

@@ -357,6 +357,17 @@ export const eventParticipation = sqliteTable(
     // their account's handle; their address is shown to the others only if show_email = 1.
     handle: text("handle"),
     showEmail: integer("show_email").notNull().default(0),
+    // rc42 (DESIGN §10 *Who really answered*): how each answer in this row last arrived —
+    // session | mailed | copied; NULL = before rc42, not recorded — and, for a copied
+    // link, who copied it. A row holds two answers, so two pairs.
+    attendanceVia: text("attendance_via"),
+    attendanceViaBy: text("attendance_via_by").references(() => person.id, {
+      onDelete: "set null",
+    }),
+    responseStateVia: text("response_state_via"),
+    responseStateViaBy: text("response_state_via_by").references(() => person.id, {
+      onDelete: "set null",
+    }),
   },
   (t) => [
     unique("event_participation_uq").on(t.canonicalEventId, t.personId),
@@ -441,6 +452,9 @@ export const eventFeedback = sqliteTable(
       .references(() => person.id, { onDelete: "cascade" }),
     body: text("body").notNull(),
     createdAt: text("created_at").notNull(),
+    // rc42: how the note arrived, as on event_participation.
+    answeredVia: text("answered_via"),
+    answeredViaBy: text("answered_via_by").references(() => person.id, { onDelete: "set null" }),
   },
   (t) => [index("event_feedback_event_idx").on(t.canonicalEventId, t.createdAt)],
 );
@@ -460,6 +474,10 @@ export const responseToken = sqliteTable(
     action: text("action").notNull(),
     expiresAt: text("expires_at").notNull(),
     createdAt: text("created_at").notNull(),
+    // rc42: mailed (we sent it to the person's address) | copied (an organizer took it,
+    // rc36), and for a copied link who copied it. NULL = issued before rc42.
+    origin: text("origin"),
+    issuedBy: text("issued_by").references(() => person.id, { onDelete: "set null" }),
   },
   (t) => [
     unique("response_token_scope_uq").on(t.canonicalEventId, t.personId, t.action),

@@ -11,7 +11,7 @@ import {
   listHistory,
 } from "../../src/events/event.js";
 import { listParticipants } from "../../src/events/participation.js";
-import { acknowledge, listRequests } from "../../src/events/response.js";
+import { acknowledge, listRequests, SIGNED_IN } from "../../src/events/response.js";
 import { createGroup, findGroupForMember, type GroupMembership } from "../../src/people/group.js";
 import { acceptInvite, createInvite } from "../../src/people/invite.js";
 import { findOrCreatePerson } from "../../src/people/person.js";
@@ -396,7 +396,10 @@ export function runEventsContract(makePort: () => Promise<StoragePort>): void {
         now: T0,
         requests: new Map([[playerId, "ack"]]),
       });
-      await acknowledge(port, await access(port, event.id, playerId), { now: T0 });
+      await acknowledge(port, await access(port, event.id, playerId), {
+        arrival: SIGNED_IN,
+        now: T0,
+      });
 
       const edited = await editEvent(port, await access(port, event.id, dm.id), {
         fields: { ...WEEKLY, rrule: "FREQ=WEEKLY;INTERVAL=2" },

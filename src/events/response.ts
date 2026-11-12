@@ -32,6 +32,25 @@ export const FEEDBACK_MAX_LENGTH = 500;
 /** Per person per event, ever: a ceiling against a stuck script, far above real use. */
 export const FEEDBACK_PER_PERSON_PER_EVENT = 50;
 
+/**
+ * How an answer arrived (DESIGN §10 rc42): signed in, by the link we mailed to the person's
+ * address, or by a link an organizer copied (rc36) — and then who copied it, unless they have
+ * been erased since. Stored beside the answer and shown with it; it stops nothing.
+ */
+export const arrivalViaSchema = z.enum(["session", "mailed", "copied"]);
+export interface Arrival {
+  readonly via: z.infer<typeof arrivalViaSchema>;
+  /** Who copied the link; null for the other ways, and once that person is gone. */
+  readonly by: string | null;
+}
+export const SIGNED_IN: Arrival = { via: "session", by: null };
+
+/** What a stored answer says about its arrival; null from before rc42, when it wasn't recorded. */
+function arrivalOf(via: string | null, by: string | null): Arrival | null {
+  const parsed = arrivalViaSchema.nullable().parse(via);
+  return parsed === null ? null : { via: parsed, by };
+}
+
 export type ResponseResult =
   | { readonly kind: "recorded" }
   | { readonly kind: "forbidden" }
@@ -46,17 +65,24 @@ export type ResponseResult =
 export async function setAttendance(
   storage: StoragePort,
   access: EventAccess,
-  input: { readonly attendance: Attendance; readonly now: string },
+  input: {
+    readonly attendance: Attendance;
+    readonly now: string;
+    readonly arrival: Arrival | null;
+  },
 ): Promise<ResponseResult> {
   if (access.participation.visibility === "HIDDEN") return { kind: "forbidden" };
   const written = await storage.query({
-    sql: `UPDATE event_participation SET attendance = ?, responded_at = ?
+    sql: `UPDATE event_participation
+          SET attendance = ?, responded_at = ?, attendance_via = ?, attendance_via_by = ?
           WHERE canonical_event_id = ? AND person_id = ?
             AND EXISTS (SELECT 1 FROM canonical_event WHERE id = ? AND status = 'scheduled')
           RETURNING person_id`,
     params: [
       input.attendance,
       input.now,
+      input.arrival?.via ?? null,
+      input.arrival?.by ?? null,
       access.event.id,
       access.participation.personId,
       access.event.id,
@@ -69,7 +95,12 @@ export async function setAttendance(
 export async function addFeedback(
   storage: StoragePort,
   access: EventAccess,
-  input: { readonly body: string; readonly now: string; readonly newId?: () => string },
+  input: {
+    readonly body: string;
+    readonly now: string;
+    readonly arrival: Arrival | null;
+    readonly newId?: () => string;
+  },
 ): Promise<ResponseResult> {
   if (access.participation.visibility === "HIDDEN") return { kind: "forbidden" };
   const body = input.body.trim();
@@ -81,8 +112,9 @@ export async function addFeedback(
     return { kind: "closed" };
   // Count and insert in ONE statement, so parallel requests can't overshoot the ceiling.
   const written = await storage.query({
-    sql: `INSERT INTO event_feedback (id, canonical_event_id, person_id, body, created_at)
-          SELECT ?, ?, ?, ?, ?
+    sql: `INSERT INTO event_feedback
+            (id, canonical_event_id, person_id, body, created_at, answered_via, answered_via_by)
+          SELECT ?, ?, ?, ?, ?, ?, ?
           WHERE (SELECT count(*) FROM event_feedback WHERE canonical_event_id = ? AND person_id = ?) < ?
           RETURNING id`,
     params: [
@@ -91,6 +123,8 @@ export async function addFeedback(
       access.participation.personId,
       body,
       input.now,
+      input.arrival?.via ?? null,
+      input.arrival?.by ?? null,
       access.event.id,
       access.participation.personId,
       FEEDBACK_PER_PERSON_PER_EVENT,
@@ -106,6 +140,7 @@ export interface AttendanceEntry {
   readonly shown: Shown;
   readonly attendance: Attendance;
   readonly at: string | null;
+  readonly arrival: Arrival | null;
 }
 
 export interface FeedbackEntry {
@@ -113,6 +148,7 @@ export interface FeedbackEntry {
   readonly shown: Shown;
   readonly body: string;
   readonly at: string;
+  readonly arrival: Arrival | null;
 }
 
 export interface Responses {
@@ -124,12 +160,16 @@ const attendanceRowSchema = shownRowSchema.extend({
   person_id: z.string(),
   attendance: attendanceSchema,
   responded_at: z.string().nullable(),
+  attendance_via: z.string().nullable(),
+  attendance_via_by: z.string().nullable(),
 });
 
 const feedbackRowSchema = shownRowSchema.extend({
   person_id: z.string(),
   body: z.string(),
   created_at: z.string(),
+  answered_via: z.string().nullable(),
+  answered_via_by: z.string().nullable(),
 });
 
 /**
@@ -139,14 +179,15 @@ const feedbackRowSchema = shownRowSchema.extend({
 export async function listResponses(storage: StoragePort, access: EventAccess): Promise<Responses> {
   const attendance = await storage.query({
     sql: `SELECT ep.person_id, p.email, p.display_name, ep.handle, ep.show_email,
-                 ep.attendance, ep.responded_at
+                 ep.attendance, ep.responded_at, ep.attendance_via, ep.attendance_via_by
           FROM event_participation ep JOIN person p ON p.id = ep.person_id
           WHERE ep.canonical_event_id = ? AND ep.attendance IS NOT NULL
           ORDER BY ep.created_at, ep.person_id`,
     params: [access.event.id],
   });
   const feedback = await storage.query({
-    sql: `SELECT f.person_id, p.email, p.display_name, ep.handle, ep.show_email, f.body, f.created_at
+    sql: `SELECT f.person_id, p.email, p.display_name, ep.handle, ep.show_email, f.body,
+                 f.created_at, f.answered_via, f.answered_via_by
           FROM event_feedback f JOIN person p ON p.id = f.person_id
             LEFT JOIN event_participation ep
               ON ep.canonical_event_id = f.canonical_event_id AND ep.person_id = f.person_id
@@ -162,6 +203,7 @@ export async function listResponses(storage: StoragePort, access: EventAccess): 
         shown: shownAs(r.person_id, r, access.event.id),
         attendance: r.attendance,
         at: r.responded_at,
+        arrival: arrivalOf(r.attendance_via, r.attendance_via_by),
       };
     }),
     feedback: feedback.map((row) => {
@@ -171,6 +213,7 @@ export async function listResponses(storage: StoragePort, access: EventAccess): 
         shown: shownAs(r.person_id, r, access.event.id),
         body: r.body,
         at: r.created_at,
+        arrival: arrivalOf(r.answered_via, r.answered_via_by),
       };
     }),
   };
@@ -279,10 +322,13 @@ export async function issueResponseLinks(
   for (const r of recipients) {
     const issued = await (input.newToken ?? issueToken)();
     const stored = await storage.query({
-      sql: `INSERT INTO response_token (token_hash, canonical_event_id, person_id, action, expires_at, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+      sql: `INSERT INTO response_token
+              (token_hash, canonical_event_id, person_id, action, expires_at, created_at, origin, issued_by)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (canonical_event_id, person_id, action) DO UPDATE
-              SET token_hash = excluded.token_hash, expires_at = excluded.expires_at, created_at = excluded.created_at
+              SET token_hash = excluded.token_hash, expires_at = excluded.expires_at,
+                  created_at = excluded.created_at, origin = excluded.origin,
+                  issued_by = excluded.issued_by
               WHERE response_token.created_at <= ?
             RETURNING person_id`,
       params: [
@@ -292,6 +338,9 @@ export async function issueResponseLinks(
         action,
         expiresAt,
         input.now,
+        // rc42: a link says whether it was mailed or copied, and a copied one by whom.
+        input.copy === true ? "copied" : "mailed",
+        input.copy === true ? access.participation.personId : null,
         resendCutoff,
       ],
     });
@@ -329,12 +378,16 @@ export async function revokeUndeliveredLink(storage: StoragePort, link: IssuedLi
 export interface ResolvedLink {
   readonly access: EventAccess;
   readonly action: ResponseAction;
+  /** How an answer given with this link arrives (rc42); null for a link from before rc42. */
+  readonly arrival: Arrival | null;
 }
 
 const tokenRowSchema = z.object({
   canonical_event_id: z.string(),
   person_id: z.string(),
   action: responseActionSchema,
+  origin: z.enum(["mailed", "copied"]).nullable(),
+  issued_by: z.string().nullable(),
 });
 
 /**
@@ -350,7 +403,7 @@ export async function resolveResponseLink(
 ): Promise<ResolvedLink | null> {
   if (token === "") return null;
   const rows = await storage.query({
-    sql: `SELECT canonical_event_id, person_id, action FROM response_token
+    sql: `SELECT canonical_event_id, person_id, action, origin, issued_by FROM response_token
           WHERE token_hash = ? AND expires_at > ?`,
     params: [await hashToken(token), now],
   });
@@ -358,7 +411,7 @@ export async function resolveResponseLink(
   const row = tokenRowSchema.parse(rows[0]);
   const access = await findEventForParticipant(storage, row.canonical_event_id, row.person_id);
   if (access === null || access.participation.visibility === "HIDDEN") return null;
-  return { access, action: row.action };
+  return { access, action: row.action, arrival: arrivalOf(row.origin, row.issued_by) };
 }
 
 // --- Agreement & acknowledgment (slice 2E-1, DESIGN §10 rc13) -----------------------------
@@ -380,7 +433,11 @@ export type AnswerResult =
 export async function answerProposal(
   storage: StoragePort,
   access: EventAccess,
-  input: { readonly answer: "accept" | "decline"; readonly now: string },
+  input: {
+    readonly answer: "accept" | "decline";
+    readonly now: string;
+    readonly arrival: Arrival | null;
+  },
 ): Promise<AnswerResult> {
   const { event, participation } = access;
   if (participation.visibility === "HIDDEN" || participation.responseKind !== "accept")
@@ -395,11 +452,21 @@ export async function answerProposal(
   };
   await storage.batch([
     {
-      sql: `UPDATE event_participation SET response_state = ?, response_state_at = ?
+      sql: `UPDATE event_participation
+            SET response_state = ?, response_state_at = ?,
+                response_state_via = ?, response_state_via_by = ?
             WHERE canonical_event_id = ? AND person_id = ? AND response_kind = 'accept'
               AND response_state IN ('pending', 'accepted')
               AND EXISTS (SELECT 1 FROM canonical_event WHERE id = ? AND status = 'proposed')`,
-      params: [state, input.now, event.id, participation.personId, event.id],
+      params: [
+        state,
+        input.now,
+        input.arrival?.via ?? null,
+        input.arrival?.by ?? null,
+        event.id,
+        participation.personId,
+        event.id,
+      ],
     },
     ...(input.answer === "accept"
       ? transitionStatements({
@@ -447,7 +514,7 @@ export function needsAcknowledgment(access: EventAccess): boolean {
 export async function acknowledge(
   storage: StoragePort,
   access: EventAccess,
-  input: { readonly now: string },
+  input: { readonly now: string; readonly arrival: Arrival | null },
 ): Promise<ResponseResult> {
   if (access.participation.visibility === "HIDDEN") return { kind: "forbidden" };
   if (!needsAcknowledgment(access))
@@ -455,13 +522,20 @@ export async function acknowledge(
   const written = await storage.query({
     sql: `UPDATE event_participation
           SET response_state = CASE response_kind WHEN 'ack' THEN 'acknowledged' ELSE 'accepted' END,
-              response_state_at = ?
+              response_state_at = ?, response_state_via = ?, response_state_via_by = ?
           WHERE canonical_event_id = ? AND person_id = ?
             AND ((response_kind = 'ack' AND response_state IN ('pending', 'reack'))
               OR (response_kind = 'accept' AND response_state = 'reack'))
             AND EXISTS (SELECT 1 FROM canonical_event WHERE id = ? AND status = 'scheduled')
           RETURNING person_id`,
-    params: [input.now, access.event.id, access.participation.personId, access.event.id],
+    params: [
+      input.now,
+      input.arrival?.via ?? null,
+      input.arrival?.by ?? null,
+      access.event.id,
+      access.participation.personId,
+      access.event.id,
+    ],
   });
   return written.length === 1 ? { kind: "recorded" } : { kind: "closed" };
 }
@@ -472,6 +546,7 @@ export interface RequestEntry {
   readonly kind: Extract<ResponseKind, "accept" | "ack">;
   readonly state: ResponseState;
   readonly at: string | null;
+  readonly arrival: Arrival | null;
 }
 
 const requestRowSchema = shownRowSchema.extend({
@@ -479,6 +554,8 @@ const requestRowSchema = shownRowSchema.extend({
   response_kind: responseKindSchema.extract(["accept", "ack"]),
   response_state: responseStateSchema,
   response_state_at: z.string().nullable(),
+  response_state_via: z.string().nullable(),
+  response_state_via_by: z.string().nullable(),
 });
 
 /** Who was asked to agree or acknowledge, and where each stands — for proven access. */
@@ -488,7 +565,8 @@ export async function listRequests(
 ): Promise<RequestEntry[]> {
   const rows = await storage.query({
     sql: `SELECT ep.person_id, p.email, p.display_name, ep.handle, ep.show_email,
-                 ep.response_kind, ep.response_state, ep.response_state_at
+                 ep.response_kind, ep.response_state, ep.response_state_at,
+                 ep.response_state_via, ep.response_state_via_by
           FROM event_participation ep JOIN person p ON p.id = ep.person_id
           WHERE ep.canonical_event_id = ? AND ep.response_kind IN ('accept', 'ack')
           ORDER BY ep.created_at, ep.person_id`,
@@ -502,6 +580,7 @@ export async function listRequests(
       kind: r.response_kind,
       state: r.response_state,
       at: r.response_state_at,
+      arrival: arrivalOf(r.response_state_via, r.response_state_via_by),
     };
   });
 }

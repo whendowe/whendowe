@@ -17,6 +17,7 @@ import {
   issueResponseLinks,
   listRequests,
   needsAcknowledgment,
+  SIGNED_IN,
 } from "../../src/events/response.js";
 import { createGroup, findGroupForMember, type GroupMembership } from "../../src/people/group.js";
 import { acceptInvite, createInvite } from "../../src/people/invite.js";
@@ -119,6 +120,7 @@ export function runRequestsContract(makePort: () => Promise<StoragePort>): void 
       const event = await propose(port, mara, membership, [[david, "accept"]]);
       expect(
         await answerProposal(port, await access(port, event.id, david), {
+          arrival: SIGNED_IN,
           answer: "accept",
           now: T1,
         }),
@@ -145,6 +147,7 @@ export function runRequestsContract(makePort: () => Promise<StoragePort>): void 
       expect(
         (
           await answerProposal(port, await access(port, event.id, david), {
+            arrival: SIGNED_IN,
             answer: "accept",
             now: T1,
           })
@@ -153,6 +156,7 @@ export function runRequestsContract(makePort: () => Promise<StoragePort>): void 
       expect((await access(port, event.id, mara)).event.status).toBe("proposed");
       expect(
         await answerProposal(port, await access(port, event.id, ann), {
+          arrival: SIGNED_IN,
           answer: "accept",
           now: T1,
         }),
@@ -168,8 +172,8 @@ export function runRequestsContract(makePort: () => Promise<StoragePort>): void 
       ]);
       const [d, a] = [await access(port, event.id, david), await access(port, event.id, ann)];
       await Promise.all([
-        answerProposal(port, d, { answer: "accept", now: T1 }),
-        answerProposal(port, a, { answer: "accept", now: T1 }),
+        answerProposal(port, d, { arrival: SIGNED_IN, answer: "accept", now: T1 }),
+        answerProposal(port, a, { arrival: SIGNED_IN, answer: "accept", now: T1 }),
       ]);
       expect((await access(port, event.id, mara)).event.status).toBe("scheduled");
       expect(
@@ -186,6 +190,7 @@ export function runRequestsContract(makePort: () => Promise<StoragePort>): void 
       ]);
       expect(
         await answerProposal(port, await access(port, event.id, david), {
+          arrival: SIGNED_IN,
           answer: "decline",
           now: T1,
         }),
@@ -199,6 +204,7 @@ export function runRequestsContract(makePort: () => Promise<StoragePort>): void 
       expect(
         (
           await answerProposal(port, await access(port, event.id, ann), {
+            arrival: SIGNED_IN,
             answer: "accept",
             now: T1,
           })
@@ -224,6 +230,7 @@ export function runRequestsContract(makePort: () => Promise<StoragePort>): void 
       expect(
         (
           await answerProposal(port, await access(port, event.id, david), {
+            arrival: SIGNED_IN,
             answer: "accept",
             now: T1,
           })
@@ -238,13 +245,18 @@ export function runRequestsContract(makePort: () => Promise<StoragePort>): void 
       expect(event.status).toBe("scheduled");
       const d = await access(port, event.id, david);
       expect(needsAcknowledgment(d)).toBe(true);
-      expect((await acknowledge(port, d, { now: T1 })).kind).toBe("recorded");
+      expect((await acknowledge(port, d, { arrival: SIGNED_IN, now: T1 })).kind).toBe("recorded");
       expect(await listRequests(port, await access(port, event.id, mara))).toEqual([
         expect.objectContaining({ personId: david, kind: "ack", state: "acknowledged", at: T1 }),
       ]);
-      expect((await acknowledge(port, await access(port, event.id, david), { now: T1 })).kind).toBe(
-        "invalid",
-      );
+      expect(
+        (
+          await acknowledge(port, await access(port, event.id, david), {
+            arrival: SIGNED_IN,
+            now: T1,
+          })
+        ).kind,
+      ).toBe("invalid");
     });
 
     it("a material change asks again; a retitle doesn't", async () => {
@@ -255,10 +267,11 @@ export function runRequestsContract(makePort: () => Promise<StoragePort>): void 
         [ann, "ack"],
       ]);
       await answerProposal(port, await access(port, event.id, david), {
+        arrival: SIGNED_IN,
         answer: "accept",
         now: T1,
       });
-      await acknowledge(port, await access(port, event.id, ann), { now: T1 });
+      await acknowledge(port, await access(port, event.id, ann), { arrival: SIGNED_IN, now: T1 });
 
       const retitle = await editEvent(port, await access(port, event.id, mara), {
         fields: { ...NIGHT, title: "Extra night" },
@@ -281,9 +294,14 @@ export function runRequestsContract(makePort: () => Promise<StoragePort>): void 
       expect(await statesOf(port, event.id, mara)).toEqual({ [david]: "reack", [ann]: "reack" });
       expect((await access(port, event.id, mara)).event.status).toBe("scheduled");
       // David re-confirms: back to accepted, not "acknowledged".
-      expect((await acknowledge(port, await access(port, event.id, david), { now: T1 })).kind).toBe(
-        "recorded",
-      );
+      expect(
+        (
+          await acknowledge(port, await access(port, event.id, david), {
+            arrival: SIGNED_IN,
+            now: T1,
+          })
+        ).kind,
+      ).toBe("recorded");
       expect((await access(port, event.id, david)).participation.responseState).toBe("accepted");
     });
 
@@ -292,7 +310,7 @@ export function runRequestsContract(makePort: () => Promise<StoragePort>): void 
       const port = await makePort();
       const { mara, membership, david } = await household(port, "stale");
       const event = await propose(port, mara, membership, [[david, "ack"]]);
-      await acknowledge(port, await access(port, event.id, david), { now: T1 });
+      await acknowledge(port, await access(port, event.id, david), { arrival: SIGNED_IN, now: T1 });
       const stale = await access(port, event.id, mara);
       await editEvent(port, await access(port, event.id, mara), {
         fields: { ...NIGHT, title: "Retitled" },

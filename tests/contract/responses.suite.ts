@@ -1,17 +1,25 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, expect, it } from "vitest";
 import type { StoragePort } from "../../src/db/port.js";
-import { createEvent, type EventAccess, findEventForParticipant } from "../../src/events/event.js";
 import {
+  createEvent,
+  type EventAccess,
+  editEvent,
+  findEventForParticipant,
+} from "../../src/events/event.js";
+import {
+  acknowledge,
   addFeedback,
   answerProposal,
   FEEDBACK_PER_PERSON_PER_EVENT,
   issueResponseLinks,
+  listRequests,
   listResponses,
   RESPONSE_RESEND_INTERVAL_MS,
   RESPONSE_TOKEN_TTL_MS,
   resolveResponseLink,
   revokeUndeliveredLink,
+  SIGNED_IN,
   setAttendance,
 } from "../../src/events/response.js";
 import { createGroup, findGroupForMember } from "../../src/people/group.js";
@@ -79,6 +87,7 @@ export function runResponsesContract(makePort: () => Promise<StoragePort>): void
       expect(
         (
           await setAttendance(port, await access(port, event.id, ann), {
+            arrival: SIGNED_IN,
             attendance: "going",
             now: T0,
           })
@@ -87,6 +96,7 @@ export function runResponsesContract(makePort: () => Promise<StoragePort>): void
       expect(
         (
           await setAttendance(port, await access(port, event.id, ann), {
+            arrival: SIGNED_IN,
             attendance: "maybe",
             now: later(1000),
           })
@@ -99,6 +109,7 @@ export function runResponsesContract(makePort: () => Promise<StoragePort>): void
       expect(
         (
           await setAttendance(port, await access(port, event.id, ghost), {
+            arrival: SIGNED_IN,
             attendance: "going",
             now: T0,
           })
@@ -116,6 +127,7 @@ export function runResponsesContract(makePort: () => Promise<StoragePort>): void
       expect(
         (
           await setAttendance(port, await access(port, poll.id, ann), {
+            arrival: SIGNED_IN,
             attendance: "going",
             now: T0,
           })
@@ -133,19 +145,28 @@ export function runResponsesContract(makePort: () => Promise<StoragePort>): void
         now: T0,
       });
       await addFeedback(port, await access(port, event.id, ann), {
+        arrival: SIGNED_IN,
         body: "  might be late  ",
         now: T0,
       });
       await addFeedback(port, await access(port, event.id, bob), {
+        arrival: SIGNED_IN,
         body: "bringing snacks",
         now: later(1000),
       });
       expect(
-        (await addFeedback(port, await access(port, event.id, bob), { body: "   ", now: T0 })).kind,
+        (
+          await addFeedback(port, await access(port, event.id, bob), {
+            arrival: SIGNED_IN,
+            body: "   ",
+            now: T0,
+          })
+        ).kind,
       ).toBe("invalid");
       expect(
         (
           await addFeedback(port, await access(port, event.id, bob), {
+            arrival: SIGNED_IN,
             body: "x".repeat(501),
             now: T0,
           })
@@ -170,7 +191,7 @@ export function runResponsesContract(makePort: () => Promise<StoragePort>): void
       const a = await access(port, event.id, ann);
       const results = await Promise.all(
         Array.from({ length: FEEDBACK_PER_PERSON_PER_EVENT + 10 }, (_, i) =>
-          addFeedback(port, a, { body: `note ${i}`, now: T0 }),
+          addFeedback(port, a, { arrival: SIGNED_IN, body: `note ${i}`, now: T0 }),
         ),
       );
       expect(results.filter((r) => r.kind === "recorded")).toHaveLength(
@@ -208,6 +229,226 @@ export function runResponsesContract(makePort: () => Promise<StoragePort>): void
       expect(await resolveResponseLink(port, bobs, T0)).not.toBeNull();
     });
 
+    it("how an answer arrived (rc42): signed in, the emailed link, or a copied link and who copied it", async () => {
+      const port = await makePort();
+      const { dm, membership, ann, bob } = await table(port, "arrival");
+      const event = await createEvent(port, {
+        creatorId: dm.id,
+        group: membership,
+        fields: SESSION,
+        now: T0,
+      });
+      const asDm = await access(port, event.id, dm.id);
+      const arrivals = async () => {
+        const r = await listResponses(port, asDm);
+        return {
+          attendance: Object.fromEntries(r.attendance.map((a) => [a.personId, a.arrival])),
+          notes: r.feedback.map((f) => [f.personId, f.arrival]),
+        };
+      };
+      const mailed = await issueResponseLinks(port, asDm, { now: T0 });
+      if (mailed.kind !== "issued") throw new Error(mailed.kind);
+      const tokenOf = (links: typeof mailed.links, who: string) =>
+        links.find((l) => l.personId === who)?.token ?? "";
+
+      // Ann answers with the link we mailed her: it says so, with nobody to name.
+      const annLink = await resolveResponseLink(port, tokenOf(mailed.links, ann), T0);
+      if (annLink === null) throw new Error("expected link");
+      expect(annLink.arrival).toEqual({ via: "mailed", by: null });
+      await setAttendance(port, annLink.access, {
+        attendance: "going",
+        now: T0,
+        arrival: annLink.arrival,
+      });
+      await addFeedback(port, annLink.access, {
+        body: "might be late",
+        now: T0,
+        arrival: annLink.arrival,
+      });
+
+      // Bob's is copied by the DM: the link remembers who, and so does the answer.
+      const copied = await issueResponseLinks(port, asDm, { now: T0, only: bob, copy: true });
+      if (copied.kind !== "issued") throw new Error(copied.kind);
+      const bobLink = await resolveResponseLink(port, tokenOf(copied.links, bob), T0);
+      if (bobLink === null) throw new Error("expected link");
+      expect(bobLink.arrival).toEqual({ via: "copied", by: dm.id });
+      await setAttendance(port, bobLink.access, {
+        attendance: "maybe",
+        now: T0,
+        arrival: bobLink.arrival,
+      });
+      await addFeedback(port, bobLink.access, { body: "ok", now: T0, arrival: bobLink.arrival });
+      expect(await arrivals()).toEqual({
+        attendance: {
+          [ann]: { via: "mailed", by: null },
+          [bob]: { via: "copied", by: dm.id },
+        },
+        notes: [
+          [ann, { via: "mailed", by: null }],
+          [bob, { via: "copied", by: dm.id }],
+        ],
+      });
+
+      // Bob then answers signed in: his label follows his new answer; Ann's hasn't moved,
+      // and the note he left by the copied link still says how it came.
+      await setAttendance(port, await access(port, event.id, bob), {
+        attendance: "going",
+        now: T0,
+        arrival: SIGNED_IN,
+      });
+      expect(await arrivals()).toMatchObject({
+        attendance: { [ann]: { via: "mailed", by: null }, [bob]: { via: "session", by: null } },
+        notes: [
+          [ann, { via: "mailed" }],
+          [bob, { via: "copied", by: dm.id }],
+        ],
+      });
+
+      // Mailing Bob a link again makes his link a mailed one: the label is the link's, each time.
+      const again = await issueResponseLinks(port, asDm, {
+        now: later(RESPONSE_RESEND_INTERVAL_MS + 1),
+        only: bob,
+      });
+      if (again.kind !== "issued") throw new Error(again.kind);
+      expect(
+        (
+          await resolveResponseLink(
+            port,
+            tokenOf(again.links, bob),
+            later(RESPONSE_RESEND_INTERVAL_MS + 1),
+          )
+        )?.arrival,
+      ).toEqual({ via: "mailed", by: null });
+
+      // A link from before rc42 has no origin: what arrives by it is recorded as not recorded.
+      await port.batch([
+        {
+          sql: "UPDATE response_token SET origin = NULL, issued_by = NULL WHERE canonical_event_id = ? AND person_id = ?",
+          params: [event.id, ann],
+        },
+      ]);
+      const old = await resolveResponseLink(port, tokenOf(mailed.links, ann), T0);
+      if (old === null) throw new Error("expected link");
+      expect(old.arrival).toBeNull();
+      await setAttendance(port, old.access, {
+        attendance: "not_going",
+        now: T0,
+        arrival: old.arrival,
+      });
+      await addFeedback(port, old.access, { body: "old link", now: T0, arrival: old.arrival });
+      const after = await arrivals();
+      expect(after.attendance[ann]).toBeNull();
+      expect(after.notes.at(-1)).toEqual([ann, null]);
+    });
+
+    it("agreeing and acknowledging record how they arrived too (rc42)", async () => {
+      const port = await makePort();
+      const { dm, membership, ann, bob } = await table(port, "arrival-ask");
+      const asked = await createEvent(port, {
+        creatorId: dm.id,
+        group: membership,
+        fields: SESSION,
+        requests: new Map([
+          [ann, "accept"],
+          [bob, "accept"],
+        ]),
+        now: T0,
+      });
+      const asDm = await access(port, asked.id, dm.id);
+      const copied = await issueResponseLinks(port, asDm, { now: T0, only: ann, copy: true });
+      if (copied.kind !== "issued") throw new Error(copied.kind);
+      const annLink = await resolveResponseLink(port, copied.links[0]?.token ?? "", T0);
+      if (annLink === null) throw new Error("expected link");
+      await answerProposal(port, annLink.access, {
+        answer: "accept",
+        now: T0,
+        arrival: annLink.arrival,
+      });
+      await answerProposal(port, await access(port, asked.id, bob), {
+        answer: "accept",
+        now: T0,
+        arrival: SIGNED_IN,
+      });
+      const byPerson = async () =>
+        Object.fromEntries(
+          (await listRequests(port, await access(port, asked.id, dm.id))).map((r) => [
+            r.personId,
+            [r.state, r.arrival],
+          ]),
+        );
+      expect(await byPerson()).toEqual({
+        [ann]: ["accepted", { via: "copied", by: dm.id }],
+        [bob]: ["accepted", { via: "session", by: null }],
+      });
+
+      // A material change asks both again; Ann looks again with a mailed link.
+      const moved = await editEvent(port, await access(port, asked.id, dm.id), {
+        fields: { ...SESSION, startLocal: "2101-10-20T20:00" },
+        actorId: dm.id,
+        now: T0,
+      });
+      expect(moved.kind).toBe("updated");
+      const mailed = await issueResponseLinks(port, await access(port, asked.id, dm.id), {
+        now: later(1),
+        only: ann,
+        copy: false,
+      });
+      if (mailed.kind !== "issued") throw new Error(mailed.kind);
+      const second = await resolveResponseLink(port, mailed.links[0]?.token ?? "", later(1));
+      if (second === null) throw new Error("expected link");
+      expect(
+        (await acknowledge(port, second.access, { now: later(1), arrival: second.arrival })).kind,
+      ).toBe("recorded");
+      expect((await byPerson())[ann]).toEqual(["accepted", { via: "mailed", by: null }]);
+
+      // Bob looks again with a link the DM copied: who copied it is kept here too.
+      const forBob = await issueResponseLinks(port, await access(port, asked.id, dm.id), {
+        now: later(1),
+        only: bob,
+        copy: true,
+      });
+      if (forBob.kind !== "issued") throw new Error(forBob.kind);
+      const bobLink = await resolveResponseLink(port, forBob.links[0]?.token ?? "", later(1));
+      if (bobLink === null) throw new Error("expected link");
+      await acknowledge(port, bobLink.access, { now: later(1), arrival: bobLink.arrival });
+      expect((await byPerson())[bob]).toEqual(["accepted", { via: "copied", by: dm.id }]);
+
+      // With nothing recorded (a link from before rc42), each stores that, over what was there.
+      await editEvent(port, await access(port, asked.id, dm.id), {
+        fields: { ...SESSION, startLocal: "2101-10-20T21:00" },
+        actorId: dm.id,
+        now: T0,
+      });
+      expect(
+        (
+          await acknowledge(port, await access(port, asked.id, bob), {
+            now: later(2),
+            arrival: null,
+          })
+        ).kind,
+      ).toBe("recorded");
+      expect((await byPerson())[bob]).toEqual(["accepted", null]);
+      const fresh = await createEvent(port, {
+        creatorId: dm.id,
+        group: membership,
+        fields: SESSION,
+        requests: new Map([[ann, "accept"]]),
+        now: T0,
+      });
+      expect(
+        (
+          await answerProposal(port, await access(port, fresh.id, ann), {
+            answer: "accept",
+            now: T0,
+            arrival: null,
+          })
+        ).kind,
+      ).toBe("recorded");
+      expect(
+        (await listRequests(port, await access(port, fresh.id, dm.id))).map((r) => r.arrival),
+      ).toEqual([null]);
+    });
+
     it("an organizer issues vote links to everyone asked to agree — not themself, not the others", async () => {
       const port = await makePort();
       const { dm, membership, ann, bob } = await table(port, "issue");
@@ -242,7 +483,13 @@ export function runResponsesContract(makePort: () => Promise<StoragePort>): void
       });
       if (resolved === null) throw new Error("expected link");
       expect(
-        (await answerProposal(port, resolved.access, { answer: "accept", now: T0 })).kind,
+        (
+          await answerProposal(port, resolved.access, {
+            arrival: resolved.arrival,
+            answer: "accept",
+            now: T0,
+          })
+        ).kind,
       ).toBe("recorded");
       expect((await access(port, poll.id, ann)).participation.responseState).toBe("accepted");
 

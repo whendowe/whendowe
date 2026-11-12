@@ -188,8 +188,10 @@ it("US-14: the D&D table finds a date and says who's coming — players never si
   expect(final).toContain("4 going · 1 maybe · 0 can't make it");
   // Attributed: the same name on Dee's "maybe" and on her note — a guest name, as she
   // never chose one, and never her address (DESIGN §10 rc21).
-  const dee = /<li>(Guest \d{4}): Maybe<\/li>/.exec(final)?.[1] ?? "no maybe";
-  expect(final).toMatch(new RegExp(`${dee}: <span[^>]*>might be late</span>`));
+  // Each says how it arrived (rc42): she was never signed in, so by her emailed link.
+  const mailed = '<span class="muted">· by their emailed link</span>';
+  const dee = new RegExp(`<li>(Guest \\d{4}): Maybe ${mailed}</li>`).exec(final)?.[1] ?? "no maybe";
+  expect(final).toMatch(new RegExp(`${dee}: <span[^>]*>might be late</span> ${mailed}`));
   expect(final).not.toContain("dee@example.org");
   // …and the group page shows the session at its time.
   expect(await dmGet(group)).toContain("2101-11-08 18:00 – 22:00 · Europe/Prague");
