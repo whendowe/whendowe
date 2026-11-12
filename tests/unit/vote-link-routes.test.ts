@@ -613,6 +613,65 @@ it("votes say how they arrived (rc42): the emailed link, or the link the organiz
   expect(unlabelled).not.toMatch(/emailed link<|copied for/);
 });
 
+it("only my own email in a thread (rc42): from the thread page or a mailed vote link; never a copied one", async () => {
+  const b = await browser({ now: () => NOW });
+  const f = await signedInPoll(b, ["david", "ana"]);
+  const [david = "", ana = ""] = f.rest.map((p) => p.id);
+  const linkIn = (text: string) => {
+    const url = new URL(
+      /https:\/\/[^\s"<]+\/vote\?t=[A-Za-z0-9_-]+/.exec(text)?.[0] ?? "https://x/",
+    );
+    return { path: `${url.pathname}${url.search}`, t: url.searchParams.get("t") ?? "" };
+  };
+  const here =
+    /<input type="checkbox" name="on" value="1"( checked)? \/> Only my own email answers for me here/;
+  const copyOf = async (person: string) =>
+    b.request(`${f.thread}/links/copy`, post({ csrf: (await home(b)).csrf, person }));
+
+  // Mara's own page has the switch, off.
+  expect(here.exec(await (await b.request(f.thread)).text())?.[1]).toBeUndefined();
+
+  // David's link is copied: its page has no switch, and posting one is refused.
+  const copied = linkIn(await (await copyOf(david)).text());
+  expect(await (await b.request(copied.path)).text()).not.toContain("Only my own email");
+  const fromCopy = await b.request(`${VOTE_PATH}/own-answers`, post({ t: copied.t, on: "1" }));
+  expect(fromCopy.status).toBe(403);
+  expect(await fromCopy.text()).toContain("Only a link sent to your own address can change that.");
+
+  // Ana turns hers on from her mailed link; Mara sees why there's no copy for her.
+  await sendLinks(b, f.thread);
+  const mailed = linkIn(b.sent.find((m) => m.to === "ana@example.org")?.text ?? "");
+  expect(here.exec(await (await b.request(mailed.path)).text())?.[1]).toBeUndefined();
+  const on = await b.request(`${VOTE_PATH}/own-answers`, post({ t: mailed.t, on: "1" }));
+  expect(on.status).toBe(303);
+  expect(on.headers.get("location")).toBe(mailed.path);
+  expect(here.exec(await (await b.request(mailed.path)).text())?.[1]).toBe(" checked");
+  const page = await (await b.request(f.thread)).text();
+  expect(page).toContain("· takes answers only from their own email");
+  expect(page.match(/Copy [^<]+'s link</g)).toHaveLength(1); // David's only
+  const refused = await copyOf(ana);
+  expect(refused.status).toBe(409);
+  expect(await refused.text()).toContain(
+    "takes answers only from their own email. You can still email them their link.",
+  );
+
+  // Off again from the mailed link: her copy button is back.
+  await b.request(`${VOTE_PATH}/own-answers`, post({ t: mailed.t }));
+  expect((await (await b.request(f.thread)).text()).match(/Copy [^<]+'s link</g)).toHaveLength(2);
+  expect((await b.request(`${VOTE_PATH}/own-answers`, post({ t: "nope", on: "1" }))).status).toBe(
+    404,
+  );
+
+  // Mara, signed in, turns her own on and off; a form without the token does nothing.
+  await b.request(`${f.thread}/own-answers`, post({ csrf: (await home(b)).csrf, on: "1" }));
+  expect(here.exec(await (await b.request(f.thread)).text())?.[1]).toBe(" checked");
+  await b.request(`${f.thread}/own-answers`, post({ csrf: (await home(b)).csrf }));
+  expect(here.exec(await (await b.request(f.thread)).text())?.[1]).toBeUndefined();
+  expect((await b.request(`${f.thread}/own-answers`, post({ csrf: "x", on: "1" }))).status).toBe(
+    403,
+  );
+});
+
 it("only the organizer copies links, and only a member's", async () => {
   const b = await browser({ now: () => NOW });
   const f = await signedInPoll(b, ["david"]);

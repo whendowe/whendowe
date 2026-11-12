@@ -31,7 +31,16 @@ export interface ThreadMember {
   readonly shown: Shown;
   /** A name claimed from a shared link, not yet an account's (rc29): "not confirmed" (rc30). */
   readonly guest: boolean;
+  /** rc42: "only my own email answers for me" here: no copied vote link answers as them. */
+  readonly ownAnswersOnly: boolean;
 }
+
+/**
+ * rc42: a member's group default for their own answers, for a thread started from a group;
+ * 0 otherwise. Params: the thread's id, then the person's.
+ */
+export const OWN_ANSWERS_DEFAULT = `coalesce((SELECT gm.default_own_answers_only FROM group_member gm
+  WHERE gm.group_id = (SELECT t.group_id FROM plan_thread t WHERE t.id = ?) AND gm.person_id = ?), 0)`;
 
 /** Proof that a person is a member of a thread, with everyone who plans in it. */
 export interface ThreadAccess {
@@ -136,8 +145,9 @@ export function threadStatements(input: {
       params: [id, name, input.creatorId, input.tzid, input.now, input.groupId ?? null],
     },
     ...[input.creatorId, ...others].map((personId) => ({
-      sql: "INSERT INTO plan_thread_member (thread_id, person_id, created_at) VALUES (?, ?, ?)",
-      params: [id, personId, input.now],
+      sql: `INSERT INTO plan_thread_member (thread_id, person_id, created_at, own_answers_only)
+            VALUES (?, ?, ?, ${OWN_ANSWERS_DEFAULT})`,
+      params: [id, personId, input.now, id, personId],
     })),
   ];
   const thread = {
@@ -165,6 +175,7 @@ const threadRowSchema = z.object({
 const memberRowSchema = shownRowSchema.extend({
   person_id: z.string(),
   guest_at: z.string().nullable(),
+  own_answers_only: z.number(),
 });
 
 function toThread(row: unknown): Thread {
@@ -203,7 +214,8 @@ export async function threadMembers(
 ): Promise<ThreadMember[]> {
   return (
     await storage.query({
-      sql: `SELECT m.person_id, p.email, p.display_name, m.handle, m.show_email, p.guest_at
+      sql: `SELECT m.person_id, p.email, p.display_name, m.handle, m.show_email, p.guest_at,
+              m.own_answers_only
             FROM plan_thread_member m JOIN person p ON p.id = m.person_id
             WHERE m.thread_id = ? ORDER BY m.created_at, m.person_id`,
       params: [threadId],
@@ -214,6 +226,7 @@ export async function threadMembers(
       personId: r.person_id,
       shown: shownAs(r.person_id, r, threadId),
       guest: r.guest_at !== null,
+      ownAnswersOnly: r.own_answers_only === 1,
     };
   });
 }

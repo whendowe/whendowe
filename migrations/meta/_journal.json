@@ -225,6 +225,13 @@
       "when": 1794499104334,
       "tag": "0031_own_answers_only",
       "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "6",
+      "when": 1794504068723,
+      "tag": "0032_thread_own_answers_only",
+      "breakpoints": true
     }
   ]
 }

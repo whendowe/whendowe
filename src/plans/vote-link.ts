@@ -68,8 +68,16 @@ export async function issueVoteLinks(
       sql: `SELECT m.person_id, p.email FROM plan_thread_member m JOIN person p ON p.id = m.person_id
             WHERE m.thread_id = ? AND m.person_id <> ? AND p.guest_at IS NULL AND p.erased_at IS NULL
               AND (? IS NULL OR m.person_id = ?)
+              AND (? = 0 OR m.own_answers_only = 0)
             ORDER BY p.email`,
-      params: [access.thread.id, access.personId, input.only ?? null, input.only ?? null],
+      params: [
+        access.thread.id,
+        access.personId,
+        input.only ?? null,
+        input.only ?? null,
+        // rc42: nobody copies a link for someone who takes answers only from their own email.
+        input.copy === true ? 1 : 0,
+      ],
     })
   ).map((row) => recipientRowSchema.parse(row));
 
@@ -153,5 +161,39 @@ export async function resolveVoteLink(
   if (rows[0] === undefined) return null;
   const row = tokenRowSchema.parse(rows[0]);
   const access = await findThreadForMember(storage, row.thread_id, row.person_id);
-  return access === null ? null : { access, arrival: arrivalOf(row.origin, row.issued_by) };
+  if (access === null) return null;
+  // rc42: with "only my own email" on, only a link we mailed them votes as them.
+  const me = access.members.find((m) => m.personId === access.personId);
+  if (me?.ownAnswersOnly === true && row.origin !== "mailed") return null;
+  return { access, arrival: arrivalOf(row.origin, row.issued_by) };
+}
+
+/**
+ * "Only my own email answers for me" in this thread (DESIGN §10 rc42), as on an event
+ * (events/response.ts setOwnAnswersOnly): set by the person, signed in or by a mailed
+ * link, never by a copied one. Turning it on withdraws their links not known to be mailed.
+ */
+export async function setThreadOwnAnswersOnly(
+  storage: StoragePort,
+  access: ThreadAccess,
+  input: { readonly on: boolean; readonly arrival: Arrival | null },
+): Promise<"saved" | "forbidden"> {
+  const via = input.arrival?.via;
+  if (via !== "session" && via !== "mailed") return "forbidden";
+  await storage.batch([
+    {
+      sql: "UPDATE plan_thread_member SET own_answers_only = ? WHERE thread_id = ? AND person_id = ?",
+      params: [input.on ? 1 : 0, access.thread.id, access.personId],
+    },
+    ...(input.on
+      ? [
+          {
+            sql: `DELETE FROM plan_vote_token
+                  WHERE thread_id = ? AND person_id = ? AND (origin IS NULL OR origin <> 'mailed')`,
+            params: [access.thread.id, access.personId],
+          },
+        ]
+      : []),
+  ]);
+  return "saved";
 }

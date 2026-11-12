@@ -2,6 +2,12 @@
 import { describe, expect, it } from "vitest";
 import type { StoragePort } from "../../src/db/port.js";
 import { SHARED_LINK, SIGNED_IN } from "../../src/events/response.js";
+import {
+  createGroup,
+  findGroupForMember,
+  setDefaultOwnAnswersOnly,
+} from "../../src/people/group.js";
+import { acceptInvite, createInvite } from "../../src/people/invite.js";
 import { findOrCreatePerson } from "../../src/people/person.js";
 import {
   acceptPlan,
@@ -13,11 +19,13 @@ import {
   startDraft,
   suggestTime,
 } from "../../src/plans/plan.js";
+import { issueShareLink, joinByShareLink, resolveShareLink } from "../../src/plans/share.js";
 import { createThread, findThreadForMember, leaveThread } from "../../src/plans/thread.js";
 import {
   issueVoteLinks,
   resolveVoteLink,
   revokeUndeliveredVoteLink,
+  setThreadOwnAnswersOnly,
 } from "../../src/plans/vote-link.js";
 import { eraseAccount } from "../../src/privacy/erasure.js";
 import { retentionPass } from "../../src/privacy/purge.js";
@@ -64,6 +72,16 @@ async function issued(port: StoragePort, access: Parameters<typeof issueVoteLink
   return r;
 }
 
+/** Each person's own-answers switch on the event a plan's acceptance made. */
+async function ownOnEvent(port: StoragePort, planId: string) {
+  const rows = await port.query({
+    sql: `SELECT ep.person_id, ep.own_answers_only FROM event_participation ep
+          JOIN plan_event pe ON pe.canonical_event_id = ep.canonical_event_id WHERE pe.plan_id = ?`,
+    params: [planId],
+  });
+  return Object.fromEntries(rows.map((r) => [String(r.person_id), Number(r.own_answers_only)]));
+}
+
 export function runVoteLinksContract(makePort: () => Promise<StoragePort>): void {
   describe("a thread's vote links (rc26)", () => {
     it("the organizer sends one to everyone else; it opens the thread as that person", async () => {
@@ -105,6 +123,157 @@ export function runVoteLinksContract(makePort: () => Promise<StoragePort>): void
       // Ana's link is untouched.
       const ana = sent.links.find((l) => l.personId === f.ana.id)?.token ?? "";
       expect((await resolveVoteLink(port, ana, LATER))?.access.personId).toBe(f.ana.id);
+    });
+
+    it("only my own email (rc42): no copied vote link, set only by the person, kept on the agreed event", async () => {
+      const port = await makePort();
+      const f = await poll(port, "own");
+      const mara = await f.as(f.mara.id);
+      const tokenOf = (links: readonly { personId: string; token: string }[], who: string) =>
+        links.find((l) => l.personId === who)?.token ?? "";
+      const mailed = await issued(port, mara);
+
+      // David's link is copied. From it he can't turn the switch on: that is what it guards.
+      const copied = await issueVoteLinks(port, mara, { now: LATER, only: f.david.id, copy: true });
+      if (copied.kind !== "issued") throw new Error(copied.kind);
+      const davidCopied = await resolveVoteLink(port, tokenOf(copied.links, f.david.id), LATER);
+      if (davidCopied === null) throw new Error("expected link");
+      for (const arrival of [davidCopied.arrival, null])
+        expect(await setThreadOwnAnswersOnly(port, davidCopied.access, { on: true, arrival })).toBe(
+          "forbidden",
+        );
+
+      // Ana turns hers on from her mailed link: nobody copies hers now.
+      const anaMailed = await resolveVoteLink(port, tokenOf(mailed.links, f.ana.id), LATER);
+      if (anaMailed === null) throw new Error("expected link");
+      expect(
+        await setThreadOwnAnswersOnly(port, anaMailed.access, {
+          on: true,
+          arrival: anaMailed.arrival,
+        }),
+      ).toBe("saved");
+      expect(
+        (await f.as(f.mara.id)).members.find((m) => m.personId === f.ana.id)?.ownAnswersOnly,
+      ).toBe(true);
+      const copyAna = await issueVoteLinks(port, mara, { now: LATER, only: f.ana.id, copy: true });
+      expect(copyAna).toMatchObject({ kind: "issued", links: [] });
+      expect(await resolveVoteLink(port, tokenOf(mailed.links, f.ana.id), LATER)).not.toBeNull();
+
+      // David, signed in, turns his on and off: his copied link is gone for good.
+      const david = await f.as(f.david.id);
+      expect(await setThreadOwnAnswersOnly(port, david, { on: true, arrival: SIGNED_IN })).toBe(
+        "saved",
+      );
+      expect(await resolveVoteLink(port, tokenOf(copied.links, f.david.id), LATER)).toBeNull();
+      await setThreadOwnAnswersOnly(port, david, { on: false, arrival: SIGNED_IN });
+      expect(await resolveVoteLink(port, tokenOf(copied.links, f.david.id), LATER)).toBeNull();
+      expect(
+        (await f.as(f.mara.id)).members.find((m) => m.personId === f.david.id)?.ownAnswersOnly,
+      ).toBe(false);
+
+      // A link from before rc42 recorded its origin doesn't vote as Ana while hers is on.
+      await port.batch([
+        {
+          sql: "UPDATE plan_vote_token SET origin = NULL WHERE thread_id = ? AND person_id = ?",
+          params: [f.threadId, f.ana.id],
+        },
+      ]);
+      expect(await resolveVoteLink(port, tokenOf(mailed.links, f.ana.id), LATER)).toBeNull();
+      // Off, that link works again; on and off once more, it was withdrawn and stays dead.
+      const asAna = await f.as(f.ana.id);
+      await setThreadOwnAnswersOnly(port, asAna, { on: false, arrival: SIGNED_IN });
+      expect(await resolveVoteLink(port, tokenOf(mailed.links, f.ana.id), LATER)).not.toBeNull();
+      await setThreadOwnAnswersOnly(port, asAna, { on: true, arrival: SIGNED_IN });
+      await setThreadOwnAnswersOnly(port, asAna, { on: false, arrival: SIGNED_IN });
+      expect(await resolveVoteLink(port, tokenOf(mailed.links, f.ana.id), LATER)).toBeNull();
+      await setThreadOwnAnswersOnly(port, asAna, { on: true, arrival: SIGNED_IN });
+
+      // The agreed time's event carries each member's switch.
+      const [plan = ""] = (await listPlans(port, mara)).map((p) => p.id);
+      expect(
+        (await acceptPlan(port, await f.as(f.mara.id), { planId: plan, now: LATER })).kind,
+      ).toBe("accepted");
+      expect(await ownOnEvent(port, plan)).toEqual({
+        [f.mara.id]: 0,
+        [f.david.id]: 0,
+        [f.ana.id]: 1,
+      });
+    });
+
+    it("a group's default for their own answers comes with its members into a thread (rc42)", async () => {
+      const port = await makePort();
+      const people = await Promise.all(
+        ["mara", "ana", "bea", "carl", "dora"].map((n) =>
+          findOrCreatePerson(port, `vote-${n}-gdef@example.org`, { now: T0 }),
+        ),
+      );
+      const [mara, ana, bea, carl, dora] = people;
+      if (
+        mara === undefined ||
+        ana === undefined ||
+        bea === undefined ||
+        carl === undefined ||
+        dora === undefined
+      )
+        throw new Error("people");
+      const group = await createGroup(port, { name: "Climbers", creatorId: mara.id, now: T0 });
+      const membership = await findGroupForMember(port, group.id, mara.id);
+      if (membership === null) throw new Error("membership");
+      const join = async (p: { id: string; email: string }, visibility: "FULL" | "BUSY") => {
+        const invite = await createInvite(port, membership, {
+          email: p.email,
+          invitedBy: mara.id,
+          editTier: "view",
+          visibility,
+          now: T0,
+        });
+        if (!invite.ok) throw new Error(invite.reason);
+        await acceptInvite(port, invite.token, T0);
+        // Everyone's default is on but Dora's.
+        if (p !== dora) await setDefaultOwnAnswersOnly(port, membership, p.id, true);
+      };
+      await join(ana, "FULL");
+      await join(bea, "BUSY");
+      await join(dora, "FULL");
+      const { threadId, planIds } = await createPollThread(port, {
+        creatorId: mara.id,
+        group: membership,
+        fields: { title: "Crag day", description: null, location: null, allDay: true, tzid: null },
+        candidates: [{ startLocal: "2101-11-21", endLocal: "2101-11-22" }],
+        people: [ana.id, dora.id],
+        now: T0,
+      });
+      const as = async (id: string) => {
+        const a = await findThreadForMember(port, threadId, id);
+        if (a === null) throw new Error("member");
+        return a;
+      };
+      const own = async () =>
+        Object.fromEntries((await as(mara.id)).members.map((m) => [m.personId, m.ownAnswersOnly]));
+      expect(await own()).toEqual({ [mara.id]: false, [ana.id]: true, [dora.id]: false });
+
+      // Carl joins the group afterwards, then the thread by its shared link, signed in: his
+      // default comes with him.
+      await join(carl, "FULL");
+      const share = await issueShareLink(port, await as(mara.id), { now: T0 });
+      if (share.kind !== "issued") throw new Error(share.kind);
+      const q = await resolveShareLink(port, share.token, T0);
+      if (q === null) throw new Error("link");
+      expect((await joinByShareLink(port, q, carl.id, T0)).kind).toBe("joined");
+      expect((await own())[carl.id]).toBe(true);
+
+      // Bea sees only busy time: she wasn't asked, and her event takes her default (rc27).
+      const [plan = ""] = planIds;
+      expect((await acceptPlan(port, await as(mara.id), { planId: plan, now: LATER })).kind).toBe(
+        "accepted",
+      );
+      expect(await ownOnEvent(port, plan)).toEqual({
+        [mara.id]: 0,
+        [ana.id]: 1,
+        [dora.id]: 0,
+        [carl.id]: 1,
+        [bea.id]: 1,
+      });
     });
 
     it("how a vote arrived (rc42): signed in, the emailed link, a copied link and who, or a shared link", async () => {

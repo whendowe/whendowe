@@ -582,6 +582,8 @@ export const planThreadMember = sqliteTable(
     // their account's handle; their address is shown to the others only if show_email = 1.
     handle: text("handle"),
     showEmail: integer("show_email").notNull().default(0),
+    // rc42: "only my own email answers for me" in this thread; the person sets it.
+    ownAnswersOnly: integer("own_answers_only").notNull().default(0),
   },
   (t) => [
     primaryKey({ columns: [t.threadId, t.personId] }),

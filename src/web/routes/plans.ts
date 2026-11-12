@@ -58,6 +58,7 @@ import {
 import {
   issueVoteLinks,
   revokeUndeliveredVoteLink,
+  setThreadOwnAnswersOnly,
   VOTE_LINK_TTL_MS,
 } from "../../plans/vote-link.js";
 import {
@@ -83,6 +84,7 @@ import {
   copiedLink,
   type Html,
   html,
+  ownAnswersForm,
   PLANS_PATH,
   SHARE_BUTTONS,
   shareBox,
@@ -470,9 +472,10 @@ function ownLinksSection(v: View): Html | string {
   if (!open || others.length === 0 || t.organizerId !== v.access.personId) return "";
   return html`<section class="links" id="links"><h3 class="group-h">Their own links</h3>
 <p class="muted small">Each answers as that person. Copy one to send in a chat instead of by email.</p>
-${others.map(
-  (m) =>
-    html`<div class="row"><span><strong>${memberName(m)}</strong></span><form method="post" action="${threadPath(t.id)}/links/copy"><input type="hidden" name="csrf" value="${v.csrf}" /><input type="hidden" name="person" value="${m.personId}" /><button class="link" type="submit">Copy ${memberName(m)}'s link</button></form></div>`,
+${others.map((m) =>
+  m.ownAnswersOnly
+    ? html`<div class="row"><span><strong>${memberName(m)}</strong> <span class="muted">· takes answers only from their own email</span></span></div>`
+    : html`<div class="row"><span><strong>${memberName(m)}</strong></span><form method="post" action="${threadPath(t.id)}/links/copy"><input type="hidden" name="csrf" value="${v.csrf}" /><input type="hidden" name="person" value="${m.personId}" /><button class="link" type="submit">Copy ${memberName(m)}'s link</button></form></div>`,
 )}</section>`;
 }
 
@@ -1221,11 +1224,17 @@ export function registerPlanRoutes(app: Hono<AppEnv>, deps: PlanRouteDeps): void
       `${threadPath(id)}/me`,
       "plan",
     );
+    const own = ownAnswersForm({
+      action: `${threadPath(id)}/own-answers`,
+      hidden: { csrf: me.csrfToken },
+      on: access.members.find((m) => m.personId === access.personId)?.ownAnswersOnly === true,
+      where: "here",
+    });
     return c.html(
       page(
         c,
         access.thread.name,
-        html`${threadPage(v, DAY.test(day) ? day : null, notice)}${appearance}
+        html`${threadPage(v, DAY.test(day) ? day : null, notice)}${appearance}${own}
 <p class="muted"><a href="${threadPath(id)}/leave">Leave this plan</a></p>`,
       ),
       status,
@@ -1348,6 +1357,15 @@ export function registerPlanRoutes(app: Hono<AppEnv>, deps: PlanRouteDeps): void
     const r = await posting(c);
     if (r instanceof Response) return r;
     const personId = typeof r.form.person === "string" ? r.form.person : "";
+    const them = r.access.members.find((m) => m.personId === personId);
+    if (them?.ownAnswersOnly === true)
+      return renderThread(
+        c,
+        r.access,
+        r.me,
+        `${memberName(them)} takes answers only from their own email. You can still email them their link.`,
+        409,
+      );
     const issued = await issueVoteLinks(deps.storage, r.access, {
       now: deps.now(),
       only: personId,
@@ -1432,6 +1450,17 @@ ${
     if (access instanceof Response) return access;
     await leaveThread(deps.storage, access, deps.now());
     return c.redirect(PLANS_PATH, 303);
+  });
+
+  // rc42: the person's own switch, signed in. A mailed vote link sets it too (respond.ts).
+  app.post(`${PLANS_PATH}/:thread/own-answers`, async (c) => {
+    const r = await posting(c);
+    if (r instanceof Response) return r;
+    await setThreadOwnAnswersOnly(deps.storage, r.access, {
+      on: r.form.on === "1",
+      arrival: SIGNED_IN,
+    });
+    return c.redirect(threadPath(r.access.thread.id), 303);
   });
 
   // "You appear here as…" (§10 rc21): membership (gate) is the access check.
