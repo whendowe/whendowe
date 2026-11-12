@@ -982,12 +982,20 @@ export function verifiedLine(event: CanonicalEvent): Html | string {
     : html`<p class="wd-verified"><strong>Answers here are verified:</strong> each person's own email, or signed in.</p>`;
 }
 
+/** rc42: why a verified event isn't deleted for good by one editor. */
+function verifiedKeeps(eventId: string): Html {
+  return html`<h1>Answers here are verified</h1>
+<p>So it stays as the record until everyone on it agrees to remove it — asking them comes in a later release. You can cancel it, and you can leave it.</p>
+<p><a href="${EVENTS_PATH}/${eventId}">← Back</a></p>`;
+}
+
 /** rc42: making an event verified, for its editors. One way for now: off needs everyone. */
 function verifyForm(eventId: string, csrf: string): Html {
   return html`<details class="wd-verify"><summary>Verify answers here</summary>
 <form method="post" action="${EVENTS_PATH}/${eventId}/verify">
   <input type="hidden" name="csrf" value="${csrf}" />
-  <p>From then on an answer counts only from a link sent to that person's own address, or signed in. Nobody can copy a link that answers for someone, and links already copied stop working. Turning it off again will need everyone on it to agree.</p>
+  <p>From then on an answer counts only from a link sent to that person's own address, or signed in. Nobody can copy a link that answers for someone, and links already copied stop working.</p>
+  <p>Everyone on it then sees each person's email address, not only their name. Nobody removes anyone else, it can be kept longer but not shorter, and it can't be deleted. Turning it off, deleting it or keeping it shorter will need everyone on it to agree.</p>
   <p><button type="submit">Verify answers here</button></p>
 </form></details>`;
 }
@@ -996,7 +1004,8 @@ function verifyForm(eventId: string, csrf: string): Html {
 function verifiedField(checked: boolean, groupDefault: boolean): Html {
   return groupDefault
     ? html`<p class="muted">Events from this group are verified: answers count only from each person's own email, or signed in.</p>`
-    : html`<p><label><input type="checkbox" name="verified"${checked ? html` checked` : ""} /> Verified: answers count only from each person's own email, or signed in</label></p>`;
+    : html`<p><label><input type="checkbox" name="verified"${checked ? html` checked` : ""} /> Verified: answers count only from each person's own email, or signed in</label><br />
+  <span class="muted">Everyone on it then sees each other's email addresses, and nobody can remove anyone else.</span></p>`;
 }
 
 /** One edit in the trail, already filtered to the fields this viewer may see. */
@@ -1029,6 +1038,8 @@ function peopleSection(
   const editing = access.participation.editTier === "edit";
   const removable = (p: ParticipantView) =>
     editing &&
+    // rc42: on a verified event people leave by themselves; nobody removes another.
+    event.verifiedAt === null &&
     p.personId !== event.ownerId &&
     !(event.status === "proposed" && p.responseKind === "accept");
   // Their own answer link, to send in a chat instead of by email (rc36).
@@ -1150,13 +1161,20 @@ ${retentionSection({
   ends: "it ends",
   form:
     participation.editTier === "edit"
-      ? { action: `${EVENTS_PATH}/${event.id}/retention`, csrf, note: null }
+      ? {
+          action: `${EVENTS_PATH}/${event.id}/retention`,
+          csrf,
+          note:
+            event.verifiedAt === null
+              ? null
+              : "Answers here are verified: it can be kept longer, not shorter.",
+        }
       : null,
 })}
 <h2>History</h2>
 <ul>${history.map((h) => html`<li>${h.entry}</li>`)}</ul>
 <p class="muted"><a href="${EVENTS_PATH}/${event.id}/leave">Leave this event</a>${
-      participation.editTier === "edit"
+      participation.editTier === "edit" && event.verifiedAt === null
         ? html` · <a href="${EVENTS_PATH}/${event.id}/delete">Delete it for everyone</a>`
         : ""
     }</p>`,
@@ -1548,6 +1566,8 @@ ${pollForm(`/groups/${membership.group.id}/polls`, csrf, values, error, peopleFi
     const allowed = canDelete(access, deps.now());
     if (allowed === "forbidden")
       return c.html(page(c, "Not allowed", html`<h1>Only its editors can delete it</h1>`), 403);
+    if (allowed === "verified")
+      return c.html(page(c, "Not now", verifiedKeeps(access.event.id)), 409);
     if (allowed === "upcoming")
       return c.html(
         page(
@@ -1589,6 +1609,8 @@ ${pollForm(`/groups/${membership.group.id}/polls`, csrf, values, error, peopleFi
           page(c, "Deleting", html`<h1>It will be gone once it's out of everyone's calendars</h1>`),
           202,
         );
+      case "verified":
+        return c.html(page(c, "Not now", verifiedKeeps(access.event.id)), 409);
       default: {
         const unreachable: never = result;
         return unreachable;
@@ -1609,10 +1631,22 @@ ${pollForm(`/groups/${membership.group.id}/polls`, csrf, values, error, peopleFi
     const days = retainDaysSchema.safeParse(form.retain_days);
     if (!days.success)
       return c.html(page(c, "Not saved", html`<h1>Choose one of the periods</h1>`), 400);
-    if (!(await setEventRetention(deps.storage, access, days.data)))
+    const saved = await setEventRetention(deps.storage, access, days.data);
+    if (saved === "forbidden")
       return c.html(
         page(c, "Not allowed", html`<h1>Only the event's editors can change this</h1>`),
         403,
+      );
+    if (saved === "verified")
+      return c.html(
+        await eventPage(
+          c,
+          deps,
+          access,
+          me.csrfToken,
+          "Answers here are verified, so it can be kept longer but not shorter: that will need everyone to agree.",
+        ),
+        409,
       );
     return c.redirect(`${EVENTS_PATH}/${access.event.id}`, 303);
   });
@@ -1862,6 +1896,11 @@ ${pollForm(`/groups/${membership.group.id}/polls`, csrf, values, error, peopleFi
         );
       case "not_taking_part":
         return refused("They aren't taking part.", 409);
+      case "verified":
+        return refused(
+          "Answers here are verified, so nobody removes anyone else. People can leave by themselves.",
+          409,
+        );
     }
   });
 

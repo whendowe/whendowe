@@ -17,6 +17,7 @@ import {
   type ResponseState,
   responseKindSchema,
   responseStateSchema,
+  shownEmailSql,
 } from "./participation.js";
 
 // Responses (MVP-2 slice 2D): attendance and feedback from every tier, and the
@@ -192,7 +193,7 @@ const feedbackRowSchema = shownRowSchema.extend({
  */
 export async function listResponses(storage: StoragePort, access: EventAccess): Promise<Responses> {
   const attendance = await storage.query({
-    sql: `SELECT ep.person_id, p.email, p.display_name, ep.handle, ep.show_email,
+    sql: `SELECT ep.person_id, p.email, p.display_name, ep.handle, ${shownEmailSql("ep")} AS show_email,
                  ep.attendance, ep.responded_at, ep.attendance_via, ep.attendance_via_by
           FROM event_participation ep JOIN person p ON p.id = ep.person_id
           WHERE ep.canonical_event_id = ? AND ep.attendance IS NOT NULL
@@ -200,7 +201,7 @@ export async function listResponses(storage: StoragePort, access: EventAccess): 
     params: [access.event.id],
   });
   const feedback = await storage.query({
-    sql: `SELECT f.person_id, p.email, p.display_name, ep.handle, ep.show_email, f.body,
+    sql: `SELECT f.person_id, p.email, p.display_name, ep.handle, ${shownEmailSql("ep")} AS show_email, f.body,
                  f.created_at, f.answered_via, f.answered_via_by
           FROM event_feedback f JOIN person p ON p.id = f.person_id
             LEFT JOIN event_participation ep
@@ -618,7 +619,7 @@ export async function listRequests(
   access: EventAccess,
 ): Promise<RequestEntry[]> {
   const rows = await storage.query({
-    sql: `SELECT ep.person_id, p.email, p.display_name, ep.handle, ep.show_email,
+    sql: `SELECT ep.person_id, p.email, p.display_name, ep.handle, ${shownEmailSql("ep")} AS show_email,
                  ep.response_kind, ep.response_state, ep.response_state_at,
                  ep.response_state_via, ep.response_state_via_by
           FROM event_participation ep JOIN person p ON p.id = ep.person_id

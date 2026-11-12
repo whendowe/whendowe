@@ -51,6 +51,16 @@ export interface Participation {
   readonly ownAnswersOnly: boolean;
 }
 
+/**
+ * rc42: whether a participant's address is shown, as a SQL expression over their
+ * participation `alias`: their own choice (rc21), except on a verified event, where everyone
+ * on it sees it — a display name alone proves nothing there (DESIGN §10).
+ */
+export function shownEmailSql(alias: string): string {
+  return `CASE WHEN (SELECT ve.verified_at FROM canonical_event ve WHERE ve.id = ${alias}.canonical_event_id) IS NULL
+            THEN ${alias}.show_email ELSE 1 END`;
+}
+
 /** The SQL column list toParticipation reads, aliased `ep`. */
 export const PARTICIPATION_COLUMNS =
   "ep.canonical_event_id, ep.person_id, ep.edit_tier, ep.visibility, ep.attendance, ep.response_kind, ep.response_state, ep.own_answers_only";
@@ -125,7 +135,7 @@ export async function listParticipants(
 ): Promise<ParticipantView[]> {
   const rows = await storage.query({
     sql: `SELECT ${PARTICIPATION_COLUMNS},
-                 p.email, p.display_name, ep.handle, ep.show_email
+                 p.email, p.display_name, ep.handle, ${shownEmailSql("ep")} AS show_email
           FROM event_participation ep JOIN person p ON p.id = ep.person_id
           WHERE ep.canonical_event_id = ?
           ORDER BY ep.edit_tier = 'edit' DESC, ep.created_at, ep.person_id`,
@@ -307,7 +317,9 @@ export type RemoveResult = {
     | "creator"
     | "last_editor"
     | "awaited"
-    | "not_taking_part";
+    | "not_taking_part"
+    /** rc42: on a verified event nobody removes another; people leave by themselves. */
+    | "verified";
 };
 
 /**
@@ -325,6 +337,8 @@ export async function removeParticipant(
   if (access.participation.editTier !== "edit") return { kind: "forbidden" };
   const eventId = access.event.id;
   if (input.personId === access.event.ownerId) return { kind: "creator" };
+  if (access.event.verifiedAt !== null && input.personId !== access.participation.personId)
+    return { kind: "verified" };
   const changeId = (input.newId ?? (() => uuidv7()))();
   const taking = "SELECT 1 FROM event_participation WHERE canonical_event_id = ? AND person_id = ?";
   const anotherEditor = `SELECT 1 FROM event_participation
@@ -412,9 +426,9 @@ export async function listParticipantChanges(
 ): Promise<ParticipantChange[]> {
   const rows = await storage.query({
     sql: `SELECT c.action, c.person_id, p.email AS person_email, p.display_name AS person_name,
-                 px.handle AS person_handle, px.show_email AS person_show_email,
+                 px.handle AS person_handle, ${shownEmailSql("px")} AS person_show_email,
                  c.actor_id, a.email AS actor_email, a.display_name AS actor_name,
-                 ax.handle AS actor_handle, ax.show_email AS actor_show_email, c.created_at
+                 ax.handle AS actor_handle, ${shownEmailSql("ax")} AS actor_show_email, c.created_at
           FROM event_participant_change c JOIN person p ON p.id = c.person_id
             JOIN person a ON a.id = c.actor_id
             LEFT JOIN event_participation px

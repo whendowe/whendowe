@@ -3,13 +3,23 @@ import { describe, expect, it } from "vitest";
 import type { StoragePort } from "../../src/db/port.js";
 import {
   createEvent,
+  deleteEvent,
   type EventAccess,
   editEvent,
+  eventRetention,
   findEventForParticipant,
   listHistory,
+  setCancelled,
+  setEventRetention,
   setVerified,
 } from "../../src/events/event.js";
-import { addParticipant, removeParticipant } from "../../src/events/participation.js";
+import {
+  addParticipant,
+  listParticipantChanges,
+  listParticipants,
+  removeParticipant,
+} from "../../src/events/participation.js";
+import { decideProposal, listProposals, proposeChange } from "../../src/events/proposal.js";
 import {
   acknowledge,
   addFeedback,
@@ -586,6 +596,157 @@ export function runResponsesContract(makePort: () => Promise<StoragePort>): void
       expect((await acknowledge(port, bobAck, { now: T0, arrival: mailedBy })).kind).toBe(
         "recorded",
       );
+    });
+
+    it("verified (rc42): equals — nobody removes another, it isn't deleted or shortened, addresses show", async () => {
+      const port = await makePort();
+      const { dm, membership, ann } = await table(port, "ver-eq");
+      const event = await createEvent(port, {
+        creatorId: dm.id,
+        group: membership,
+        fields: { ...SESSION, startLocal: "2101-01-01T19:00", endLocal: "2101-01-01T23:00" },
+        now: T0,
+      });
+      const asDm = () => access(port, event.id, dm.id);
+      expect(
+        (
+          await addParticipant(port, await asDm(), {
+            email: "resp-carl-ver-eq@example.org",
+            editTier: "edit",
+            visibility: "FULL",
+            now: T0,
+          })
+        ).kind,
+      ).toBe("added");
+      const carl = await findOrCreatePerson(port, "resp-carl-ver-eq@example.org", { now: T0 });
+      const emails = async () =>
+        (await listParticipants(port, event.id)).map((p) => p.shown.email).sort();
+      // Before: addresses are hidden unless their owner shows them (rc21).
+      expect(await emails()).toEqual([null, null, null, null, null]);
+      await setVerified(port, await asDm(), T0);
+
+      // Every participant's address is shown, in each place a name is: people, answers, history.
+      expect(await emails()).toEqual([
+        "resp-ann-ver-eq@example.org",
+        "resp-bob-ver-eq@example.org",
+        "resp-carl-ver-eq@example.org",
+        "resp-dm-ver-eq@example.org",
+        "resp-ghost-ver-eq@example.org",
+      ]);
+      await setAttendance(port, await access(port, event.id, ann), {
+        attendance: "going",
+        now: T0,
+        arrival: SIGNED_IN,
+      });
+      await addFeedback(port, await access(port, event.id, ann), {
+        body: "hi",
+        now: T0,
+        arrival: SIGNED_IN,
+      });
+      const responses = await listResponses(port, await asDm());
+      expect(responses.attendance.map((a) => a.shown.email)).toEqual([
+        "resp-ann-ver-eq@example.org",
+      ]);
+      expect(responses.feedback.map((f) => f.shown.email)).toEqual(["resp-ann-ver-eq@example.org"]);
+      expect((await listHistory(port, await asDm()))[0]?.actor?.email).toBe(
+        "resp-dm-ver-eq@example.org",
+      );
+
+      // A proposal's proposer and decider, and who added whom, show their addresses too.
+      expect(
+        (
+          await addParticipant(port, await asDm(), {
+            email: "resp-dora-ver-eq@example.org",
+            editTier: "propose",
+            visibility: "FULL",
+            now: T0,
+          })
+        ).kind,
+      ).toBe("added");
+      const dora = await findOrCreatePerson(port, "resp-dora-ver-eq@example.org", { now: T0 });
+      const proposed = await proposeChange(port, await access(port, event.id, dora.id), {
+        fields: {
+          ...SESSION,
+          title: "Moved",
+          startLocal: "2101-01-01T19:00",
+          endLocal: "2101-01-01T23:00",
+        },
+        now: T0,
+      });
+      if (proposed.kind !== "proposed") throw new Error(proposed.kind);
+      expect(
+        (await listProposals(port, await asDm())).pending.map((p) => p.proposer.email),
+      ).toEqual(["resp-dora-ver-eq@example.org"]);
+      await decideProposal(port, await asDm(), {
+        proposalId: proposed.id,
+        decision: "accept",
+        now: T0,
+      });
+      expect(
+        (await listProposals(port, await access(port, event.id, dora.id))).mine?.decidedBy?.email,
+      ).toBe("resp-dm-ver-eq@example.org");
+      expect(
+        (await listHistory(port, await asDm())).find((h) => h.proposedBy !== null)?.proposedBy
+          ?.email,
+      ).toBe("resp-dora-ver-eq@example.org");
+      expect(
+        (await listParticipantChanges(port, await asDm())).map((c) => [
+          c.person.email,
+          c.actor.email,
+        ]),
+      ).toContainEqual(["resp-dora-ver-eq@example.org", "resp-dm-ver-eq@example.org"]);
+
+      // Nobody removes anyone else; an editor may still leave by removing themselves.
+      expect(await removeParticipant(port, await asDm(), { personId: ann, now: T0 })).toEqual({
+        kind: "verified",
+      });
+      expect(
+        (
+          await removeParticipant(port, await access(port, event.id, carl.id), {
+            personId: carl.id,
+            now: T0,
+          })
+        ).kind,
+      ).toBe("removed");
+
+      // Not deleted for good, even cancelled and over; not kept shorter; longer is fine.
+      await setCancelled(port, await asDm(), { cancelled: true, now: T0 });
+      expect(await deleteEvent(port, await asDm(), later(1))).toEqual({ kind: "verified" });
+      expect(await eventRetention(port, await asDm())).toBe(365);
+      expect(await setEventRetention(port, await asDm(), 180)).toBe("verified");
+      expect(await eventRetention(port, await asDm())).toBe(365);
+      expect(await setEventRetention(port, await asDm(), 365)).toBe("saved"); // the same: not shorter
+      expect(await setEventRetention(port, await asDm(), 730)).toBe("saved");
+      expect(await eventRetention(port, await asDm())).toBe(730);
+      expect(await setEventRetention(port, await access(port, event.id, ann), 730)).toBe(
+        "forbidden",
+      );
+    });
+
+    it("unverified, an editor still removes, deletes and shortens as before (rc21, rc23)", async () => {
+      const port = await makePort();
+      const { dm, membership, ann } = await table(port, "unver");
+      const event = await createEvent(port, {
+        creatorId: dm.id,
+        group: membership,
+        fields: { ...SESSION, startLocal: "2101-01-01T19:00", endLocal: "2101-01-01T23:00" },
+        now: T0,
+      });
+      const asDm = () => access(port, event.id, dm.id);
+      // A page opened before it was verified can't shorten it after: the statement checks too.
+      const stale = await asDm();
+      await setVerified(port, stale, T0);
+      await setEventRetention(port, stale, 180);
+      expect(await eventRetention(port, await asDm())).toBe(365);
+      await port.batch([
+        { sql: "UPDATE canonical_event SET verified_at = NULL WHERE id = ?", params: [event.id] },
+      ]);
+      expect(await setEventRetention(port, await asDm(), 180)).toBe("saved");
+      expect(await eventRetention(port, await asDm())).toBe(180);
+      expect((await removeParticipant(port, await asDm(), { personId: ann, now: T0 })).kind).toBe(
+        "removed",
+      );
+      expect((await deleteEvent(port, await asDm(), later(1))).kind).toBe("deleted");
     });
 
     it("a group's organizers make its new events verified; members can't (rc42)", async () => {
