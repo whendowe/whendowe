@@ -6,6 +6,7 @@ import type { EventAccess } from "../../events/event.js";
 import { canSee, listParticipants } from "../../events/participation.js";
 import { type Answer, answerSchema } from "../../events/poll.js";
 import {
+  type Arrival,
   type Attendance,
   acknowledge,
   addFeedback,
@@ -28,7 +29,12 @@ import {
   PlanInputError,
 } from "../../plans/plan.js";
 import { memberName, type ThreadAccess } from "../../plans/thread.js";
-import { type IssuedVoteLink, resolveVoteLink, VOTE_LINK_TTL_MS } from "../../plans/vote-link.js";
+import {
+  type IssuedVoteLink,
+  type ResolvedVoteLink,
+  resolveVoteLink,
+  VOTE_LINK_TTL_MS,
+} from "../../plans/vote-link.js";
 import { dayLabel, spanText, whenText } from "../../plans/weeks.js";
 import { type Html, html, type Preview, renderPage } from "../layout.js";
 import { busyAssets, busyAttrs, busyClash, PLAN_STYLE } from "../plan-editor.js";
@@ -327,6 +333,8 @@ async function votePage(
   notice: Html | string,
   /** Whether the signed-in person is the one this link is for: then busy times show (rc41). */
   own: boolean,
+  /** Who copied this link, for the page to say (rc42); null for a mailed or an older link. */
+  givenBy: string | null,
 ): Promise<string> {
   const plans = await listPlans(storage, access);
   const onTable = plans.filter((p) => p.status === "on_table");
@@ -351,9 +359,18 @@ async function votePage(
     html`${PLAN_STYLE}<div class="pl"${busyAttrs(own ? access.thread.tzid : null)}>${notice}<h1>${access.thread.name}</h1>
 ${body}
 ${notes === "" ? "" : html`<h2>Notes</h2>${notes}`}
-<p class="muted">This link is just for you — please don't forward it. No account needed.</p></div>${own ? busyAssets() : ""}`,
+<p class="muted">${
+      givenBy === null ? "" : html`${givenBy} gave you this link, and your answer will say so. `
+    }This link is just for you — please don't forward it. No account needed.</p></div>${own ? busyAssets() : ""}`,
     questionPreview(access.thread.name, onTable),
   );
+}
+
+/** Who copied this vote link, by their name in the thread (rc42); null for a mailed or older link. */
+function voteGivenBy(link: ResolvedVoteLink): string | null {
+  if (link.arrival?.via !== "copied") return null;
+  const by = link.access.members.find((m) => m.personId === link.arrival?.by);
+  return by === undefined ? "Someone" : memberName(by);
 }
 
 /** plan_<id> fields → answers; anything else is ignored. */
@@ -394,6 +411,8 @@ export async function applyAnswers(
   access: ThreadAccess,
   answers: Answers,
   now: string,
+  /** How these votes arrive (rc42). */
+  arrival: Arrival | null,
 ): Promise<{ readonly message: string; readonly status: 400 | 409 } | null> {
   let closed = false;
   let agreed = false;
@@ -407,7 +426,7 @@ export async function applyAnswers(
     }
   }
   for (const [planId, answer] of answers.votes) {
-    const result = await castVote(storage, access, { planId, answer, now });
+    const result = await castVote(storage, access, { planId, answer, now, arrival });
     if (result.kind === "accepted") agreed = true;
     if (result.kind === "closed" || result.kind === "invalid") closed = true;
   }
@@ -497,13 +516,16 @@ export function registerRespondRoutes(app: Hono<AppEnv>, deps: RespondRouteDeps)
   app.get(VOTE_PATH, async (c) => {
     sensitive(c);
     const token = readToken(c.req.query("t"));
-    const access = token === null ? null : await resolveVoteLink(deps.storage, token, deps.now());
-    if (token === null || access === null) return c.html(deadLink(), 404);
+    const link = token === null ? null : await resolveVoteLink(deps.storage, token, deps.now());
+    if (token === null || link === null) return c.html(deadLink(), 404);
+    const { access } = link;
     const notice =
       c.req.query("saved") === "1"
         ? html`<p><strong>Thanks — your vote is saved.</strong> You can change it any time with this link.</p>`
         : "";
-    return c.html(await votePage(deps.storage, access, token, notice, ownLink(c, access)));
+    return c.html(
+      await votePage(deps.storage, access, token, notice, ownLink(c, access), voteGivenBy(link)),
+    );
   });
 
   app.post(VOTE_PATH, async (c) => {
@@ -512,8 +534,9 @@ export function registerRespondRoutes(app: Hono<AppEnv>, deps: RespondRouteDeps)
     const token = readToken(form.t);
     const now = deps.now();
     // Resolved again on the POST: membership is re-checked at the moment of acting.
-    const access = token === null ? null : await resolveVoteLink(deps.storage, token, now);
-    if (token === null || access === null) return c.html(deadLink(), 404);
+    const link = token === null ? null : await resolveVoteLink(deps.storage, token, now);
+    if (token === null || link === null) return c.html(deadLink(), 404);
+    const { access } = link;
     const answers = readAnswers(form);
     const refuse = async (message: string, status: 400 | 409) =>
       c.html(
@@ -523,11 +546,12 @@ export function registerRespondRoutes(app: Hono<AppEnv>, deps: RespondRouteDeps)
           token,
           html`<p class="error">${message}</p>`,
           ownLink(c, access),
+          voteGivenBy(link),
         ),
         status,
       );
     if (answers === null) return refuse("Pick an answer first.", 400);
-    const refused = await applyAnswers(deps.storage, access, answers, now);
+    const refused = await applyAnswers(deps.storage, access, answers, now, link.arrival);
     if (refused !== null) return refuse(refused.message, refused.status);
     const back = new URL(VOTE_PATH, "http://placeholder");
     back.searchParams.set("t", token);

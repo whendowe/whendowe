@@ -1,8 +1,18 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, expect, it } from "vitest";
 import type { StoragePort } from "../../src/db/port.js";
+import { SHARED_LINK, SIGNED_IN } from "../../src/events/response.js";
 import { findOrCreatePerson } from "../../src/people/person.js";
-import { acceptPlan, createPollThread, listPlans } from "../../src/plans/plan.js";
+import {
+  acceptPlan,
+  addDraftEvent,
+  castVote,
+  createPollThread,
+  listPlans,
+  sendDraft,
+  startDraft,
+  suggestTime,
+} from "../../src/plans/plan.js";
 import { createThread, findThreadForMember, leaveThread } from "../../src/plans/thread.js";
 import {
   issueVoteLinks,
@@ -64,8 +74,8 @@ export function runVoteLinksContract(makePort: () => Promise<StoragePort>): void
       expect(r.throttled).toBe(0);
       const david = r.links.find((l) => l.personId === f.david.id);
       const access = await resolveVoteLink(port, david?.token ?? "", LATER);
-      expect(access?.personId).toBe(f.david.id);
-      expect(access?.thread.id).toBe(f.threadId);
+      expect(access?.access.personId).toBe(f.david.id);
+      expect(access?.access.thread.id).toBe(f.threadId);
       expect(await resolveVoteLink(port, "not-a-token", LATER)).toBeNull();
       expect(await resolveVoteLink(port, "", LATER)).toBeNull();
       // Only the hash is kept.
@@ -89,12 +99,124 @@ export function runVoteLinksContract(makePort: () => Promise<StoragePort>): void
       if (copied.kind !== "issued") throw new Error(copied.kind);
       expect(copied.links.map((l) => l.personId)).toEqual([f.david.id]);
       expect(await resolveVoteLink(port, before, LATER)).toBeNull();
-      expect((await resolveVoteLink(port, copied.links[0]?.token ?? "", LATER))?.personId).toBe(
-        f.david.id,
-      );
+      expect(
+        (await resolveVoteLink(port, copied.links[0]?.token ?? "", LATER))?.access.personId,
+      ).toBe(f.david.id);
       // Ana's link is untouched.
       const ana = sent.links.find((l) => l.personId === f.ana.id)?.token ?? "";
-      expect((await resolveVoteLink(port, ana, LATER))?.personId).toBe(f.ana.id);
+      expect((await resolveVoteLink(port, ana, LATER))?.access.personId).toBe(f.ana.id);
+    });
+
+    it("how a vote arrived (rc42): signed in, the emailed link, a copied link and who, or a shared link", async () => {
+      const port = await makePort();
+      const f = await poll(port, "arr");
+      const mara = await f.as(f.mara.id);
+      const [plan = ""] = (await listPlans(port, mara)).map((p) => p.id);
+      const arrivals = async () =>
+        Object.fromEntries(
+          ((await listPlans(port, mara)).find((p) => p.id === plan)?.votes ?? []).map((v) => [
+            v.personId,
+            v.arrival,
+          ]),
+        );
+      // The organizer's own yes, given by making the poll, was given signed in.
+      expect(await arrivals()).toEqual({ [f.mara.id]: { via: "session", by: null } });
+
+      // David votes with the link mailed to him; Ana with one Mara copied for her.
+      const sent = await issued(port, mara);
+      const davids = await resolveVoteLink(
+        port,
+        sent.links.find((l) => l.personId === f.david.id)?.token ?? "",
+        LATER,
+      );
+      const copied = await issueVoteLinks(port, mara, { now: LATER, only: f.ana.id, copy: true });
+      if (copied.kind !== "issued") throw new Error(copied.kind);
+      const anas = await resolveVoteLink(port, copied.links[0]?.token ?? "", LATER);
+      if (davids === null || anas === null) throw new Error("expected links");
+      expect(davids.arrival).toEqual({ via: "mailed", by: null });
+      expect(anas.arrival).toEqual({ via: "copied", by: f.mara.id });
+      for (const link of [davids, anas])
+        await castVote(port, link.access, {
+          planId: plan,
+          answer: "ifneedbe",
+          now: LATER,
+          arrival: link.arrival,
+        });
+      expect(await arrivals()).toEqual({
+        [f.mara.id]: { via: "session", by: null },
+        [f.david.id]: { via: "mailed", by: null },
+        [f.ana.id]: { via: "copied", by: f.mara.id },
+      });
+
+      // A new vote replaces the label with its own: Ana signed in, David as a shared link's guest would.
+      await castVote(port, await f.as(f.ana.id), {
+        planId: plan,
+        answer: "no",
+        now: LATER,
+        arrival: SIGNED_IN,
+      });
+      await castVote(port, davids.access, {
+        planId: plan,
+        answer: "no",
+        now: LATER,
+        arrival: SHARED_LINK,
+      });
+      expect(await arrivals()).toMatchObject({
+        [f.ana.id]: { via: "session", by: null },
+        [f.david.id]: { via: "shared", by: null },
+      });
+
+      // Mailing Ana a link after the hour makes hers a mailed one, naming nobody.
+      const NOON = "2101-10-01T12:00:00.000Z"; // past the resend hour since the copy
+      const again = await issueVoteLinks(port, mara, { now: NOON, only: f.ana.id });
+      if (again.kind !== "issued") throw new Error(again.kind);
+      expect((await resolveVoteLink(port, again.links[0]?.token ?? "", NOON))?.arrival).toEqual({
+        via: "mailed",
+        by: null,
+      });
+
+      // A link from before rc42 has no origin: a vote by it stores that nothing was recorded.
+      await port.batch([
+        {
+          sql: "UPDATE plan_vote_token SET origin = NULL WHERE thread_id = ? AND person_id = ?",
+          params: [f.threadId, f.ana.id],
+        },
+      ]);
+      const old = await resolveVoteLink(port, again.links[0]?.token ?? "", NOON);
+      if (old === null) throw new Error("expected link");
+      expect(old.arrival).toBeNull();
+      await castVote(port, old.access, { planId: plan, answer: "yes", now: NOON, arrival: null });
+      expect((await arrivals())[f.ana.id]).toBeNull();
+    });
+
+    it("a time someone suggests, and a draft someone sends, carry their signed-in yes (rc42)", async () => {
+      const port = await makePort();
+      const f = await poll(port, "arr2");
+      const david = await f.as(f.david.id);
+      const [first] = await listPlans(port, david);
+      const suggested = await suggestTime(port, david, {
+        planId: first?.id ?? "",
+        startLocal: "2101-11-28",
+        endLocal: "2101-11-29",
+        now: LATER,
+      });
+      if (suggested.kind !== "suggested") throw new Error(suggested.kind);
+      await startDraft(port, david, { fromId: null, rest: false, replace: false, now: LATER });
+      await addDraftEvent(port, david, {
+        title: "Walk",
+        allDay: true,
+        startLocal: "2101-12-05",
+        endLocal: "2101-12-06",
+        who: [],
+        now: LATER,
+      });
+      const sentDraft = await sendDraft(port, david, { now: LATER });
+      if (sentDraft.kind !== "sent") throw new Error(sentDraft.kind);
+      const plans = await listPlans(port, david);
+      for (const id of [suggested.planId, sentDraft.planId])
+        expect(plans.find((p) => p.id === id)?.votes).toMatchObject([
+          { personId: f.david.id, answer: "yes", arrival: { via: "session", by: null } },
+        ]);
     });
 
     it("only the organizer sends them, and only while something is on the table", async () => {

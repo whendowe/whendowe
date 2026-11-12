@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+
 import { describe, expect, it } from "vitest";
+import { SIGNED_IN } from "../../src/events/response.js";
 import { MailCapReachedError } from "../../src/mail/capped.js";
 import { LOGIN_REQUESTS_PER_WINDOW } from "../../src/people/login.js";
 import { findOrCreatePerson } from "../../src/people/person.js";
@@ -184,6 +186,10 @@ describe("the shared link's page (rc25, rc29)", () => {
     expect(await votesOf(org, f.threadId, kestrel)).toEqual(["yes", "yes"]);
     const members = await member(org, f.threadId, f.mara.id);
     expect(members.members).toHaveLength(3);
+    // The organizer reads that Kestrel's answer came by the shared link (rc42).
+    expect(
+      await (await org.request(`${PLANS_PATH}/${f.threadId}/p/${first?.id}`)).text(),
+    ).toContain('Kestrel yes <span class="muted">· by a shared link</span></span>');
   });
 
   it("“Not you?” forgets the claim on this browser; the name stays taken", async () => {
@@ -256,6 +262,10 @@ describe("the shared link's page (rc25, rc29)", () => {
     const res = await ana.request(SHARE_PATH, post({ t, csrf, [`plan_${plan?.id}`]: "yes" }));
     expect(res.status).toBe(303);
     expect(await votesOf(org, f.threadId, anaP.id)).toEqual(["yes", null]);
+    // Signed in, it is her own answer: no label, though it came through the shared link's page.
+    const shown = await (await org.request(`${PLANS_PATH}/${f.threadId}/p/${plan?.id}`)).text();
+    expect(shown.match(/<span class="vote yes">/g)).toHaveLength(2); // Mara's and Ana's
+    expect(shown).not.toContain("· by a shared link");
     expect(await (await ana.request(path)).text()).toContain("Answering as <strong>");
     // A refused answer comes back on the account's page, not a guest's.
     const refused = await ana.request(
@@ -436,6 +446,7 @@ describe("the shared link's page (rc25, rc29)", () => {
       planId: f.planIds[0] ?? "",
       answer: "yes",
       now: NOW,
+      arrival: SIGNED_IN,
     });
     expect(agreed.kind).toBe("accepted");
     const page = await (await b.request(`${PLANS_PATH}/${f.threadId}`)).text();

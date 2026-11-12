@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { z } from "zod";
 import type { StoragePort } from "../db/port.js";
-import { RESPONSE_RESEND_INTERVAL_MS } from "../events/response.js";
+import { type Arrival, arrivalOf, RESPONSE_RESEND_INTERVAL_MS } from "../events/response.js";
 import { hashToken, issueToken } from "../people/tokens.js";
 import { findThreadForMember, type ThreadAccess } from "./thread.js";
 
@@ -77,13 +77,23 @@ export async function issueVoteLinks(
   for (const r of recipients) {
     const issued = await (input.newToken ?? issueToken)();
     const stored = await storage.query({
-      sql: `INSERT INTO plan_vote_token (token_hash, thread_id, person_id, expires_at, created_at)
-            VALUES (?, ?, ?, ?, ?)
+      sql: `INSERT INTO plan_vote_token (token_hash, thread_id, person_id, expires_at, created_at, origin, issued_by)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (thread_id, person_id) DO UPDATE
-              SET token_hash = excluded.token_hash, expires_at = excluded.expires_at, created_at = excluded.created_at
+              SET token_hash = excluded.token_hash, expires_at = excluded.expires_at, created_at = excluded.created_at,
+                origin = excluded.origin, issued_by = excluded.issued_by
               WHERE plan_vote_token.created_at <= ?
             RETURNING person_id`,
-      params: [issued.hash, access.thread.id, r.person_id, expiresAt, input.now, resendCutoff],
+      params: [
+        issued.hash,
+        access.thread.id,
+        r.person_id,
+        expiresAt,
+        input.now,
+        input.copy === true ? "copied" : "mailed",
+        input.copy === true ? access.personId : null,
+        resendCutoff,
+      ],
     });
     if (stored.length === 1)
       links.push({
@@ -112,10 +122,21 @@ export async function revokeUndeliveredVoteLink(
   ]);
 }
 
-const tokenRowSchema = z.object({ thread_id: z.string(), person_id: z.string() });
+const tokenRowSchema = z.object({
+  thread_id: z.string(),
+  person_id: z.string(),
+  origin: z.string().nullable(),
+  issued_by: z.string().nullable(),
+});
+
+export interface ResolvedVoteLink {
+  readonly access: ThreadAccess;
+  /** How a vote by this link arrives (rc42); null for a link from before it was recorded. */
+  readonly arrival: Arrival | null;
+}
 
 /**
- * The thread as the link's person sees it, or null — for unknown, replaced and expired
+ * The thread as the link's person sees it and how a vote by it arrives, or null — for unknown, replaced and expired
  * links alike, and for someone no longer in the thread. Read-only: the page (GET) and
  * the vote (POST) both call this, so the POST re-checks at the moment of acting.
  */
@@ -123,13 +144,14 @@ export async function resolveVoteLink(
   storage: StoragePort,
   token: string,
   now: string,
-): Promise<ThreadAccess | null> {
+): Promise<ResolvedVoteLink | null> {
   if (token === "") return null;
   const rows = await storage.query({
-    sql: "SELECT thread_id, person_id FROM plan_vote_token WHERE token_hash = ? AND expires_at > ?",
+    sql: "SELECT thread_id, person_id, origin, issued_by FROM plan_vote_token WHERE token_hash = ? AND expires_at > ?",
     params: [await hashToken(token), now],
   });
   if (rows[0] === undefined) return null;
   const row = tokenRowSchema.parse(rows[0]);
-  return findThreadForMember(storage, row.thread_id, row.person_id);
+  const access = await findThreadForMember(storage, row.thread_id, row.person_id);
+  return access === null ? null : { access, arrival: arrivalOf(row.origin, row.issued_by) };
 }

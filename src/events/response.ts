@@ -34,19 +34,21 @@ export const FEEDBACK_PER_PERSON_PER_EVENT = 50;
 
 /**
  * How an answer arrived (DESIGN §10 rc42): signed in, by the link we mailed to the person's
- * address, or by a link an organizer copied (rc36) — and then who copied it, unless they have
- * been erased since. Stored beside the answer and shown with it; it stops nothing.
+ * address, by a link an organizer copied (rc36) — and then who copied it, unless they have
+ * been erased since — or, for a vote, as a guest of a thread's shared link (rc25). Stored
+ * beside the answer and shown with it; it stops nothing.
  */
-export const arrivalViaSchema = z.enum(["session", "mailed", "copied"]);
+export const arrivalViaSchema = z.enum(["session", "mailed", "copied", "shared"]);
 export interface Arrival {
   readonly via: z.infer<typeof arrivalViaSchema>;
   /** Who copied the link; null for the other ways, and once that person is gone. */
   readonly by: string | null;
 }
 export const SIGNED_IN: Arrival = { via: "session", by: null };
+export const SHARED_LINK: Arrival = { via: "shared", by: null };
 
 /** What a stored answer says about its arrival; null from before rc42, when it wasn't recorded. */
-function arrivalOf(via: string | null, by: string | null): Arrival | null {
+export function arrivalOf(via: string | null, by: string | null): Arrival | null {
   const parsed = arrivalViaSchema.nullable().parse(via);
   return parsed === null ? null : { via: parsed, by };
 }

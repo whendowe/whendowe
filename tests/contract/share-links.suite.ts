@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+
 import { describe, expect, it } from "vitest";
 import type { StoragePort } from "../../src/db/port.js";
+import { SHARED_LINK, SIGNED_IN } from "../../src/events/response.js";
 import { consumeLoginLink, issueLoginToken } from "../../src/people/login.js";
 import { findOrCreatePerson, setAccountHandle } from "../../src/people/person.js";
 import { addVoteNote } from "../../src/plans/note.js";
@@ -135,7 +137,12 @@ export function runShareLinksContract(makePort: () => Promise<StoragePort>): voi
       // David's yes would have agreed the time with two members; now it is only a vote.
       const [plan] = f.planIds;
       expect(
-        await castVote(port, david, { planId: plan ?? "", answer: "yes", now: LATER }),
+        await castVote(port, david, {
+          planId: plan ?? "",
+          answer: "yes",
+          now: LATER,
+          arrival: SIGNED_IN,
+        }),
       ).toEqual({ kind: "recorded" });
       expect((await acceptPlan(port, david, { planId: plan ?? "", now: LATER })).kind).toBe(
         "forbidden",
@@ -218,7 +225,12 @@ export function runShareLinksContract(makePort: () => Promise<StoragePort>): voi
       expect(await resolveClaim(port, "", f.threadId)).toBeNull();
       // A guest votes like anyone; the organizer still decides.
       expect(
-        await castVote(port, r.access, { planId: f.planIds[0] ?? "", answer: "yes", now: LATER }),
+        await castVote(port, r.access, {
+          planId: f.planIds[0] ?? "",
+          answer: "yes",
+          now: LATER,
+          arrival: SHARED_LINK,
+        }),
       ).toEqual({ kind: "recorded" });
       // And gets no vote link: there is no address to send it to.
       const links = await issueVoteLinks(port, await f.as(f.mara.id), { now: LATER });
@@ -331,7 +343,12 @@ export function runShareLinksContract(makePort: () => Promise<StoragePort>): voi
       const { q } = await shared(port, f);
       const r = await claimed(port, q, "Kestrel");
       const [p0 = ""] = f.planIds;
-      await castVote(port, r.access, { planId: p0, answer: "yes", now: LATER });
+      await castVote(port, r.access, {
+        planId: p0,
+        answer: "yes",
+        now: LATER,
+        arrival: SHARED_LINK,
+      });
       await addVoteNote(port, r.access, { body: "Bringing a kite", now: LATER });
       const ana = await findOrCreatePerson(port, "share-ana-n@example.org", { now: T0 });
       const guest = r.access.personId;
@@ -364,10 +381,15 @@ export function runShareLinksContract(makePort: () => Promise<StoragePort>): voi
       const david = await f.as(f.david.id);
       const r = await claimed(port, q, "Kestrel");
       // p0: David first, the guest later. p1: the guest first, David later.
-      await castVote(port, david, { planId: p0, answer: "no", now: T0 });
-      await castVote(port, r.access, { planId: p0, answer: "yes", now: LATER });
-      await castVote(port, r.access, { planId: p1, answer: "no", now: T0 });
-      await castVote(port, david, { planId: p1, answer: "yes", now: LATER });
+      await castVote(port, david, { planId: p0, answer: "no", now: T0, arrival: SIGNED_IN });
+      await castVote(port, r.access, {
+        planId: p0,
+        answer: "yes",
+        now: LATER,
+        arrival: SHARED_LINK,
+      });
+      await castVote(port, r.access, { planId: p1, answer: "no", now: T0, arrival: SHARED_LINK });
+      await castVote(port, david, { planId: p1, answer: "yes", now: LATER, arrival: SIGNED_IN });
 
       expect(
         (await moveGuest(port, { guestId: r.access.personId, personId: f.david.id })).kind,
@@ -376,6 +398,17 @@ export function runShareLinksContract(makePort: () => Promise<StoragePort>): voi
       expect(await voteOf(port, p1, f.david.id)).toBe("yes");
       expect(await exists(port, r.access.personId)).toBe(false);
       const after = await f.as(f.david.id);
+      // An answer that moved keeps how it arrived (rc42): the label changes only with a new answer.
+      const moved = await listPlans(port, after);
+      expect(
+        [p0, p1].map(
+          (id) =>
+            moved.find((p) => p.id === id)?.votes.find((v) => v.personId === f.david.id)?.arrival,
+        ),
+      ).toEqual([
+        { via: "shared", by: null },
+        { via: "session", by: null },
+      ]);
       expect(after.members).toHaveLength(2);
       expect(after.members.find((m) => m.personId === f.david.id)?.shown.name).not.toBe("Kestrel");
       // The guest's name is free again.
@@ -389,9 +422,14 @@ export function runShareLinksContract(makePort: () => Promise<StoragePort>): voi
       const [p0 = "", p1 = ""] = f.planIds;
       const david = await f.as(f.david.id);
       const r = await claimed(port, q, "Kestrel");
-      await castVote(port, david, { planId: p0, answer: "no", now: T0 });
-      await castVote(port, r.access, { planId: p0, answer: "ifneedbe", now: T0 });
-      await castVote(port, r.access, { planId: p1, answer: "no", now: T0 });
+      await castVote(port, david, { planId: p0, answer: "no", now: T0, arrival: SIGNED_IN });
+      await castVote(port, r.access, {
+        planId: p0,
+        answer: "ifneedbe",
+        now: T0,
+        arrival: SHARED_LINK,
+      });
+      await castVote(port, r.access, { planId: p1, answer: "no", now: T0, arrival: SHARED_LINK });
 
       await moveGuest(port, { guestId: r.access.personId, personId: f.david.id });
       expect(await voteOf(port, p0, f.david.id)).toBe("ifneedbe");
@@ -401,8 +439,18 @@ export function runShareLinksContract(makePort: () => Promise<StoragePort>): voi
       const s = await shared(port, g);
       const [g0 = "", g1 = ""] = g.planIds;
       const k = await claimed(port, s.q, "Wren");
-      await castVote(port, await g.as(g.david.id), { planId: g1, answer: "yes", now: T0 });
-      await castVote(port, k.access, { planId: g0, answer: "no", now: LATER });
+      await castVote(port, await g.as(g.david.id), {
+        planId: g1,
+        answer: "yes",
+        now: T0,
+        arrival: SIGNED_IN,
+      });
+      await castVote(port, k.access, {
+        planId: g0,
+        answer: "no",
+        now: LATER,
+        arrival: SHARED_LINK,
+      });
       await moveGuest(port, { guestId: k.access.personId, personId: g.david.id });
       expect(await voteOf(port, g0, g.david.id)).toBe("no");
       expect(await voteOf(port, g1, g.david.id)).toBe("yes");
@@ -519,7 +567,12 @@ export function runShareLinksContract(makePort: () => Promise<StoragePort>): voi
       const { q } = await shared(port, f);
       const r = await claimed(port, q, "Kestrel");
       const [p0 = ""] = f.planIds;
-      await castVote(port, r.access, { planId: p0, answer: "yes", now: LATER });
+      await castVote(port, r.access, {
+        planId: p0,
+        answer: "yes",
+        now: LATER,
+        arrival: SHARED_LINK,
+      });
       await addVoteNote(port, r.access, { body: "Bringing a kite", now: LATER });
       const own = await f.as(f.mara.id);
       expect(own.members.map((m) => m.guest)).toEqual([false, false, true]);

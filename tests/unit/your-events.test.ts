@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+
 import { expect, it } from "vitest";
+import { SIGNED_IN } from "../../src/events/response.js";
 import { findOrCreatePerson } from "../../src/people/person.js";
 import { castVote, createPollThread } from "../../src/plans/plan.js";
 import { findThreadForMember } from "../../src/plans/thread.js";
@@ -150,7 +152,12 @@ it("one list of what is being decided: threads waiting for you, then the rest (r
   const done = await thread("Settled", bob?.id ?? "", [ann?.id ?? ""]);
   const asAnn = await findThreadForMember(b.storage, done.threadId, ann?.id ?? "");
   if (asAnn === null) throw new Error("member");
-  await castVote(b.storage, asAnn, { planId: done.planIds[0] ?? "", answer: "yes", now: NOW });
+  await castVote(b.storage, asAnn, {
+    planId: done.planIds[0] ?? "",
+    answer: "yes",
+    now: NOW,
+    arrival: SIGNED_IN,
+  });
   const text = (await home(b)).text;
   const finding = text.slice(
     text.indexOf("<h2>Finding a time</h2>"),

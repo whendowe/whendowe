@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+
 import { describe, expect, it } from "vitest";
 import { ZodError } from "zod";
 import type { StoragePort } from "../../src/db/port.js";
 import { findEventForParticipant } from "../../src/events/event.js";
 import { PollInputError } from "../../src/events/poll.js";
+import { SIGNED_IN } from "../../src/events/response.js";
 import { createGroup, findGroupForMember, leaveGroup } from "../../src/people/group.js";
 import { findOrCreatePerson } from "../../src/people/person.js";
 import {
@@ -111,7 +113,9 @@ export function runPollPlansContract(makePort: () => Promise<StoragePort>): void
         expect(p.events).toHaveLength(1);
         expect(p.events[0]?.location).toBe("The park");
         expect(p.events[0]?.description).toBe("Bring a cake");
-        expect(p.votes).toEqual([{ personId: f.mara.id, answer: "yes", respondedAt: T0 }]);
+        expect(p.votes).toEqual([
+          { personId: f.mara.id, answer: "yes", respondedAt: T0, arrival: SIGNED_IN },
+        ]);
       }
       // "Suggest changes…" from one keeps its place and notes.
       const david = await gate(port, threadId, f.david.id);
@@ -139,9 +143,21 @@ export function runPollPlansContract(makePort: () => Promise<StoragePort>): void
       const access = await gate(port, threadId, david.id);
       const [a, b, c] = planIds;
       expect(
-        (await castVote(port, access, { planId: a ?? "", answer: "ifneedbe", now: T1 })).kind,
+        (
+          await castVote(port, access, {
+            planId: a ?? "",
+            answer: "ifneedbe",
+            now: T1,
+            arrival: SIGNED_IN,
+          })
+        ).kind,
       ).toBe("recorded");
-      const agreed = await castVote(port, access, { planId: b ?? "", answer: "yes", now: T2 });
+      const agreed = await castVote(port, access, {
+        planId: b ?? "",
+        answer: "yes",
+        now: T2,
+        arrival: SIGNED_IN,
+      });
       expect(agreed).toEqual({ kind: "accepted", replaced: [a, c] });
       const plans = await listPlans(port, access);
       expect(plans.map((p) => p.status)).toEqual(["replaced", "accepted", "replaced"]);
@@ -164,9 +180,16 @@ export function runPollPlansContract(makePort: () => Promise<StoragePort>): void
       expect(String(log?.diff)).toContain("Bring a cake");
       expect(String(log?.diff)).toContain("The park");
       // A vote after it's decided lands nowhere.
-      expect((await castVote(port, access, { planId: c ?? "", answer: "yes", now: T2 })).kind).toBe(
-        "closed",
-      );
+      expect(
+        (
+          await castVote(port, access, {
+            planId: c ?? "",
+            answer: "yes",
+            now: T2,
+            arrival: SIGNED_IN,
+          })
+        ).kind,
+      ).toBe("closed");
     });
 
     it("in a group, the organizer accepts; busy-only members who were there get the result", async () => {
@@ -275,7 +298,9 @@ export function runPollPlansContract(makePort: () => Promise<StoragePort>): void
       const [only = ""] = yes.planIds;
       expect(yes.planIds).toHaveLength(1);
       const asDavid = await gate(port, yes.threadId, david.id);
-      expect(await castVote(port, asDavid, { planId: only, answer: "yes", now: T1 })).toEqual({
+      expect(
+        await castVote(port, asDavid, { planId: only, answer: "yes", now: T1, arrival: SIGNED_IN }),
+      ).toEqual({
         kind: "accepted",
         replaced: [],
       });
@@ -283,9 +308,10 @@ export function runPollPlansContract(makePort: () => Promise<StoragePort>): void
       const no = await one([ana.id]);
       const [first = ""] = no.planIds;
       const asAna = await gate(port, no.threadId, ana.id);
-      expect((await castVote(port, asAna, { planId: first, answer: "no", now: T1 })).kind).toBe(
-        "recorded",
-      );
+      expect(
+        (await castVote(port, asAna, { planId: first, answer: "no", now: T1, arrival: SIGNED_IN }))
+          .kind,
+      ).toBe("recorded");
       const sunday = { startLocal: "2101-11-22", endLocal: "2101-11-23" };
       expect((await suggestTime(port, asAna, { planId: first, ...sunday, now: T2 })).kind).toBe(
         "suggested",
@@ -309,7 +335,14 @@ export function runPollPlansContract(makePort: () => Promise<StoragePort>): void
       expect(decidesByConsensus(access)).toBe(false);
       // A yes again, as from the plan page: still only a vote.
       expect(
-        (await castVote(port, access, { planId: planIds[0] ?? "", answer: "yes", now: T1 })).kind,
+        (
+          await castVote(port, access, {
+            planId: planIds[0] ?? "",
+            answer: "yes",
+            now: T1,
+            arrival: SIGNED_IN,
+          })
+        ).kind,
       ).toBe("recorded");
       const plans = await listPlans(port, access);
       expect(plans.every((p) => p.status === "on_table")).toBe(true);
@@ -508,7 +541,14 @@ export function runPollPlansContract(makePort: () => Promise<StoragePort>): void
       ).rejects.toBeInstanceOf(ZodError);
       const asMara = await gate(port, threadId, mara.id);
       expect(
-        (await castVote(port, asMara, { planId: result.planId, answer: "yes", now: T2 })).kind,
+        (
+          await castVote(port, asMara, {
+            planId: result.planId,
+            answer: "yes",
+            now: T2,
+            arrival: SIGNED_IN,
+          })
+        ).kind,
       ).toBe("accepted");
     });
   });
