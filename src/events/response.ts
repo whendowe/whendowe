@@ -48,7 +48,7 @@ export const SIGNED_IN: Arrival = { via: "session", by: null };
 /** What a stored answer says about its arrival; null from before rc42, when it wasn't recorded. */
 function arrivalOf(via: string | null, by: string | null): Arrival | null {
   const parsed = arrivalViaSchema.nullable().parse(via);
-  return parsed === null ? null : { via: parsed, by: parsed === "copied" ? by : null };
+  return parsed === null ? null : { via: parsed, by };
 }
 
 export type ResponseResult =

@@ -335,7 +335,10 @@ export function runResponsesContract(makePort: () => Promise<StoragePort>): void
         now: T0,
         arrival: old.arrival,
       });
-      expect((await arrivals()).attendance[ann]).toBeNull();
+      await addFeedback(port, old.access, { body: "old link", now: T0, arrival: old.arrival });
+      const after = await arrivals();
+      expect(after.attendance[ann]).toBeNull();
+      expect(after.notes.at(-1)).toEqual([ann, null]);
     });
 
     it("agreeing and acknowledging record how they arrived too (rc42)", async () => {
@@ -397,6 +400,53 @@ export function runResponsesContract(makePort: () => Promise<StoragePort>): void
         (await acknowledge(port, second.access, { now: later(1), arrival: second.arrival })).kind,
       ).toBe("recorded");
       expect((await byPerson())[ann]).toEqual(["accepted", { via: "mailed", by: null }]);
+
+      // Bob looks again with a link the DM copied: who copied it is kept here too.
+      const forBob = await issueResponseLinks(port, await access(port, asked.id, dm.id), {
+        now: later(1),
+        only: bob,
+        copy: true,
+      });
+      if (forBob.kind !== "issued") throw new Error(forBob.kind);
+      const bobLink = await resolveResponseLink(port, forBob.links[0]?.token ?? "", later(1));
+      if (bobLink === null) throw new Error("expected link");
+      await acknowledge(port, bobLink.access, { now: later(1), arrival: bobLink.arrival });
+      expect((await byPerson())[bob]).toEqual(["accepted", { via: "copied", by: dm.id }]);
+
+      // With nothing recorded (a link from before rc42), each stores that, over what was there.
+      await editEvent(port, await access(port, asked.id, dm.id), {
+        fields: { ...SESSION, startLocal: "2101-10-20T21:00" },
+        actorId: dm.id,
+        now: T0,
+      });
+      expect(
+        (
+          await acknowledge(port, await access(port, asked.id, bob), {
+            now: later(2),
+            arrival: null,
+          })
+        ).kind,
+      ).toBe("recorded");
+      expect((await byPerson())[bob]).toEqual(["accepted", null]);
+      const fresh = await createEvent(port, {
+        creatorId: dm.id,
+        group: membership,
+        fields: SESSION,
+        requests: new Map([[ann, "accept"]]),
+        now: T0,
+      });
+      expect(
+        (
+          await answerProposal(port, await access(port, fresh.id, ann), {
+            answer: "accept",
+            now: T0,
+            arrival: null,
+          })
+        ).kind,
+      ).toBe("recorded");
+      expect(
+        (await listRequests(port, await access(port, fresh.id, dm.id))).map((r) => r.arrival),
+      ).toEqual([null]);
     });
 
     it("an organizer issues vote links to everyone asked to agree — not themself, not the others", async () => {

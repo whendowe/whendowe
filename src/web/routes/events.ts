@@ -145,12 +145,7 @@ export function arrivalNote(
   const mine = subjectId === viewerId;
   if (arrival.via === "mailed")
     return html` <span class="muted">· by ${mine ? "your" : "their"} emailed link</span>`;
-  const by =
-    arrival.by === null
-      ? "someone"
-      : arrival.by === viewerId
-        ? "you"
-        : (names.get(arrival.by) ?? "someone");
+  const by = arrival.by === viewerId ? "you" : (names.get(arrival.by ?? "") ?? "someone");
   return html` <span class="muted">· by the link ${by} copied for ${mine ? "you" : "them"}</span>`;
 }
 

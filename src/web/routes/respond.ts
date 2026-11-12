@@ -221,9 +221,9 @@ ${form}
 /** Who copied this link, for the page to say (rc42); null for a mailed or an older link. */
 async function givenBy(storage: StoragePort, link: ResolvedLink): Promise<string | null> {
   if (link.arrival?.via !== "copied") return null;
-  const by = link.arrival.by;
-  const people = by === null ? [] : await listParticipants(storage, link.access.event.id);
-  return people.find((p) => p.personId === by)?.shown.name ?? "Someone";
+  const people = await listParticipants(storage, link.access.event.id);
+  const names = new Map(people.map((p) => [p.personId, p.shown.name]));
+  return names.get(link.arrival.by ?? "") ?? "Someone";
 }
 
 // --- A thread's vote link (DESIGN §10 rc26) ---------------------------------------------
