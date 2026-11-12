@@ -220,6 +220,8 @@ export const session = sqliteTable(
     createdAt: text("created_at").notNull(),
     expiresAt: text("expires_at").notNull(),
     revokedAt: text("revoked_at"),
+    // rc42: how it was made (magic | google | invite). A record, not a gate; NULL = before rc42.
+    via: text("via"),
   },
   (t) => [index("session_person_idx").on(t.personId)],
 );

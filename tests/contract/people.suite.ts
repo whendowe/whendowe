@@ -139,9 +139,9 @@ export function runPeopleContract(makePort: () => Promise<StoragePort>): void {
         issueLoginToken(port, "clock@example.org", { now: "not-a-date" }),
       ).rejects.toThrow(/invalid `now`/);
       const person = await findOrCreatePerson(port, "clock2@example.org", { now: T0 });
-      await expect(createSession(port, person.id, { now: "not-a-date" })).rejects.toThrow(
-        /invalid `now`/,
-      );
+      await expect(
+        createSession(port, person.id, { now: "not-a-date", via: "magic" }),
+      ).rejects.toThrow(/invalid `now`/);
     });
   });
 
@@ -149,7 +149,7 @@ export function runPeopleContract(makePort: () => Promise<StoragePort>): void {
     it("resolves a fresh session to its person, storing only the hash", async () => {
       const port = await makePort();
       const person = await findOrCreatePerson(port, "sess@example.org", { now: T0 });
-      const s = await createSession(port, person.id, { now: T0 });
+      const s = await createSession(port, person.id, { now: T0, via: "magic" });
       expect((await resolveSession(port, s.token, { now: at(1) }))?.personId).toBe(person.id);
       const rows = await port.query({
         sql: "SELECT token_hash FROM session WHERE id = ?",
@@ -161,7 +161,7 @@ export function runPeopleContract(makePort: () => Promise<StoragePort>): void {
     it("rejects unknown, expired and revoked sessions", async () => {
       const port = await makePort();
       const person = await findOrCreatePerson(port, "dead@example.org", { now: T0 });
-      const s = await createSession(port, person.id, { now: T0 });
+      const s = await createSession(port, person.id, { now: T0, via: "magic" });
       expect(await resolveSession(port, "not-a-session", { now: at(1) })).toBeNull();
       expect(await resolveSession(port, s.token, { now: at(31 * 24 * 60) })).toBeNull(); // 30-day TTL
       await revokeSession(port, s.token, at(2));
@@ -172,9 +172,9 @@ export function runPeopleContract(makePort: () => Promise<StoragePort>): void {
       const port = await makePort();
       const me = await findOrCreatePerson(port, "everywhere@example.org", { now: T0 });
       const them = await findOrCreatePerson(port, "bystander@example.org", { now: T0 });
-      const a = await createSession(port, me.id, { now: T0 });
-      const b = await createSession(port, me.id, { now: T0 });
-      const c = await createSession(port, them.id, { now: T0 });
+      const a = await createSession(port, me.id, { now: T0, via: "magic" });
+      const b = await createSession(port, me.id, { now: T0, via: "magic" });
+      const c = await createSession(port, them.id, { now: T0, via: "magic" });
       await revokeAllSessions(port, me.id, at(1));
       expect(await resolveSession(port, a.token, { now: at(2) })).toBeNull();
       expect(await resolveSession(port, b.token, { now: at(2) })).toBeNull();
@@ -185,9 +185,9 @@ export function runPeopleContract(makePort: () => Promise<StoragePort>): void {
       const port = await makePort();
       const ann = await findOrCreatePerson(port, "acc-ann@example.org", { now: T0 });
       const bob = await findOrCreatePerson(port, "acc-bob@example.org", { now: T0 });
-      const a = await createSession(port, ann.id, { now: T0 });
-      const b = await createSession(port, bob.id, { now: T0 });
-      const gone = await createSession(port, bob.id, { now: T0 });
+      const a = await createSession(port, ann.id, { now: T0, via: "magic" });
+      const b = await createSession(port, bob.id, { now: T0, via: "magic" });
+      const gone = await createSession(port, bob.id, { now: T0, via: "magic" });
       await revokeSession(port, gone.token, at(1));
       let reads = 0;
       const counting: StoragePort = {
@@ -217,8 +217,8 @@ export function runPeopleContract(makePort: () => Promise<StoragePort>): void {
     it("issues a CSRF token bound to the session", async () => {
       const port = await makePort();
       const person = await findOrCreatePerson(port, "csrf@example.org", { now: T0 });
-      const s = await createSession(port, person.id, { now: T0 });
-      const other = await createSession(port, person.id, { now: T0 });
+      const s = await createSession(port, person.id, { now: T0, via: "magic" });
+      const other = await createSession(port, person.id, { now: T0, via: "magic" });
       const resolved = await resolveSession(port, s.token, { now: at(1) });
       if (resolved === null) throw new Error("expected session");
       expect(await verifyCsrf(s.token, resolved.csrfToken)).toBe(true);

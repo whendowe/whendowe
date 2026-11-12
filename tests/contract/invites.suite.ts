@@ -11,6 +11,7 @@ import {
   type Visibility,
 } from "../../src/people/invite.js";
 import { findOrCreatePerson, findPersonByEmail, guestName } from "../../src/people/person.js";
+import { createSession } from "../../src/people/session.js";
 
 // Invites on BOTH drivers. Residue-tolerant: each test uses its own addresses.
 
@@ -107,11 +108,57 @@ export function runInvitesContract(makePort: () => Promise<StoragePort>): void {
           // Named as the group sees them, never by address (§10 rc21).
           inviter: { name: guestName(membership.group.id, organizerId), email: null },
           email: "i-once@example.org",
+          newcomer: true,
         });
       }
       expect(await acceptInvite(port, invite.token, at(2))).not.toBeNull();
       expect(await acceptInvite(port, invite.token, at(3))).toBeNull();
       expect(await peekInvite(port, invite.token, at(3))).toBeNull();
+    });
+
+    it("only an address that has never signed in is a newcomer, and accepting signs no one in (rc42)", async () => {
+      const port = await makePort();
+      const { membership, organizerId } = await groupOf(port, "i-dm42@example.org");
+      const invite = async (email: string) => {
+        const made = await createInvite(port, membership, {
+          email,
+          invitedBy: organizerId,
+          now: T0,
+          ...viewFull,
+        });
+        if (!made.ok) throw new Error(made.reason);
+        return made.token;
+      };
+      const sessions = async (personId: string) =>
+        (
+          await port.query({
+            sql: "SELECT count(*) AS n FROM session WHERE person_id = ?",
+            params: [personId],
+          })
+        )[0]?.n;
+
+      // A person who exists but has never signed in (added to an event by address) is new.
+      const added = await findOrCreatePerson(port, "i-added@example.org", { now: T0 });
+      const addedToken = await invite("i-added@example.org");
+      expect((await peekInvite(port, addedToken, at(1)))?.newcomer).toBe(true);
+      expect(await acceptInvite(port, addedToken, at(1))).toEqual({
+        groupId: membership.group.id,
+        groupName: "Table",
+        personId: added.id,
+        newcomer: true,
+      });
+
+      // An account that has signed in is not, before accepting or by it.
+      const known = await findOrCreatePerson(port, "i-known@example.org", { now: T0 });
+      await createSession(port, known.id, { now: T0, via: "magic" });
+      const knownToken = await invite("i-known@example.org");
+      expect((await peekInvite(port, knownToken, at(1)))?.newcomer).toBe(false);
+      const accepted = await acceptInvite(port, knownToken, at(2));
+      expect(accepted).toMatchObject({ personId: known.id, newcomer: false });
+      // Joined all the same, and nothing here made a session.
+      expect(await findGroupForMember(port, membership.group.id, known.id)).not.toBeNull();
+      expect(await sessions(known.id)).toBe(1);
+      expect(await sessions(added.id)).toBe(0);
     });
 
     it("concurrent accepts succeed exactly once", async () => {

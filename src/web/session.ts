@@ -8,6 +8,7 @@ import {
   resolveAccounts,
   revokeSession,
   SESSION_TTL_MS,
+  type SessionVia,
   verifyCsrf,
 } from "../people/session.js";
 import { csrfTokenFor } from "../people/tokens.js";
@@ -124,11 +125,13 @@ export async function signInAs(
   c: Context<AppEnv>,
   deps: SessionDeps,
   personId: string,
+  /** How this sign-in was proved (rc42), kept on the session. */
+  via: SessionVia,
 ): Promise<boolean> {
   const accounts = c.get("accounts");
   if (!canAdd(accounts, personId)) return false;
   const now = deps.now();
-  const session = await createSession(deps.storage, personId, { now });
+  const session = await createSession(deps.storage, personId, { now, via });
   const resolved = await resolveAccounts(deps.storage, [session.token], { now });
   const fresh = resolved[0];
   if (fresh === undefined) throw new Error("a new session did not resolve");

@@ -122,14 +122,17 @@ const peekSchema = z.object({
   inviter_handle: z.string().nullable(),
   inviter_show_email: z.number().nullable(),
   email: z.string(),
+  newcomer: z.number(),
 });
 
 export interface InvitePreview {
   readonly groupName: string;
   /** As the group sees the inviter (DESIGN §10 rc21). */
   readonly inviter: Shown;
-  /** The account accepting will sign the browser into. */
+  /** The address invited. */
   readonly email: string;
+  /** Whether that address has never signed in: only then does accepting sign it in (rc42). */
+  readonly newcomer: boolean;
 }
 
 /** What a still-valid invite would do, WITHOUT using it (the GET page; mail scanners). */
@@ -141,7 +144,9 @@ export async function peekInvite(
   const rows = await storage.query({
     sql: `SELECT g.name AS group_name, g.id AS group_id, i.invited_by, p.email AS inviter_email,
                  p.display_name AS inviter_name, m.handle AS inviter_handle,
-                 m.show_email AS inviter_show_email, i.email
+                 m.show_email AS inviter_show_email, i.email,
+                 NOT EXISTS (SELECT 1 FROM person a
+                             WHERE a.email = i.email AND a.signed_in_at IS NOT NULL) AS newcomer
           FROM group_invite i
           JOIN person_group g ON g.id = i.group_id
           JOIN person p ON p.id = i.invited_by
@@ -164,6 +169,7 @@ export async function peekInvite(
       r.group_id,
     ),
     email: r.email,
+    newcomer: r.newcomer === 1,
   };
 }
 
@@ -176,13 +182,20 @@ const acceptedSchema = z.object({
 
 export interface AcceptedInvite {
   readonly groupId: string;
+  readonly groupName: string;
   readonly personId: string;
+  /**
+   * The address had never signed in (rc42): the invite may sign it in, as there is nothing
+   * else in the account to protect. An account that has signed in before is joined only.
+   */
+  readonly newcomer: boolean;
 }
 
 /**
  * Use an invite: exactly once (UPDATE … WHERE unused AND unexpired RETURNING), then
  * create the person if new and add them as a member. Re-joining is harmless:
  * ON CONFLICT DO NOTHING keeps an existing membership, and its role, as it was.
+ * Never signs anyone in: the caller does, and only a newcomer (rc42).
  */
 export async function acceptInvite(
   storage: StoragePort,
@@ -207,5 +220,15 @@ export async function acceptInvite(
       params: [invite.group_id, person.id, invite.edit_tier, invite.visibility, now],
     },
   ]);
-  return { groupId: invite.group_id, personId: person.id };
+  const seen = await storage.query({
+    sql: `SELECT g.name, p.signed_in_at FROM person p, person_group g WHERE p.id = ? AND g.id = ?`,
+    params: [person.id, invite.group_id],
+  });
+  const row = z.object({ name: z.string(), signed_in_at: z.string().nullable() }).parse(seen[0]);
+  return {
+    groupId: invite.group_id,
+    groupName: row.name,
+    personId: person.id,
+    newcomer: row.signed_in_at === null,
+  };
 }

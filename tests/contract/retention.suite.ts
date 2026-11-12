@@ -227,7 +227,7 @@ export function runRetentionContract(makePort: () => Promise<StoragePort>): void
       await issueLoginToken(port, lena.email, { now: T0 });
       // Older rows elsewhere, so each sweep runs while Lena's are still too new for it.
       await issueLoginToken(port, "ret-old@example.org", { now: "2101-10-30T10:00:00.000Z" });
-      await createSession(port, lena.id, { now: T0 });
+      await createSession(port, lena.id, { now: T0, via: "magic" });
       const invite = await createInvite(port, membership, {
         email: "ret-guest@example.org",
         invitedBy: lena.id,

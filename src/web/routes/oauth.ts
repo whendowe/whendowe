@@ -565,7 +565,7 @@ ${offerEmailLink(email)}`,
     const known = await findPersonByEmail(auth.storage, email);
     if (!roomFor(c, known?.id ?? null)) return tooManyAccounts(c);
     const person = await findOrCreatePerson(auth.storage, email, { now: auth.now() });
-    if (!(await signInAs(c, auth, person.id))) return tooManyAccounts(c);
+    if (!(await signInAs(c, auth, person.id, "google"))) return tooManyAccounts(c);
     return c.redirect("/", 303);
   }
 }

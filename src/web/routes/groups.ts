@@ -35,6 +35,7 @@ import {
   verifyFormCsrf,
 } from "../session.js";
 import { appearanceSection, saveAppearance } from "./account.js";
+import { SIGN_IN_PATH } from "./auth.js";
 import { eventSummary } from "./events.js";
 import { feedSection, sharedLinksSection } from "./feeds.js";
 
@@ -413,9 +414,11 @@ ${inviteForm(membership, me.csrfToken, notice)}`,
         html`<h1>Join “${preview.groupName}”?</h1>
 <p><strong>${preview.inviter.name}</strong> invited <strong>${preview.email}</strong>.</p>
 ${
-  signedIn !== null && signedIn.email !== preview.email
+  signedIn !== null && signedIn.email !== preview.email && preview.newcomer
     ? html`<p class="muted">You're signed in as ${signedIn.email}. Joining also signs this browser in as ${preview.email}, and you can switch between them from the menu at the top.</p>`
-    : html`<p class="muted">Joining also signs you in as ${preview.email}.</p>`
+    : preview.newcomer
+      ? html`<p class="muted">Joining also signs you in as ${preview.email}.</p>`
+      : html`<p class="muted">Joining adds ${preview.email} to the group. To see it, you then sign in as that address.</p>`
 }
 <form method="post" action="${INVITE_PATH}">
   <input type="hidden" name="t" value="${token}" />
@@ -436,8 +439,20 @@ ${
     // Sign the browser in as the invited account too (§13 rc18): it joins this browser's
     // accounts, the others stay. With four others already here the invite still counts,
     // but signing in waits until there is room.
-    const current = c.get("signedIn");
-    if (current?.personId !== accepted.personId && !(await signInAs(c, deps, accepted.personId))) {
+    const here = c.get("accounts").some((a) => a.personId === accepted.personId);
+    // An account that has signed in before is joined, never signed in (rc42): a forwarded or
+    // week-old invite must not open what that account already holds. The group was shown on
+    // the invite's own page, so naming it tells the link's holder nothing new.
+    if (!here && !accepted.newcomer)
+      return c.html(
+        page(
+          c,
+          "Joined",
+          html`<h1>You've joined “${accepted.groupName}”</h1>
+<p><a href="${SIGN_IN_PATH}">Sign in</a> to see it.</p>`,
+        ),
+      );
+    if (!here && !(await signInAs(c, deps, accepted.personId, "invite"))) {
       return c.html(
         page(
           c,

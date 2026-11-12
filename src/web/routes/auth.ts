@@ -299,7 +299,7 @@ export function registerAuthRoutes(
     if (used === null) return c.html(expiredPage(c), 400);
 
     const person = await findOrCreatePerson(deps.storage, used.email, { now });
-    if (!(await signInAs(c, deps, person.id))) return tooManyAccounts(c);
+    if (!(await signInAs(c, deps, person.id, "magic"))) return tooManyAccounts(c);
     // Confirm with email (rc30): the link carries the guest, and using it moves its answers.
     if (used.guestId !== null) {
       const moved = await moveGuest(deps.storage, { guestId: used.guestId, personId: person.id });
