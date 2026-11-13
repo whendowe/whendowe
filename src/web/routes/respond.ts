@@ -245,6 +245,13 @@ async function givenBy(storage: StoragePort, link: ResolvedLink): Promise<string
   return names.get(link.arrival.by ?? "") ?? "Someone";
 }
 
+/** rc42: the line a verified thread's pages carry. */
+export function threadVerifiedLine(t: Pick<ThreadAccess["thread"], "verifiedAt">): Html | string {
+  return t.verifiedAt === null
+    ? ""
+    : html`<p class="wd-verified"><strong>Answers here are verified:</strong> each person's own email, or signed in.</p>`;
+}
+
 // --- A thread's vote link (DESIGN §10 rc26) ---------------------------------------------
 
 /** Notes on days (rc28), attributed by the author's name in the thread; bodies escaped. */
@@ -352,14 +359,15 @@ async function votePage(
   mailed: boolean,
 ): Promise<string> {
   const plans = await listPlans(storage, access);
-  const ownSwitch = mailed
-    ? ownAnswersForm({
-        action: `${VOTE_PATH}/own-answers`,
-        hidden: { t: token },
-        on: access.members.find((m) => m.personId === access.personId)?.ownAnswersOnly === true,
-        where: "here",
-      })
-    : "";
+  const ownSwitch =
+    mailed && access.thread.verifiedAt === null
+      ? ownAnswersForm({
+          action: `${VOTE_PATH}/own-answers`,
+          hidden: { t: token },
+          on: access.members.find((m) => m.personId === access.personId)?.ownAnswersOnly === true,
+          where: "here",
+        })
+      : "";
   const onTable = plans.filter((p) => p.status === "on_table");
   const names = new Map(access.members.map((m) => [m.personId, memberName(m)]));
   const notes = noteList(await listNotes(storage, access), (id) => names.get(id) ?? "someone");
@@ -379,7 +387,7 @@ async function votePage(
   return linkPage(
     "Your vote",
     // The plan pages' look (rc19), so a link page and a plan page answer alike.
-    html`${PLAN_STYLE}<div class="pl"${busyAttrs(own ? access.thread.tzid : null)}>${notice}<h1>${access.thread.name}</h1>
+    html`${PLAN_STYLE}<div class="pl"${busyAttrs(own ? access.thread.tzid : null)}>${notice}<h1>${access.thread.name}</h1>${threadVerifiedLine(access.thread)}
 ${body}
 ${notes === "" ? "" : html`<h2>Notes</h2>${notes}`}
 ${ownSwitch}
@@ -452,7 +460,8 @@ export async function applyAnswers(
   for (const [planId, answer] of answers.votes) {
     const result = await castVote(storage, access, { planId, answer, now, arrival });
     if (result.kind === "accepted") agreed = true;
-    if (result.kind === "closed" || result.kind === "invalid") closed = true;
+    if (result.kind === "closed" || result.kind === "invalid" || result.kind === "forbidden")
+      closed = true;
   }
   // A yes here that agreed a time replaced the rest of its question: not a refusal.
   return closed && !agreed

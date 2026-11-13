@@ -23,6 +23,8 @@ export interface Thread {
   readonly groupId: string | null;
   /** When a shared link was first made (rc29); set, the organizer decides. */
   readonly sharedAt: string | null;
+  /** rc42: when it was made verified — votes only from a mailed link or signed in. */
+  readonly verifiedAt: string | null;
 }
 
 export interface ThreadMember {
@@ -109,11 +111,14 @@ export async function createThread(
     readonly memberIds: readonly string[];
     /** The group it is started from, if any (rc27): the caller has proven membership. */
     readonly groupId?: string | null;
+    /** rc42: made verified; a group whose organizers set its default makes it so anyway. */
+    readonly verified?: boolean;
     readonly now: string;
     readonly newId?: () => string;
   },
 ): Promise<Thread> {
-  const { thread, statements } = threadStatements(input);
+  const verified = await verifiedAtBirth(storage, input.groupId ?? null, input.verified === true);
+  const { thread, statements } = threadStatements({ ...input, verified });
   await storage.batch(statements);
   return thread;
 }
@@ -130,6 +135,8 @@ export function threadStatements(input: {
   readonly groupId?: string | null;
   /** A poll may start with nobody else in it, to be shared in a group chat (rc29). */
   readonly alone?: boolean;
+  /** rc42: verified from birth — already decided, with the group's default (verifiedAtBirth). */
+  readonly verified: boolean;
   readonly now: string;
   readonly newId?: () => string;
 }): { readonly thread: Thread; readonly statements: SqlStatement[] } {
@@ -141,8 +148,17 @@ export function threadStatements(input: {
   const id = (input.newId ?? (() => uuidv7()))();
   const statements: SqlStatement[] = [
     {
-      sql: "INSERT INTO plan_thread (id, name, organizer_id, tzid, created_at, group_id) VALUES (?, ?, ?, ?, ?, ?)",
-      params: [id, name, input.creatorId, input.tzid, input.now, input.groupId ?? null],
+      sql: `INSERT INTO plan_thread (id, name, organizer_id, tzid, created_at, group_id, verified_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      params: [
+        id,
+        name,
+        input.creatorId,
+        input.tzid,
+        input.now,
+        input.groupId ?? null,
+        input.verified ? input.now : null,
+      ],
     },
     ...[input.creatorId, ...others].map((personId) => ({
       sql: `INSERT INTO plan_thread_member (thread_id, person_id, created_at, own_answers_only)
@@ -158,8 +174,52 @@ export function threadStatements(input: {
     createdAt: input.now,
     groupId: input.groupId ?? null,
     sharedAt: null,
+    verifiedAt: input.verified ? input.now : null,
   };
   return { thread, statements };
+}
+
+/** Whether a new thread is verified (rc42): asked to be, or its group's organizers say so. */
+export async function verifiedAtBirth(
+  storage: StoragePort,
+  groupId: string | null,
+  asked: boolean,
+): Promise<boolean> {
+  if (asked) return true;
+  if (groupId === null) return false;
+  const rows = await storage.query({
+    sql: "SELECT default_verified FROM person_group WHERE id = ?",
+    params: [groupId],
+  });
+  return rows[0]?.default_verified === 1;
+}
+
+/**
+ * Make a thread verified (DESIGN §10 rc42): votes count only from a link mailed to the
+ * person or signed in, and nobody joins by its shared link. Whoever decides it may. Its
+ * copied vote links (and those from before rc42 recorded how they were made) and its shared
+ * link go in the same batch; a guest already in stays listed and can no longer vote.
+ */
+export async function setThreadVerified(
+  storage: StoragePort,
+  access: ThreadAccess,
+  now: string,
+): Promise<"verified" | "already" | "forbidden"> {
+  if (!deciders(access).includes(access.personId)) return "forbidden";
+  const threadId = access.thread.id;
+  await storage.batch([
+    {
+      sql: "UPDATE plan_thread SET verified_at = ? WHERE id = ? AND verified_at IS NULL",
+      params: [now, threadId],
+    },
+    {
+      sql: `DELETE FROM plan_vote_token
+            WHERE thread_id = ? AND (origin IS NULL OR origin <> 'mailed')`,
+      params: [threadId],
+    },
+    { sql: "DELETE FROM share_link WHERE thread_id = ?", params: [threadId] },
+  ]);
+  return access.thread.verifiedAt === null ? "verified" : "already";
 }
 
 const threadRowSchema = z.object({
@@ -170,6 +230,7 @@ const threadRowSchema = z.object({
   created_at: z.string(),
   group_id: z.string().nullable(),
   shared_at: z.string().nullable(),
+  verified_at: z.string().nullable(),
 });
 
 const memberRowSchema = shownRowSchema.extend({
@@ -188,6 +249,7 @@ function toThread(row: unknown): Thread {
     createdAt: r.created_at,
     groupId: r.group_id,
     sharedAt: r.shared_at,
+    verifiedAt: r.verified_at,
   };
 }
 
@@ -198,7 +260,7 @@ export async function findThreadForMember(
   personId: string,
 ): Promise<ThreadAccess | null> {
   const rows = await storage.query({
-    sql: `SELECT t.id, t.name, t.organizer_id, t.tzid, t.created_at, t.group_id, t.shared_at
+    sql: `SELECT t.id, t.name, t.organizer_id, t.tzid, t.created_at, t.group_id, t.shared_at, t.verified_at
           FROM plan_thread t JOIN plan_thread_member m ON m.thread_id = t.id
           WHERE t.id = ? AND m.person_id = ?`,
     params: [threadId, personId],
@@ -214,8 +276,11 @@ export async function threadMembers(
 ): Promise<ThreadMember[]> {
   return (
     await storage.query({
-      sql: `SELECT m.person_id, p.email, p.display_name, m.handle, m.show_email, p.guest_at,
-              m.own_answers_only
+      // rc42: in a verified thread everyone in it sees each member's address.
+      sql: `SELECT m.person_id, p.email, p.display_name, m.handle,
+              CASE WHEN (SELECT t.verified_at FROM plan_thread t WHERE t.id = m.thread_id) IS NULL
+                THEN m.show_email ELSE 1 END AS show_email,
+              p.guest_at, m.own_answers_only
             FROM plan_thread_member m JOIN person p ON p.id = m.person_id
             WHERE m.thread_id = ? ORDER BY m.created_at, m.person_id`,
       params: [threadId],
@@ -237,7 +302,7 @@ export async function findThreadById(
   threadId: string,
 ): Promise<Thread | null> {
   const rows = await storage.query({
-    sql: "SELECT id, name, organizer_id, tzid, created_at, group_id, shared_at FROM plan_thread WHERE id = ?",
+    sql: "SELECT id, name, organizer_id, tzid, created_at, group_id, shared_at, verified_at FROM plan_thread WHERE id = ?",
     params: [threadId],
   });
   return rows[0] === undefined ? null : toThread(rows[0]);
@@ -262,7 +327,7 @@ export async function listThreadsFor(
   personId: string,
 ): Promise<ThreadSummary[]> {
   const rows = await storage.query({
-    sql: `SELECT t.id, t.name, t.organizer_id, t.tzid, t.created_at, t.group_id, t.shared_at,
+    sql: `SELECT t.id, t.name, t.organizer_id, t.tzid, t.created_at, t.group_id, t.shared_at, t.verified_at,
             (SELECT count(*) FROM plan_thread_member c WHERE c.thread_id = t.id) AS member_count,
             (SELECT count(*) FROM plan p WHERE p.thread_id = t.id AND p.status = 'on_table'
                AND NOT EXISTS (SELECT 1 FROM plan_vote v WHERE v.plan_id = p.id AND v.person_id = ?)) AS waiting,

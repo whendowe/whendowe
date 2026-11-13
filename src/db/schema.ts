@@ -570,6 +570,8 @@ export const planThread = sqliteTable("plan_thread", {
   // rc29: when a shared link was first made. Set, the organizer decides however few
   // members there are, and it stays set, so who decides can't change between two votes.
   sharedAt: text("shared_at"),
+  // rc42: verified — votes count only from a mailed link or signed in. Null = not verified.
+  verifiedAt: text("verified_at"),
 });
 
 export const planThreadMember = sqliteTable(

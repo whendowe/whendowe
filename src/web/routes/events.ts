@@ -813,6 +813,8 @@ ${button(event.id, "acknowledge", csrf, again ? "I've seen the change" : "Seen i
 
 interface PollFormValues extends FormValues {
   readonly slots: readonly { readonly start: string; readonly end: string }[];
+  /** rc42: a verified poll. */
+  readonly verified: boolean;
 }
 
 const POLL_ROWS = 5;
@@ -822,7 +824,7 @@ function readPollForm(form: Record<string, unknown>): PollFormValues {
     start: str(form, `start_${i}`),
     end: str(form, `end_${i}`),
   }));
-  return { ...readForm(form), slots };
+  return { ...readForm(form), slots, verified: form.verified === "on" };
 }
 
 function pollForm(
@@ -1000,12 +1002,20 @@ function verifyForm(eventId: string, csrf: string): Html {
 </form></details>`;
 }
 
-/** rc42: on a new event, whether it is verified; fixed when its group's organizers say so. */
-function verifiedField(checked: boolean, groupDefault: boolean): Html {
+/**
+ * rc42: on a new event, poll or plan, whether it is verified; fixed when its group's
+ * organizers say so. A poll or plan verified has no shared link, so no guests.
+ */
+export function verifiedField(
+  checked: boolean,
+  groupDefault: boolean,
+  what: "event" | "poll" | "plan" = "event",
+): Html {
+  const these = what === "event" ? "Events" : what === "poll" ? "Polls" : "Plans";
   return groupDefault
-    ? html`<p class="muted">Events from this group are verified: answers count only from each person's own email, or signed in.</p>`
+    ? html`<p class="muted">${these} from this group are verified: answers count only from each person's own email, or signed in.</p>`
     : html`<p><label><input type="checkbox" name="verified"${checked ? html` checked` : ""} /> Verified: answers count only from each person's own email, or signed in</label><br />
-  <span class="muted">Everyone on it then sees each other's email addresses, and nobody can remove anyone else.</span></p>`;
+  <span class="muted">Everyone on it then sees each other's email addresses, and nobody can remove anyone else.${what === "event" ? "" : " It can't be shared by a link."}</span></p>`;
 }
 
 /** One edit in the trail, already filtered to the fields this viewer may see. */
@@ -1408,7 +1418,7 @@ ${eventForm(`${EVENTS_PATH}/${access.event.id}`, me.csrfToken, v, html`<input ty
   });
 
   /** The new-poll page, for a group (its members included) or for people by email alone. */
-  const newPollPage = (
+  const newPollPage = async (
     c: Context<AppEnv>,
     csrf: string,
     membership: GroupMembership | null,
@@ -1422,10 +1432,10 @@ ${eventForm(`${EVENTS_PATH}/${access.event.id}`, me.csrfToken, v, html`<input ty
       membership === null
         ? html`<p><a href="/">← Your events</a></p>
 <h1>Find a time</h1>
-${pollForm(POLLS_PATH, csrf, values, error, peopleFieldset(rows, false, POLL_ALONE, false))}`
+${pollForm(POLLS_PATH, csrf, values, error, html`${peopleFieldset(rows, false, POLL_ALONE, false)}${verifiedField(values.verified, false, "poll")}`)}`
         : html`<p><a href="/groups/${membership.group.id}">← ${membership.group.name}</a></p>
 <h1>Find a time with ${membership.group.name}</h1>
-${pollForm(`/groups/${membership.group.id}/polls`, csrf, values, error, peopleFieldset(rows, false, pollLeadFor(membership), false))}`,
+${pollForm(`/groups/${membership.group.id}/polls`, csrf, values, error, html`${peopleFieldset(rows, false, pollLeadFor(membership), false)}${verifiedField(values.verified, await groupDefaultVerified(deps.storage, membership.group.id), "poll")}`)}`,
     );
 
   const createPollFrom = async (c: Context<AppEnv>, groupId: string | null) => {
@@ -1438,8 +1448,8 @@ ${pollForm(`/groups/${membership.group.id}/polls`, csrf, values, error, peopleFi
     if (groupId !== null && membership === null) return c.html(notFound(c), 404);
     const values = readPollForm(form);
     const { rows, bad } = readPeople(form);
-    const again = (error: string) =>
-      c.html(newPollPage(c, me.csrfToken, membership, values, rows, error), 400);
+    const again = async (error: string) =>
+      c.html(await newPollPage(c, me.csrfToken, membership, values, rows, error), 400);
     if (bad.length > 0) return again(badPeople(bad));
     try {
       const input = toPollInput(values);
@@ -1455,6 +1465,7 @@ ${pollForm(`/groups/${membership.group.id}/polls`, csrf, values, error, peopleFi
         fields: input.fields,
         candidates: input.candidates,
         people: people.map((p) => p.personId),
+        verified: values.verified,
         now: deps.now(),
       });
       // Nobody else in it yet: it was made to be shared, so it opens on that step (rc29).
@@ -1466,12 +1477,12 @@ ${pollForm(`/groups/${membership.group.id}/polls`, csrf, values, error, peopleFi
     }
   };
 
-  const NO_POLL: PollFormValues = { ...EMPTY, slots: [] };
+  const NO_POLL: PollFormValues = { ...EMPTY, slots: [], verified: false };
 
-  app.get(`${POLLS_PATH}/new`, (c) => {
+  app.get(`${POLLS_PATH}/new`, async (c) => {
     const me = requireSignedIn(c);
     if (me instanceof Response) return me;
-    return c.html(newPollPage(c, me.csrfToken, null, NO_POLL, [], null));
+    return c.html(await newPollPage(c, me.csrfToken, null, NO_POLL, [], null));
   });
 
   app.post(POLLS_PATH, (c) => createPollFrom(c, null));
@@ -1481,7 +1492,7 @@ ${pollForm(`/groups/${membership.group.id}/polls`, csrf, values, error, peopleFi
     if (me instanceof Response) return me;
     const membership = await findGroupForMember(deps.storage, c.req.param("groupId"), me.personId);
     if (membership === null) return groupNotVisible(c, deps, c.req.param("groupId"));
-    return c.html(newPollPage(c, me.csrfToken, membership, NO_POLL, [], null));
+    return c.html(await newPollPage(c, me.csrfToken, membership, NO_POLL, [], null));
   });
 
   app.post("/groups/:groupId/polls", (c) => createPollFrom(c, c.req.param("groupId")));

@@ -1,14 +1,17 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, expect, it } from "vitest";
 import type { StoragePort } from "../../src/db/port.js";
+import { findEventForParticipant, listHistory } from "../../src/events/event.js";
 import { SHARED_LINK, SIGNED_IN } from "../../src/events/response.js";
 import {
   createGroup,
   findGroupForMember,
   setDefaultOwnAnswersOnly,
+  setGroupDefaultVerified,
 } from "../../src/people/group.js";
 import { acceptInvite, createInvite } from "../../src/people/invite.js";
 import { findOrCreatePerson } from "../../src/people/person.js";
+import { hashToken } from "../../src/people/tokens.js";
 import {
   acceptPlan,
   addDraftEvent,
@@ -19,8 +22,20 @@ import {
   startDraft,
   suggestTime,
 } from "../../src/plans/plan.js";
-import { issueShareLink, joinByShareLink, resolveShareLink } from "../../src/plans/share.js";
-import { createThread, findThreadForMember, leaveThread } from "../../src/plans/thread.js";
+import {
+  claimName,
+  issueShareLink,
+  joinByShareLink,
+  removeGuest,
+  resolveClaim,
+  resolveShareLink,
+} from "../../src/plans/share.js";
+import {
+  createThread,
+  findThreadForMember,
+  leaveThread,
+  setThreadVerified,
+} from "../../src/plans/thread.js";
 import {
   issueVoteLinks,
   resolveVoteLink,
@@ -159,6 +174,16 @@ export function runVoteLinksContract(makePort: () => Promise<StoragePort>): void
       expect(copyAna).toMatchObject({ kind: "issued", links: [] });
       expect(await resolveVoteLink(port, tokenOf(mailed.links, f.ana.id), LATER)).not.toBeNull();
 
+      // As a backstop, a vote that came any other way doesn't count for her.
+      expect(
+        await castVote(port, await f.as(f.ana.id), {
+          planId: (await listPlans(port, mara))[0]?.id ?? "",
+          answer: "no",
+          now: LATER,
+          arrival: { via: "copied", by: f.mara.id },
+        }),
+      ).toEqual({ kind: "forbidden" });
+
       // David, signed in, turns his on and off: his copied link is gone for good.
       const david = await f.as(f.david.id);
       expect(await setThreadOwnAnswersOnly(port, david, { on: true, arrival: SIGNED_IN })).toBe(
@@ -198,6 +223,222 @@ export function runVoteLinksContract(makePort: () => Promise<StoragePort>): void
         [f.david.id]: 0,
         [f.ana.id]: 1,
       });
+    });
+
+    it("a verified thread (rc42): mailed or signed in only, no shared link, guests kept but silent", async () => {
+      const port = await makePort();
+      const f = await poll(port, "ver");
+      const mara = await f.as(f.mara.id);
+      const [plan = ""] = (await listPlans(port, mara)).map((p) => p.id);
+      const tokenOf = (links: readonly { personId: string; token: string }[], who: string) =>
+        links.find((l) => l.personId === who)?.token ?? "";
+      // Before: a guest joins by the shared link and votes; David's link is copied; Ana's mailed.
+      const share = await issueShareLink(port, mara, { now: T0 });
+      if (share.kind !== "issued") throw new Error(share.kind);
+      const q = await resolveShareLink(port, share.token, T0);
+      if (q === null) throw new Error("link");
+      const kestrel = await claimName(port, q, { name: "Kestrel", now: T0 });
+      if (kestrel.kind !== "claimed") throw new Error(kestrel.kind);
+      const mailed = await issued(port, await f.as(f.mara.id));
+      const copied = await issueVoteLinks(port, await f.as(f.mara.id), {
+        now: LATER,
+        only: f.david.id,
+        copy: true,
+      });
+      if (copied.kind !== "issued") throw new Error(copied.kind);
+
+      // A vote link from before rc42 recorded how links were made (the organizer's, standing in).
+      await port.batch([
+        {
+          sql: `INSERT INTO plan_vote_token (token_hash, thread_id, person_id, expires_at, created_at)
+                VALUES ('pre-rc42', ?, ?, ?, ?)`,
+          params: [f.threadId, f.mara.id, HOUR, T0],
+        },
+      ]);
+      const left = async () => ({
+        origins: (
+          await port.query({
+            sql: "SELECT origin FROM plan_vote_token WHERE thread_id = ? ORDER BY origin",
+            params: [f.threadId],
+          })
+        ).map((r) => r.origin),
+        shareLinks: (
+          await port.query({
+            sql: "SELECT 1 AS n FROM share_link WHERE thread_id = ?",
+            params: [f.threadId],
+          })
+        ).length,
+      });
+      expect(await left()).toEqual({
+        origins: [null, "copied", "mailed"],
+        shareLinks: 1,
+      });
+
+      // Only whoever decides verifies it (here the organizer: there are four in it).
+      expect(await setThreadVerified(port, await f.as(f.david.id), LATER)).toBe("forbidden");
+      expect(await setThreadVerified(port, await f.as(f.mara.id), LATER)).toBe("verified");
+      expect(await setThreadVerified(port, await f.as(f.mara.id), HOUR)).toBe("already");
+      const after = await f.as(f.mara.id);
+      expect(after.thread.verifiedAt).toBe(LATER);
+      // What could come back if it were ever turned off is deleted, not just refused.
+      expect(await left()).toEqual({ origins: ["mailed"], shareLinks: 0 });
+      // A shared link that somehow still existed wouldn't open it either.
+      await port.batch([
+        {
+          sql: `INSERT INTO share_link (token_hash, thread_id, created_by, expires_at, created_at)
+                VALUES (?, ?, ?, ?, ?)`,
+          params: [await hashToken(share.token), f.threadId, f.mara.id, HOUR, T0],
+        },
+      ]);
+      expect(await resolveShareLink(port, share.token, LATER)).toBeNull();
+      await port.batch([
+        { sql: "DELETE FROM share_link WHERE thread_id = ?", params: [f.threadId] },
+      ]);
+
+      // The shared link is gone, and can't be made again; the guest is listed, can't answer,
+      // and isn't removed.
+      expect(await resolveShareLink(port, share.token, LATER)).toBeNull();
+      expect(await issueShareLink(port, after, { now: LATER })).toEqual({ kind: "verified" });
+      expect(await resolveClaim(port, kestrel.token, f.threadId)).toBeNull();
+      expect(after.members.some((m) => m.personId === kestrel.access.personId && m.guest)).toBe(
+        true,
+      );
+      expect(await removeGuest(port, after, kestrel.access.personId)).toEqual({ kind: "verified" });
+      // Her page from before can't vote (the statement checks), and as she is now, she's refused.
+      const noVote = { planId: plan, answer: "no", now: LATER, arrival: SHARED_LINK } as const;
+      expect((await castVote(port, kestrel.access, noVote)).kind).toBe("closed");
+      const asNow = await f.as(kestrel.access.personId);
+      expect(await castVote(port, asNow, noVote)).toEqual({ kind: "forbidden" });
+
+      // Vote links: the copied one is gone, nobody's is copied, the mailed one works.
+      expect(await resolveVoteLink(port, tokenOf(copied.links, f.david.id), LATER)).toBeNull();
+      expect(
+        await issueVoteLinks(port, after, { now: LATER, only: f.ana.id, copy: true }),
+      ).toMatchObject({
+        kind: "issued",
+        links: [],
+      });
+      const ana = await resolveVoteLink(port, tokenOf(mailed.links, f.ana.id), LATER);
+      expect(ana?.arrival).toEqual({ via: "mailed", by: null });
+      if (ana === null) throw new Error("link");
+      for (const arrival of [{ via: "copied", by: f.mara.id } as const, null])
+        expect(
+          await castVote(port, ana.access, { planId: plan, answer: "yes", now: LATER, arrival }),
+        ).toEqual({
+          kind: "forbidden",
+        });
+      expect(
+        (
+          await castVote(port, ana.access, {
+            planId: plan,
+            answer: "yes",
+            now: LATER,
+            arrival: ana.arrival,
+          })
+        ).kind,
+      ).toBe("recorded");
+      // A vote link from before rc42 recorded its origin doesn't vote here either.
+      await port.batch([
+        {
+          sql: "UPDATE plan_vote_token SET origin = NULL WHERE thread_id = ? AND person_id = ?",
+          params: [f.threadId, f.ana.id],
+        },
+      ]);
+      expect(await resolveVoteLink(port, tokenOf(mailed.links, f.ana.id), LATER)).toBeNull();
+
+      // Everyone's address shows; what it agrees is a verified event, and its history says so.
+      expect(
+        (await f.as(f.david.id)).members.find((m) => m.personId === f.mara.id)?.shown.email,
+      ).toBe(f.mara.email);
+      expect(
+        (await acceptPlan(port, await f.as(f.mara.id), { planId: plan, now: HOUR })).kind,
+      ).toBe("accepted");
+      const [row] = await port.query({
+        sql: "SELECT canonical_event_id FROM plan_event WHERE plan_id = ?",
+        params: [plan],
+      });
+      const event = await findEventForParticipant(port, String(row?.canonical_event_id), f.ana.id);
+      expect(event?.event.verifiedAt).toBe(HOUR);
+      if (event === null) throw new Error("event");
+      expect((await listHistory(port, event))[0]?.change).toMatchObject({
+        verified: { before: null, after: 1 },
+      });
+    });
+
+    it("a thread starts verified when asked, or from its group's default; otherwise not (rc42)", async () => {
+      const port = await makePort();
+      const people = await Promise.all(
+        ["mara", "ana"].map((n) =>
+          findOrCreatePerson(port, `vote-${n}-vbirth@example.org`, { now: T0 }),
+        ),
+      );
+      const [mara, ana] = people;
+      if (mara === undefined || ana === undefined) throw new Error("people");
+      const group = await createGroup(port, { name: "Board", creatorId: mara.id, now: T0 });
+      const membership = await findGroupForMember(port, group.id, mara.id);
+      if (membership === null) throw new Error("membership");
+      const plain = await createThread(port, {
+        name: "Plain",
+        tzid: "UTC",
+        creatorId: mara.id,
+        memberIds: [ana.id],
+        now: T0,
+      });
+      expect(plain.verifiedAt).toBeNull();
+      const asked = await createThread(port, {
+        name: "Asked",
+        tzid: "UTC",
+        creatorId: mara.id,
+        memberIds: [ana.id],
+        verified: true,
+        now: T0,
+      });
+      expect(asked.verifiedAt).toBe(T0);
+      expect((await findThreadForMember(port, asked.id, mara.id))?.thread.verifiedAt).toBe(T0);
+      const fromGroupOff = await createThread(port, {
+        name: "Off",
+        tzid: "UTC",
+        creatorId: mara.id,
+        memberIds: [ana.id],
+        groupId: group.id,
+        now: T0,
+      });
+      expect(fromGroupOff.verifiedAt).toBeNull();
+      await setGroupDefaultVerified(port, membership, true);
+      const fromGroup = await createThread(port, {
+        name: "On",
+        tzid: "UTC",
+        creatorId: mara.id,
+        memberIds: [ana.id],
+        groupId: group.id,
+        now: T0,
+      });
+      expect(fromGroup.verifiedAt).toBe(T0);
+      const poll = await createPollThread(port, {
+        creatorId: mara.id,
+        group: membership,
+        fields: {
+          title: "Board meeting",
+          description: null,
+          location: null,
+          allDay: true,
+          tzid: null,
+        },
+        candidates: [{ startLocal: "2101-11-21", endLocal: "2101-11-22" }],
+        now: T0,
+      });
+      expect((await findThreadForMember(port, poll.threadId, mara.id))?.thread.verifiedAt).toBe(T0);
+      const loose = await createPollThread(port, {
+        creatorId: mara.id,
+        group: null,
+        fields: { title: "Lunch", description: null, location: null, allDay: true, tzid: null },
+        candidates: [{ startLocal: "2101-11-21", endLocal: "2101-11-22" }],
+        verified: true,
+        now: T0,
+      });
+      expect((await findThreadForMember(port, loose.threadId, mara.id))?.thread.verifiedAt).toBe(
+        T0,
+      );
     });
 
     it("a group's default for their own answers comes with its members into a thread (rc42)", async () => {

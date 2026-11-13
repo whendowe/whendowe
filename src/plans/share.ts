@@ -37,7 +37,9 @@ export type IssueShareLinkResult =
   | { readonly kind: "issued"; readonly token: string; readonly expiresAt: string }
   | { readonly kind: "forbidden" }
   /** Nothing is on the table to vote on. */
-  | { readonly kind: "closed" };
+  | { readonly kind: "closed" }
+  /** rc42: a verified thread takes no guests. */
+  | { readonly kind: "verified" };
 
 /**
  * Make the thread's shared link, replacing any it had (rc25: re-issuing kills the old one).
@@ -51,6 +53,8 @@ export async function issueShareLink(
   input: { readonly now: string; readonly newToken?: typeof issueToken },
 ): Promise<IssueShareLinkResult> {
   if (access.thread.organizerId !== access.personId) return { kind: "forbidden" };
+  // rc42: a verified thread takes no guests, so it has no shared link.
+  if (access.thread.verifiedAt !== null) return { kind: "verified" };
   if (!(await anythingOnTable(storage, access.thread.id))) return { kind: "closed" };
   const issued = await (input.newToken ?? issueToken)();
   const expiresAt = new Date(Date.parse(input.now) + SHARE_LINK_TTL_MS).toISOString();
@@ -124,7 +128,8 @@ export async function resolveShareLink(
   if (row === undefined) return null;
   const threadId = z.object({ thread_id: z.string() }).parse(row).thread_id;
   const thread = await findThreadById(storage, threadId);
-  if (thread === null) return null;
+  // rc42: a verified thread's shared link is gone; this is the backstop.
+  if (thread === null || thread.verifiedAt !== null) return null;
   const names = (await threadMembers(storage, threadId)).map(memberName);
   return { thread, names, open: await anythingOnTable(storage, threadId), tokenHash };
 }
@@ -282,7 +287,9 @@ export async function resolveClaim(
   });
   if (row === undefined) return null;
   const personId = z.object({ person_id: z.string() }).parse(row).person_id;
-  return findThreadForMember(storage, threadId, personId);
+  const access = await findThreadForMember(storage, threadId, personId);
+  // rc42: a guest stays listed in a verified thread, and can no longer answer.
+  return access === null || access.thread.verifiedAt !== null ? null : access;
 }
 
 // The conditions every join carries, so it is decided at the moment of writing.
@@ -404,7 +411,9 @@ export type RemoveGuestResult =
   | { readonly kind: "removed"; readonly name: string }
   | { readonly kind: "forbidden" }
   /** Not a guest in this thread any more: moved to an account, collected or removed. */
-  | { readonly kind: "gone" };
+  | { readonly kind: "gone" }
+  /** rc42: the thread is verified; nobody removes anyone else. */
+  | { readonly kind: "verified" };
 
 /**
  * The organizer removes a guest (rc30): the guest is deleted, its answers, notes and claim
@@ -418,6 +427,8 @@ export async function removeGuest(
   guestId: string,
 ): Promise<RemoveGuestResult> {
   if (access.thread.organizerId !== access.personId) return { kind: "forbidden" };
+  // rc42: in a verified thread nobody removes anyone else, guests included.
+  if (access.thread.verifiedAt !== null) return { kind: "verified" };
   const guest = access.members.find((m) => m.personId === guestId && m.guest);
   if (guest === undefined) return { kind: "gone" };
   const threadId = access.thread.id;
