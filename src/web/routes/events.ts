@@ -80,6 +80,7 @@ import {
   type CapabilityConfig,
   EVERYTHING,
   hasCapability,
+  recentHistory,
   UNAVAILABLE,
 } from "../../people/capability.js";
 import { findGroupForMember, type GroupMembership, listMembers } from "../../people/group.js";
@@ -153,6 +154,30 @@ export interface EventRouteDeps {
   readonly publicBaseUrl: string;
   /** rc43: who may turn verifying on; absent, everyone may. */
   readonly capabilities?: CapabilityConfig;
+}
+
+/**
+ * rc43: the history this viewer sees — the last 90 days, or all of it with `long_history` —
+ * and the one line when anything older was hidden. Shared by the event and thread pages.
+ */
+export function visibleHistory<T extends { readonly at: string }>(
+  entries: readonly T[],
+  now: string,
+  long: boolean,
+): { readonly shown: readonly T[]; readonly note: Html | "" } {
+  const { shown, hidden } = recentHistory(entries, now, long);
+  return {
+    shown,
+    note: hidden === 0 ? "" : html`<p class="muted">${UNAVAILABLE.long_history}</p>`,
+  };
+}
+
+/** rc43: whether this viewer sees history older than 90 days. */
+export function mayLongHistory(
+  deps: { readonly storage: StoragePort; readonly capabilities?: CapabilityConfig },
+  personId: string,
+): Promise<boolean> {
+  return hasCapability(deps.storage, deps.capabilities ?? EVERYTHING, personId, "long_history");
 }
 
 /** rc43: whether this account may turn verifying on (anyone may take part in a verified one). */
@@ -1271,6 +1296,11 @@ async function eventPage(
       }`,
     })),
   ].sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
+  const recent = visibleHistory(
+    history,
+    deps.now(),
+    await mayLongHistory(deps, participation.personId),
+  );
 
   return page(
     c,
@@ -1316,7 +1346,7 @@ ${retentionSection({
       : null,
 })}
 <h2>History</h2>
-<ul>${history.map((h) => html`<li>${h.entry}</li>`)}</ul>
+<ul>${recent.shown.map((h) => html`<li>${h.entry}</li>`)}</ul>${recent.note}
 <p class="muted"><a href="${EVENTS_PATH}/${event.id}/leave">Leave this event</a>${
       participation.editTier === "edit" && event.verifiedAt === null
         ? html` · <a href="${EVENTS_PATH}/${event.id}/delete">Delete it for everyone</a>`
