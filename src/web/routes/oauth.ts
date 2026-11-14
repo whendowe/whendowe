@@ -28,6 +28,7 @@ import {
 } from "../../oauth/identity.js";
 import { createPkcePair, createState, timingSafeEqual } from "../../oauth/pkce.js";
 import {
+  type BusyChoice,
   type CalendarChoice,
   createCalendar,
   fetchPrimaryCalendar,
@@ -38,6 +39,7 @@ import {
 import {
   exchangeAuthorizationCode,
   exchangeForIdToken,
+  refreshAccessToken,
   revokeGoogleGrant,
 } from "../../oauth/token-exchange.js";
 import {
@@ -79,6 +81,8 @@ export const CONNECT_PATH = "/oauth/google/connect";
 export const CALLBACK_PATH = "/oauth/google/callback";
 /** Where a first connection's calendar is chosen (rc40); under /oauth, where its cookie is. */
 export const CHOOSE_PATH = "/oauth/google/calendar";
+/** Where the calendars whose busy times count are changed later (rc41). */
+export const BUSY_PATH = "/oauth/google/busy";
 
 /** The choice that makes a new calendar, and that calendar's name (rc40). */
 const NEW_CALENDAR = "new";
@@ -173,6 +177,20 @@ function result(c: Context<AppEnv>, title: string, body: Html): string {
 const EXPIRED = html`<p>This attempt is no longer valid. Please start again.</p>`;
 
 const NOT_AVAILABLE = html`<p>${UNAVAILABLE.calendar_sync}</p>`;
+
+/** The ticks for whose busy times count (rc41), on connecting and on changing them later. */
+function busyField(busy: readonly BusyChoice[], ticked: (cal: BusyChoice) => boolean): Html {
+  // Calendar names are whatever the account holder typed: untrusted, escaped (§13).
+  return html`<fieldset><legend>Whose busy times should show while you pick a time?</legend>
+  <p class="muted">Only you see them, and only when, never what. The calendars you own are ticked; ones you only follow, like holidays, aren't.</p>
+  ${busy.map(
+    (cal) =>
+      html`<p><label><input type="checkbox" name="busy" value="${cal.id}"${ticked(cal) ? html` checked` : ""} /> ${cal.name}</label></p>`,
+  )}
+  </fieldset>`;
+}
+
+const UNREACHABLE = html`<p>Google didn't answer just now. Please try again in a moment.</p>`;
 
 const EMAIL_LINK = html`<p><a href="${SIGN_IN_PATH}">Sign in with an email link</a></p>`;
 
@@ -408,13 +426,7 @@ ${EMAIL_LINK}`,
   <input type="hidden" name="csrf" value="${me.csrfToken}" />
   <p><label><input type="radio" name="calendar" value="${NEW_CALENDAR}" checked /> A new calendar called <strong>${NEW_CALENDAR_NAME}</strong></label><br /><span class="muted">Its own colour in Google, and easy to hide or remove.</span></p>
   ${calendars.map(option)}
-  <fieldset><legend>Whose busy times should show while you pick a time?</legend>
-  <p class="muted">Only you see them, and only when, never what. The calendars you own are ticked; ones you only follow, like holidays, aren't.</p>
-  ${busy.map(
-    (cal) =>
-      html`<p><label><input type="checkbox" name="busy" value="${cal.id}"${cal.owned ? html` checked` : ""} /> ${cal.name}</label></p>`,
-  )}
-  </fieldset>
+  ${busyField(busy, (cal) => cal.owned)}
   <p><button type="submit">Use this calendar</button></p>
 </form>`,
       ),
@@ -512,6 +524,140 @@ ${EMAIL_LINK}`,
     return c.html(
       result(c, "Calendar connected", html`<p>Connected <strong>${calendar.name}</strong>.</p>`),
     );
+  });
+
+  /**
+   * The signed-in person's active Google connection and an access token for this request
+   * only (rc41): a token about to expire is refreshed and not saved, so a GET writes
+   * nothing. Null with no active connection; throws if Google refuses or doesn't answer.
+   */
+  async function liveConnection(personId: string): Promise<{
+    readonly id: string;
+    readonly calendarId: string;
+    readonly madeByUs: boolean;
+    readonly accessToken: string;
+  } | null> {
+    const [row] = await deps.storage.query(
+      stmt(
+        `SELECT id, calendar_id, made_by_us, access_token_enc, refresh_token_enc, token_expiry
+           FROM calendar_connection WHERE owner_id = ? AND provider = 'google' AND status = 'active'`,
+        personId,
+      ),
+    );
+    if (row === undefined) return null;
+    const conn = z
+      .object({
+        id: z.string(),
+        calendar_id: z.string(),
+        made_by_us: z.number(),
+        access_token_enc: z.string(),
+        refresh_token_enc: z.string(),
+        token_expiry: z.string().nullable(),
+      })
+      .parse(row);
+    const now = deps.now();
+    // A minute's margin, so the token can't expire between here and Google.
+    const fresh =
+      conn.token_expiry !== null &&
+      new Date(conn.token_expiry).getTime() - new Date(now).getTime() > 60_000;
+    const accessToken = fresh
+      ? await deps.cipher.decrypt(conn.access_token_enc)
+      : (
+          await refreshAccessToken({
+            refreshToken: await deps.cipher.decrypt(conn.refresh_token_enc),
+            clientId: deps.clientId,
+            clientSecret: deps.clientSecret,
+            now,
+            fetchImpl: deps.fetchImpl,
+          })
+        ).accessToken;
+    return {
+      id: conn.id,
+      calendarId: conn.calendar_id,
+      madeByUs: conn.made_by_us === 1,
+      accessToken,
+    };
+  }
+
+  /** The calendars that may count: Google's list, never the one WhenDoWe made (rc41). */
+  async function busyChoices(conn: {
+    readonly calendarId: string;
+    readonly madeByUs: boolean;
+    readonly accessToken: string;
+  }) {
+    return (await listBusyCalendars(conn.accessToken, deps.fetchImpl)).filter(
+      (cal) => !(conn.madeByUs && cal.id === conn.calendarId),
+    );
+  }
+
+  const NOT_CONNECTED = html`<p>Connect Google Calendar first, or reconnect it if Google stopped accepting WhenDoWe's access.</p>`;
+
+  // Changing whose busy times count (rc41). A GET: it reads Google's list and writes nothing.
+  app.get(BUSY_PATH, async (c) => {
+    const me = requireSignedIn(c);
+    if (me instanceof Response) return me;
+    let conn: Awaited<ReturnType<typeof liveConnection>>;
+    let busy: BusyChoice[];
+    try {
+      conn = await liveConnection(me.personId);
+      busy = conn === null ? [] : await busyChoices(conn);
+    } catch {
+      // Neither Google's answer nor the reason is shown or logged: either could carry a token.
+      return c.html(result(c, "Busy times", UNREACHABLE), 502);
+    }
+    if (conn === null) return c.html(result(c, "Busy times", NOT_CONNECTED), 404);
+    const counting = new Set(
+      (
+        await deps.storage.query(
+          stmt("SELECT calendar_id FROM busy_calendar WHERE connection_id = ?", conn.id),
+        )
+      ).map((r) => String(r.calendar_id)),
+    );
+    return c.html(
+      result(
+        c,
+        "Busy times",
+        html`<form method="post" action="${BUSY_PATH}">
+  <input type="hidden" name="csrf" value="${me.csrfToken}" />
+  ${busyField(busy, (cal) => counting.has(cal.id))}
+  <p class="muted">The calendar WhenDoWe puts your events in isn't listed: everything in it is already counted.</p>
+  <p><button type="submit">Save</button></p>
+</form>`,
+      ),
+    );
+  });
+
+  // POST, CSRF-checked. The ticks replace the old ones; only calendars Google lists are kept.
+  app.post(BUSY_PATH, async (c) => {
+    const me = requireSignedIn(c);
+    if (me instanceof Response) return me;
+    const body = await c.req.parseBody({ all: true });
+    if (!(await verifyFormCsrf(me, body))) {
+      return c.html(result(c, "Request rejected", html`<p>Please try again.</p>`), 403);
+    }
+    const ticked = busySchema.safeParse(body.busy);
+    if (!ticked.success || ticked.data.length > MAX_BUSY) {
+      return c.html(result(c, "Busy times", html`<p>Tick at most ${MAX_BUSY} calendars.</p>`), 400);
+    }
+    let conn: Awaited<ReturnType<typeof liveConnection>>;
+    let known: Set<string>;
+    try {
+      conn = await liveConnection(me.personId);
+      known = new Set(conn === null ? [] : (await busyChoices(conn)).map((cal) => cal.id));
+    } catch {
+      return c.html(result(c, "Busy times", UNREACHABLE), 502);
+    }
+    if (conn === null) return c.html(result(c, "Busy times", NOT_CONNECTED), 404);
+    const id = conn.id;
+    await deps.storage.batch([
+      stmt("DELETE FROM busy_calendar WHERE connection_id = ?", id),
+      ...ticked.data
+        .filter((cal) => known.has(cal))
+        .map((cal) =>
+          stmt("INSERT INTO busy_calendar (connection_id, calendar_id) VALUES (?, ?)", id, cal),
+        ),
+    ]);
+    return c.redirect("/", 303);
   });
 
   async function store(

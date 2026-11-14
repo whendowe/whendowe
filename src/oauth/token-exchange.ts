@@ -116,6 +116,50 @@ export async function exchangeForIdToken(request: Omit<ExchangeRequest, "now">):
   return (await redeem(request, idTokenResponseSchema, "sign-in token exchange")).id_token;
 }
 
+// A refresh answers a new access token, and no new refresh token unless Google rotates it.
+const refreshResponseSchema = z.object({
+  access_token: z.string().min(1),
+  expires_in: z.number().int().positive(),
+  token_type: z.string().min(1),
+});
+
+/**
+ * A fresh access token from a connection's refresh token (§12). The caller decides
+ * whether to keep it: a GET (rc41's busy times, choosing what counts) uses it for that
+ * request only, since a GET writes nothing (§13). Secrets travel in the body.
+ */
+export async function refreshAccessToken(request: {
+  readonly refreshToken: string;
+  readonly clientId: string;
+  readonly clientSecret: string;
+  readonly now: string;
+  readonly fetchImpl?: FetchLike;
+}): Promise<{ readonly accessToken: string; readonly expiresAt: string }> {
+  const response = await requestJson(
+    request.fetchImpl ?? defaultFetch,
+    GOOGLE_TOKEN_ENDPOINT,
+    {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: formEncode({
+        client_id: request.clientId,
+        client_secret: request.clientSecret,
+        refresh_token: request.refreshToken,
+        grant_type: "refresh_token",
+      }),
+    },
+    refreshResponseSchema,
+    "token refresh",
+  );
+  if (response.token_type.toLowerCase() !== "bearer") {
+    throw new Error(`token refresh returned unsupported token_type: ${response.token_type}`);
+  }
+  return {
+    accessToken: response.access_token,
+    expiresAt: expiryFrom(request.now, response.expires_in),
+  };
+}
+
 export const GOOGLE_REVOKE_ENDPOINT = "https://oauth2.googleapis.com/revoke";
 
 /**
