@@ -371,7 +371,7 @@ export function registerShareRoutes(app: Hono<AppEnv>, deps: ShareRouteDeps): vo
       claimedNow = claimed.token;
       remember(c, deps, { threadId: q.thread.id, token: claimed.token });
     }
-    const refused = await applyAnswers(
+    const { refused } = await applyAnswers(
       deps.storage,
       access,
       answers satisfies Answers,

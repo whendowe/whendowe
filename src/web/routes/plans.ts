@@ -52,10 +52,12 @@ import {
   findThreadForMember,
   leaveThread,
   listThreadsFor,
+  listUnsentThreadReceipts,
   memberName,
   setThreadVerified,
   type ThreadAccess,
   ThreadInputError,
+  type UnsentThreadReceipt,
 } from "../../plans/thread.js";
 import {
   issueVoteLinks,
@@ -114,6 +116,7 @@ import { arrivalNote, EVENTS_PATH, verifiedField } from "./events.js";
 import {
   noteList,
   oneTime,
+  sendThreadReceipt,
   sendVoteLink,
   sensitive,
   threadVerifiedLine,
@@ -159,6 +162,8 @@ interface View {
   readonly shareUntil: string | null;
   /** A link made by this very request, shown once to copy; never stored (rc25). */
   readonly sharedUrl: string | null;
+  /** rc42: receipts for votes that didn't go out, for the history. */
+  readonly unsent: readonly UnsentThreadReceipt[];
 }
 
 async function load(deps: PlanRouteDeps, access: ThreadAccess, me: SignedIn): Promise<View> {
@@ -178,6 +183,7 @@ async function load(deps: PlanRouteDeps, access: ThreadAccess, me: SignedIn): Pr
       .toString(),
     csrf: me.csrfToken,
     notes: await listNotes(deps.storage, access),
+    unsent: await listUnsentThreadReceipts(deps.storage, access),
     shareUntil:
       access.thread.organizerId === access.personId
         ? await shareLinkExpiry(deps.storage, access, deps.now())
@@ -370,6 +376,12 @@ function planRow(v: View, p: Plan): Html {
   }</a><span></span></div>`;
 }
 
+const UNSENT_REASON: Record<UnsentThreadReceipt["reason"], string> = {
+  suppressed: "their address takes no mail from here",
+  capped: "the email limit was reached",
+  failed: "the email could not be sent",
+};
+
 function history(v: View): Html {
   const entries: { at: string; text: string }[] = [];
   for (const p of v.plans) {
@@ -398,6 +410,12 @@ function history(v: View): Html {
     if (p.status === "withdrawn")
       entries.push({ at: p.decidedAt, text: `${v.nameOf(p.authorId)} withdrew “${p.name}”.` });
   }
+  // rc42: a receipt that didn't go out, to whom and why.
+  for (const u of v.unsent)
+    entries.push({
+      at: u.at,
+      text: `No receipt went to ${v.nameOf(u.personId)} for their answer: ${UNSENT_REASON[u.reason]}.`,
+    });
   entries.sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
   if (entries.length === 0) return html``;
   return html`<h3 class="group-h">History</h3><ul class="list">${entries.map(
@@ -1594,13 +1612,20 @@ ${
     const answer = answerSchema.safeParse(str(r.form, "answer"));
     const planId = c.req.param("plan");
     if (!answer.success) return c.redirect(planPath(r.access.thread.id, planId), 303);
+    const now = deps.now();
     const result = await castVote(deps.storage, r.access, {
       planId,
       answer: answer.data,
-      now: deps.now(),
+      now,
       arrival: SIGNED_IN,
     });
-    if (result.kind === "closed" || result.kind === "invalid") {
+    if (result.kind === "recorded" || result.kind === "accepted")
+      await sendThreadReceipt(deps, r.access, {
+        recorded: [{ kind: "vote", planId, answer: answer.data }],
+        arrival: SIGNED_IN,
+        now,
+      });
+    if (result.kind === "closed" || result.kind === "invalid" || result.kind === "forbidden") {
       const v = await load(deps, r.access, r.me);
       const p = v.plans.find((x) => x.id === planId);
       if (p === undefined) return notFound(c);

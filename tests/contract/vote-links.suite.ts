@@ -34,6 +34,8 @@ import {
   createThread,
   findThreadForMember,
   leaveThread,
+  listUnsentThreadReceipts,
+  recordUnsentThreadReceipt,
   setThreadVerified,
 } from "../../src/plans/thread.js";
 import {
@@ -43,7 +45,7 @@ import {
   setThreadOwnAnswersOnly,
 } from "../../src/plans/vote-link.js";
 import { eraseAccount } from "../../src/privacy/erasure.js";
-import { retentionPass } from "../../src/privacy/purge.js";
+import { purgeThreadStatements, retentionPass } from "../../src/privacy/purge.js";
 
 // A thread's vote links (DESIGN §10 rc26) on BOTH drivers: the upsert that rotates on
 // resend but throttles within the hour, and every way a link stops working. Residue-
@@ -363,6 +365,38 @@ export function runVoteLinksContract(makePort: () => Promise<StoragePort>): void
       expect((await listHistory(port, event))[0]?.change).toMatchObject({
         verified: { before: null, after: 1 },
       });
+    });
+
+    it("vote receipts that didn't go out (rc42): listed in order, gone with the person or the thread", async () => {
+      const port = await makePort();
+      const f = await poll(port, "unsent");
+      await recordUnsentThreadReceipt(port, {
+        threadId: f.threadId,
+        personId: f.ana.id,
+        reason: "capped",
+        now: T0,
+      });
+      await recordUnsentThreadReceipt(port, {
+        threadId: f.threadId,
+        personId: f.david.id,
+        reason: "failed",
+        now: LATER,
+      });
+      expect(await listUnsentThreadReceipts(port, await f.as(f.mara.id))).toEqual([
+        { personId: f.ana.id, reason: "capped", at: T0 },
+        { personId: f.david.id, reason: "failed", at: LATER },
+      ]);
+      await eraseAccount(port, f.ana.id, { now: HOUR });
+      expect(
+        (await listUnsentThreadReceipts(port, await f.as(f.mara.id))).map((u) => u.personId),
+      ).toEqual([f.david.id]);
+      await port.batch(purgeThreadStatements(f.threadId, HOUR));
+      expect(
+        await port.query({
+          sql: "SELECT 1 AS n FROM receipt_unsent WHERE thread_id = ?",
+          params: [f.threadId],
+        }),
+      ).toEqual([]);
     });
 
     it("a thread starts verified when asked, or from its group's default; otherwise not (rc42)", async () => {

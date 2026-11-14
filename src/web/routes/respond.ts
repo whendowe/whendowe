@@ -33,7 +33,7 @@ import {
   type PlanEvent,
   PlanInputError,
 } from "../../plans/plan.js";
-import { memberName, type ThreadAccess } from "../../plans/thread.js";
+import { memberName, recordUnsentThreadReceipt, type ThreadAccess } from "../../plans/thread.js";
 import {
   type IssuedVoteLink,
   type ResolvedVoteLink,
@@ -43,7 +43,14 @@ import {
 } from "../../plans/vote-link.js";
 import { dayLabel, spanText, whenText } from "../../plans/weeks.js";
 import { isSuppressed } from "../../privacy/suppression.js";
-import { type Html, html, ownAnswersForm, type Preview, renderPage } from "../layout.js";
+import {
+  type Html,
+  html,
+  ownAnswersForm,
+  PLANS_PATH,
+  type Preview,
+  renderPage,
+} from "../layout.js";
 import { busyAssets, busyAttrs, busyClash, PLAN_STYLE } from "../plan-editor.js";
 import type { AppEnv } from "../session.js";
 import { BUSY_LABEL, describeRRule, EVENTS_PATH, formatWhen, verifiedLine } from "./events.js";
@@ -454,31 +461,120 @@ export async function applyAnswers(
   now: string,
   /** How these votes arrive (rc42). */
   arrival: Arrival | null,
-): Promise<{ readonly message: string; readonly status: 400 | 409 } | null> {
+): Promise<{
+  readonly refused: { readonly message: string; readonly status: 400 | 409 } | null;
+  /** What went in, for a receipt (rc42). */
+  readonly recorded: readonly VoteReceiptLine[];
+}> {
   let closed = false;
   let agreed = false;
+  const recorded: VoteReceiptLine[] = [];
   if (answers.note.trim() !== "") {
     try {
       if ((await addVoteNote(storage, access, { body: answers.note, now })).kind === "closed")
         closed = true;
+      else recorded.push({ kind: "note" });
     } catch (err) {
-      if (err instanceof PlanInputError) return { message: err.message, status: 400 };
+      if (err instanceof PlanInputError)
+        return { refused: { message: err.message, status: 400 }, recorded };
       throw err;
     }
   }
   for (const [planId, answer] of answers.votes) {
     const result = await castVote(storage, access, { planId, answer, now, arrival });
+    if (result.kind === "accepted" || result.kind === "recorded")
+      recorded.push({ kind: "vote", planId, answer });
     if (result.kind === "accepted") agreed = true;
     if (result.kind === "closed" || result.kind === "invalid" || result.kind === "forbidden")
       closed = true;
   }
   // A yes here that agreed a time replaced the rest of its question: not a refusal.
-  return closed && !agreed
-    ? {
-        message: "Something you answered was decided meanwhile. Your other answers are saved.",
-        status: 409,
-      }
-    : null;
+  return {
+    refused:
+      closed && !agreed
+        ? {
+            message: "Something you answered was decided meanwhile. Your other answers are saved.",
+            status: 409,
+          }
+        : null,
+    recorded,
+  };
+}
+
+/** One line of a vote receipt: a vote on a plan, or a note (rc42). */
+export type VoteReceiptLine =
+  | { readonly kind: "vote"; readonly planId: string; readonly answer: Answer }
+  | { readonly kind: "note" };
+
+const VOTE_WORD: Record<Answer, string> = { yes: "yes", ifneedbe: "if need be", no: "no" };
+
+/**
+ * A receipt for votes in a verified thread (rc42), as sendEventReceipt is for an event:
+ * one per answering POST, to the member they belong to, however they arrived. Plan names
+ * and the thread's name, which everyone in it sees; a note is said to have been added,
+ * never what it says. Opt-outs and the answerer's mail share apply; one that didn't go out
+ * is recorded for the thread's history. Never throws.
+ */
+export async function sendThreadReceipt(
+  deps: Pick<RespondRouteDeps, "storage" | "mail" | "publicBaseUrl">,
+  access: ThreadAccess,
+  input: {
+    readonly recorded: readonly VoteReceiptLine[];
+    readonly arrival: Arrival | null;
+    readonly now: string;
+  },
+): Promise<void> {
+  const { thread } = access;
+  if (thread.verifiedAt === null || input.recorded.length === 0) return;
+  const person = await findPersonById(deps.storage, access.personId);
+  if (person === null) return;
+  const unsent = (reason: ReceiptUnsent) =>
+    recordUnsentThreadReceipt(deps.storage, {
+      threadId: thread.id,
+      personId: person.id,
+      reason,
+      now: input.now,
+    });
+  if (
+    await isSuppressed(deps.storage, person.email, { senderId: person.id, groupId: thread.groupId })
+  )
+    return unsent("suppressed");
+  const plans = await listPlans(deps.storage, access);
+  const nameOf = (id: string) => plans.find((p) => p.id === id)?.name ?? "a plan";
+  const how =
+    input.arrival?.via === "session" ? "signed in as you" : "with the link emailed to you";
+  try {
+    await deps.mail.send({
+      to: person.email,
+      subject: `Your answer in "${thread.name}"`,
+      cause: {
+        kind: "from",
+        senderId: person.id,
+        groupId: thread.groupId,
+        why: "an answer was given for you in a plan whose answers are verified",
+      },
+      text: [
+        `An answer was given for you in "${thread.name}":`,
+        "",
+        ...input.recorded.map((line) =>
+          line.kind === "note"
+            ? "- You added a note"
+            : `- "${nameOf(line.planId)}": ${VOTE_WORD[line.answer]}`,
+        ),
+        "",
+        `When: ${input.now.slice(0, 16).replace("T", " ")} UTC`,
+        `How: ${how}`,
+        "",
+        `See it: ${new URL(`${PLANS_PATH}/${thread.id}`, deps.publicBaseUrl).toString()}`,
+        "",
+        "If this wasn't you, someone who can read your email, or a device still signed in as you, answered for you. Sign in, change the answer, and sign out everywhere from your account page.",
+        "",
+        "Answers in this plan are verified, so every answer sends a receipt like this one.",
+      ].join("\n"),
+    });
+  } catch (error) {
+    await unsent(error instanceof MailCapReachedError ? "capped" : "failed");
+  }
 }
 
 export function registerRespondRoutes(app: Hono<AppEnv>, deps: RespondRouteDeps): void {
@@ -666,7 +762,14 @@ export function registerRespondRoutes(app: Hono<AppEnv>, deps: RespondRouteDeps)
         status,
       );
     if (answers === null) return refuse("Pick an answer first.", 400);
-    const refused = await applyAnswers(deps.storage, access, answers, now, link.arrival);
+    const { refused, recorded } = await applyAnswers(
+      deps.storage,
+      access,
+      answers,
+      now,
+      link.arrival,
+    );
+    await sendThreadReceipt(deps, access, { recorded, arrival: link.arrival, now });
     if (refused !== null) return refuse(refused.message, refused.status);
     const back = new URL(VOTE_PATH, "http://placeholder");
     back.searchParams.set("t", token);

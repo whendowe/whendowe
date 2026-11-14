@@ -14,6 +14,7 @@ import {
 } from "../../src/plans/plan.js";
 import { findThreadForMember, leaveThread } from "../../src/plans/thread.js";
 import { issueVoteLinks } from "../../src/plans/vote-link.js";
+import { suppress } from "../../src/privacy/suppression.js";
 import { PLANS_PATH } from "../../src/web/routes/plans.js";
 import { VOTE_PATH } from "../../src/web/routes/respond.js";
 import { addAccount, type Browser, browser, home, post } from "../property/one-browser.js";
@@ -754,6 +755,68 @@ it("a member who doesn't decide can't verify a thread; the new-plan and poll for
   expect(await (await b.request(made.headers.get("location") ?? "")).text()).toContain(
     "Answers here are verified",
   );
+});
+
+it("vote receipts (rc42): one per answering POST in a verified thread, signed in or by a mailed link", async () => {
+  let failNext: Error | null = null;
+  const b = await browser({
+    now: () => NOW,
+    mailFails: (m) => (m.subject.startsWith("Your answer") ? failNext : null),
+  });
+  const f = await signedInPoll(b, ["david", "ana"]);
+  const [early = "", late = ""] = f.planIds;
+  const receipts = (to: string) =>
+    b.sent.filter((m) => m.to === to && m.subject.startsWith("Your answer"));
+  const csrf = async () => (await home(b)).csrf;
+
+  // Not verified: nothing.
+  await b.request(`${f.thread}/p/${early}/vote`, post({ csrf: await csrf(), answer: "no" }));
+  expect(receipts("mara@example.org")).toHaveLength(0);
+
+  await b.request(`${f.thread}/verify`, post({ csrf: await csrf() }));
+  // Signed in, from the plan's page: one receipt naming the plan and the answer.
+  await b.request(`${f.thread}/p/${early}/vote`, post({ csrf: await csrf(), answer: "ifneedbe" }));
+  const mine = receipts("mara@example.org");
+  expect(mine).toHaveLength(1);
+  expect(mine[0]?.subject).toBe('Your answer in "Picnic"');
+  expect(mine[0]?.text).toMatch(/- "[^"]+": if need be\n/);
+  expect(mine[0]?.text).toContain("How: signed in as you");
+  expect(mine[0]?.text).toContain(`See it: https://whendowe.example${f.thread}`);
+
+  // By Ana's mailed link: opening sends nothing; two votes and a note in one form, one receipt.
+  await sendLinks(b, f.thread);
+  const url = new URL(
+    /https:\/\/[^\s"<]+\/vote\?t=[A-Za-z0-9_-]+/.exec(
+      b.sent.find((m) => m.to === "ana@example.org")?.text ?? "",
+    )?.[0] ?? "https://x/",
+  );
+  await b.request(`${url.pathname}${url.search}`);
+  expect(receipts("ana@example.org")).toHaveLength(0);
+  const t = url.searchParams.get("t") ?? "";
+  await vote(b, t, { [`plan_${early}`]: "yes", [`plan_${late}`]: "no", note: "SECRET-VOTE-NOTE" });
+  const anas = receipts("ana@example.org");
+  expect(anas).toHaveLength(1);
+  expect(anas[0]?.text).toContain("- You added a note");
+  expect(anas[0]?.text).toMatch(/": yes\n/);
+  expect(anas[0]?.text).toMatch(/": no\n/);
+  expect(anas[0]?.text).toContain("How: with the link emailed to you");
+  expect(anas[0]?.text).not.toContain("SECRET-VOTE-NOTE");
+
+  // One that can't go out: the vote stands, and the thread's history says so.
+  failNext = new MailCapReachedError({ daily: 1, monthly: 1 });
+  expect((await vote(b, t, { [`plan_${early}`]: "no" })).status).toBe(303);
+  failNext = new Error("provider down");
+  expect((await vote(b, t, { [`plan_${late}`]: "yes" })).status).toBe(303);
+  failNext = null;
+  await suppress(b.storage, "ana@example.org", { kind: "all" }, NOW);
+  expect((await vote(b, t, { [`plan_${early}`]: "ifneedbe" })).status).toBe(303);
+  const page = await (await b.request(f.thread)).text();
+  expect(page).toMatch(/No receipt went to [^<]+ for their answer: the email limit was reached\./);
+  expect(page).toMatch(/No receipt went to [^<]+ for their answer: the email could not be sent\./);
+  expect(page).toMatch(
+    /No receipt went to [^<]+ for their answer: their address takes no mail from here\./,
+  );
+  expect(receipts("ana@example.org")).toHaveLength(1);
 });
 
 it("only the organizer copies links, and only a member's", async () => {
