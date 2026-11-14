@@ -78,6 +78,15 @@ export function purgeThreadStatements(threadId: string, now: string): SqlStateme
     { sql: "DELETE FROM plan_note WHERE thread_id = ?", params: [threadId] },
     { sql: "DELETE FROM receipt_unsent WHERE thread_id = ?", params: [threadId] },
     {
+      sql: "DELETE FROM verified_request_token WHERE request_id IN (SELECT id FROM verified_request WHERE thread_id = ?)",
+      params: [threadId],
+    },
+    {
+      sql: "DELETE FROM verified_request_answer WHERE request_id IN (SELECT id FROM verified_request WHERE thread_id = ?)",
+      params: [threadId],
+    },
+    { sql: "DELETE FROM verified_request WHERE thread_id = ?", params: [threadId] },
+    {
       sql: "DELETE FROM plan_vote WHERE plan_id IN (SELECT id FROM plan WHERE thread_id = ?)",
       params: [threadId],
     },

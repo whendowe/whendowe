@@ -46,17 +46,21 @@ import {
   turnOffShareLink,
 } from "../../plans/share.js";
 import {
+  answerThreadRequest,
+  askThreadEveryone,
   createThread,
   deciders,
   decidesByConsensus,
   findThreadForMember,
   leaveThread,
+  listThreadRequests,
   listThreadsFor,
   listUnsentThreadReceipts,
   memberName,
   setThreadVerified,
   type ThreadAccess,
   ThreadInputError,
+  type ThreadRequest,
   type UnsentThreadReceipt,
 } from "../../plans/thread.js";
 import {
@@ -117,6 +121,7 @@ import {
   noteList,
   oneTime,
   sendThreadReceipt,
+  sendThreadRequestLink,
   sendVoteLink,
   sensitive,
   threadVerifiedLine,
@@ -164,6 +169,8 @@ interface View {
   readonly sharedUrl: string | null;
   /** rc42: receipts for votes that didn't go out, for the history. */
   readonly unsent: readonly UnsentThreadReceipt[];
+  /** rc42: what everyone has been asked to agree to. */
+  readonly requests: readonly ThreadRequest[];
 }
 
 async function load(deps: PlanRouteDeps, access: ThreadAccess, me: SignedIn): Promise<View> {
@@ -184,6 +191,7 @@ async function load(deps: PlanRouteDeps, access: ThreadAccess, me: SignedIn): Pr
     csrf: me.csrfToken,
     notes: await listNotes(deps.storage, access),
     unsent: await listUnsentThreadReceipts(deps.storage, access),
+    requests: await listThreadRequests(deps.storage, access, deps.now()),
     shareUntil:
       access.thread.organizerId === access.personId
         ? await shareLinkExpiry(deps.storage, access, deps.now())
@@ -416,6 +424,29 @@ function history(v: View): Html {
       at: u.at,
       text: `No receipt went to ${v.nameOf(u.personId)} for their answer: ${UNSENT_REASON[u.reason]}.`,
     });
+  // rc42: each step of asking everyone to agree.
+  for (const r of v.requests) {
+    entries.push({
+      at: r.askedAt,
+      text: `${v.nameOf(r.askedById ?? "")} asked everyone to agree to stop verifying answers here.`,
+    });
+    for (const a of r.answers)
+      if (a.personId !== r.askedById)
+        entries.push({
+          at: a.at,
+          text: `${v.nameOf(a.personId)} said ${a.answer} to stop verifying answers here (${a.via === "session" ? "signed in" : "by their emailed link"}).`,
+        });
+    if (r.outcome !== null && r.closedAt !== null)
+      entries.push({
+        at: r.closedAt,
+        text:
+          r.outcome === "agreed"
+            ? "Everyone agreed to stop verifying answers here."
+            : r.outcome === "refused"
+              ? "Not everyone agreed to stop verifying answers here, so it stays as it is."
+              : "Not everyone answered in 14 days, so it stays as it is.",
+      });
+  }
   entries.sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
   if (entries.length === 0) return html``;
   return html`<h3 class="group-h">History</h3><ul class="list">${entries.map(
@@ -485,6 +516,34 @@ function verifyThreadForm(v: View): Html {
   <p>Everyone in it then sees each person's email address, not only their name, and nobody removes anyone else. What it agrees is verified too. Turning it off again will need everyone in it to agree.</p>
   <p><button type="submit">Verify answers here</button></p>
 </form></details>`;
+}
+
+/** rc42: the open request and your answer, or the way to ask; for members, not guests. */
+function threadRequestSection(v: View): Html | string {
+  const t = v.access.thread;
+  const me = v.access.members.find((m) => m.personId === v.access.personId);
+  if (me === undefined || me.guest) return "";
+  const open = v.requests.find((r) => r.outcome === null);
+  if (open !== undefined) {
+    const mine = open.answers.find((a) => a.personId === v.access.personId);
+    return html`<section class="wd-agree"><h3 class="group-h">Everyone agrees?</h3>
+<p><strong>${v.nameOf(open.askedById ?? "")}</strong> asks everyone in it to agree to <strong>stop verifying answers here</strong>. It happens only if everyone says yes; one "no", or not answering by ${open.expiresAt.slice(0, 10)}, keeps it as it is.</p>
+<p class="muted small">Yes so far: ${open.answers
+      .filter((a) => a.answer === "yes")
+      .map((a) => v.nameOf(a.personId))
+      .join(", ")}. Waiting for: ${open.waitingFor.map(v.nameOf).join(", ")}.</p>
+${
+  mine === undefined || mine.answer === "yes"
+    ? html`<form method="post" action="${threadPath(t.id)}/agree"><input type="hidden" name="csrf" value="${v.csrf}" /><input type="hidden" name="request" value="${open.id}" />
+<p>${mine === undefined ? "" : html`<span class="muted">You said yes. </span>`}<button type="submit" name="answer" value="yes">Yes, I agree</button> <button type="submit" name="answer" value="no">No</button></p></form>`
+    : ""
+}</section>`;
+  }
+  if (t.verifiedAt === null) return "";
+  return html`<details class="wd-agree"><summary>Ask everyone to agree</summary>
+<p class="small">Answers here are verified, so turning that off needs everyone in it to say yes, by their own email or signed in. Each is asked by email and has 14 days.</p>
+<form method="post" action="${threadPath(t.id)}/ask"><input type="hidden" name="csrf" value="${v.csrf}" /><button type="submit">Stop verifying answers</button></form>
+</details>`;
 }
 
 function guestsSection(v: View): Html | string {
@@ -588,6 +647,7 @@ ${t.verifiedAt === null && onTable.length > 0 && t.organizerId === v.access.pers
 ${guestsSection(v)}
 ${t.verifiedAt === null ? ownLinksSection(v) : ""}
 ${t.verifiedAt === null && deciders(v.access).includes(v.access.personId) ? verifyThreadForm(v) : ""}
+${threadRequestSection(v)}
 ${groups.map(([title, ps]) =>
   ps.length === 0 ? "" : html`<h3 class="group-h">${title}</h3>${ps.map((p) => planRow(v, p))}`,
 )}
@@ -1529,6 +1589,72 @@ ${
       on: r.form.on === "1",
       arrival: SIGNED_IN,
     });
+    return c.redirect(threadPath(r.access.thread.id), 303);
+  });
+
+  // rc42: asking everyone in a verified thread to agree, and answering.
+  app.post(`${PLANS_PATH}/:thread/ask`, async (c) => {
+    const r = await posting(c);
+    if (r instanceof Response) return r;
+    const asked = await askThreadEveryone(deps.storage, r.access, { now: deps.now() });
+    switch (asked.kind) {
+      case "forbidden":
+        return renderThread(c, r.access, r.me, "Only its members ask.", 403);
+      case "not_verified":
+        return renderThread(c, r.access, r.me, "Answers here aren't verified.", 409);
+      case "open":
+        return renderThread(
+          c,
+          r.access,
+          r.me,
+          "Everyone is already being asked; that has to be decided first.",
+          409,
+        );
+      case "asked":
+        break;
+    }
+    const me = r.access.members.find((m) => m.personId === r.me.personId);
+    const from = me === undefined ? "Someone" : memberName(me);
+    let failed = 0;
+    for (const link of asked.links) {
+      try {
+        await sendThreadRequestLink(deps.mail, {
+          link,
+          access: r.access,
+          from,
+          publicBaseUrl: deps.publicBaseUrl,
+        });
+      } catch {
+        failed += 1;
+      }
+    }
+    if (failed > 0) {
+      const fresh = await findThreadForMember(deps.storage, r.access.thread.id, r.me.personId);
+      return renderThread(
+        c,
+        fresh ?? r.access,
+        r.me,
+        `Asked. ${failed} of the emails couldn't be sent; they can still answer here, signed in.`,
+      );
+    }
+    return c.redirect(threadPath(r.access.thread.id), 303);
+  });
+
+  app.post(`${PLANS_PATH}/:thread/agree`, async (c) => {
+    const r = await posting(c);
+    if (r instanceof Response) return r;
+    const answer = r.form.answer === "yes" || r.form.answer === "no" ? r.form.answer : null;
+    if (answer === null) return renderThread(c, r.access, r.me, "Pick yes or no.", 400);
+    const result = await answerThreadRequest(deps.storage, r.access, {
+      requestId: str(r.form, "request"),
+      answer,
+      via: "session",
+      now: deps.now(),
+    });
+    if (result.kind === "forbidden")
+      return renderThread(c, r.access, r.me, "Only its members answer.", 403);
+    if (result.kind === "closed")
+      return renderThread(c, r.access, r.me, "This was decided meanwhile.", 409);
     return c.redirect(threadPath(r.access.thread.id), 303);
   });
 

@@ -31,12 +31,17 @@ import {
   resolveShareLink,
 } from "../../src/plans/share.js";
 import {
+  answerThreadRequest,
+  askThreadEveryone,
   createThread,
   findThreadForMember,
   leaveThread,
+  listThreadRequests,
   listUnsentThreadReceipts,
   recordUnsentThreadReceipt,
+  resolveThreadRequestLink,
   setThreadVerified,
+  THREAD_REQUEST_TTL_MS,
 } from "../../src/plans/thread.js";
 import {
   issueVoteLinks,
@@ -397,6 +402,156 @@ export function runVoteLinksContract(makePort: () => Promise<StoragePort>): void
           params: [f.threadId],
         }),
       ).toEqual([]);
+    });
+
+    it("everyone agrees in a thread (rc42): members, not guests; all yes stops verifying; one no keeps it", async () => {
+      const port = await makePort();
+      const f = await poll(port, "agree");
+      const share = await issueShareLink(port, await f.as(f.mara.id), { now: T0 });
+      if (share.kind !== "issued") throw new Error(share.kind);
+      const q = await resolveShareLink(port, share.token, T0);
+      if (q === null) throw new Error("link");
+      const kestrel = await claimName(port, q, { name: "Kestrel", now: T0 });
+      if (kestrel.kind !== "claimed") throw new Error(kestrel.kind);
+      expect(await askThreadEveryone(port, await f.as(f.ana.id), { now: T0 })).toEqual({
+        kind: "not_verified",
+      });
+      await setThreadVerified(port, await f.as(f.mara.id), T0);
+      // A guest neither asks nor answers, and is never waited for.
+      expect(
+        await askThreadEveryone(port, await f.as(kestrel.access.personId), { now: T0 }),
+      ).toEqual({
+        kind: "forbidden",
+      });
+
+      // Ana asks; David says no: it stays verified.
+      const first = await askThreadEveryone(port, await f.as(f.ana.id), { now: T0 });
+      if (first.kind !== "asked") throw new Error(first.kind);
+      expect(first.links.map((l) => l.personId).sort()).toEqual([f.david.id, f.mara.id].sort());
+      expect(await askThreadEveryone(port, await f.as(f.david.id), { now: T0 })).toEqual({
+        kind: "open",
+      });
+      expect(
+        await answerThreadRequest(port, await f.as(kestrel.access.personId), {
+          requestId: first.requestId,
+          answer: "yes",
+          via: "session",
+          now: T0,
+        }),
+      ).toEqual({ kind: "forbidden" });
+      expect(
+        await answerThreadRequest(port, await f.as(f.david.id), {
+          requestId: first.requestId,
+          answer: "no",
+          via: "session",
+          now: LATER,
+        }),
+      ).toEqual({ kind: "recorded", outcome: "refused" });
+      expect((await f.as(f.mara.id)).thread.verifiedAt).toBe(T0);
+
+      // Asked again: Mara by her mailed link, David signed in. The last yes turns it off.
+      const second = await askThreadEveryone(port, await f.as(f.ana.id), { now: LATER });
+      if (second.kind !== "asked") throw new Error(second.kind);
+      const maraLink = await resolveThreadRequestLink(
+        port,
+        second.links.find((l) => l.personId === f.mara.id)?.token ?? "",
+        LATER,
+      );
+      if (maraLink === null) throw new Error("link");
+      expect(maraLink.requestId).toBe(second.requestId);
+      expect(
+        await answerThreadRequest(port, maraLink.access, {
+          requestId: second.requestId,
+          answer: "yes",
+          via: "mailed",
+          now: LATER,
+        }),
+      ).toEqual({ kind: "recorded", outcome: null });
+      const [, open] = await listThreadRequests(port, await f.as(f.mara.id), LATER);
+      expect(open?.waitingFor).toEqual([f.david.id]);
+      expect(
+        await answerThreadRequest(port, await f.as(f.david.id), {
+          requestId: second.requestId,
+          answer: "yes",
+          via: "session",
+          now: HOUR,
+        }),
+      ).toEqual({ kind: "recorded", outcome: "agreed" });
+      expect((await f.as(f.mara.id)).thread.verifiedAt).toBeNull();
+      const listed = await listThreadRequests(port, await f.as(f.mara.id), HOUR);
+      expect(listed.map((r) => r.outcome)).toEqual(["refused", "agreed"]);
+      expect(new Map(listed[1]?.answers.map((a) => [a.personId, a.via]))).toEqual(
+        new Map([
+          [f.ana.id, "session"],
+          [f.mara.id, "mailed"],
+          [f.david.id, "session"],
+        ]),
+      );
+      // Decided: no more answers; the links are done too.
+      expect(
+        await answerThreadRequest(port, await f.as(f.david.id), {
+          requestId: second.requestId,
+          answer: "no",
+          via: "session",
+          now: HOUR,
+        }),
+      ).toEqual({ kind: "closed" });
+    });
+
+    it("everyone agrees in a thread (rc42): it lapses after 14 days; alone, asking is agreeing; it goes with the thread", async () => {
+      const port = await makePort();
+      const f = await poll(port, "agree-lapse");
+      await setThreadVerified(port, await f.as(f.mara.id), T0);
+      const asked = await askThreadEveryone(port, await f.as(f.mara.id), { now: T0 });
+      if (asked.kind !== "asked") throw new Error(asked.kind);
+      const past = new Date(Date.parse(T0) + THREAD_REQUEST_TTL_MS).toISOString();
+      expect(
+        await answerThreadRequest(port, await f.as(f.ana.id), {
+          requestId: asked.requestId,
+          answer: "yes",
+          via: "session",
+          now: past,
+        }),
+      ).toEqual({ kind: "closed" });
+      expect(await resolveThreadRequestLink(port, asked.links[0]?.token ?? "", past)).toBeNull();
+      expect(
+        (await listThreadRequests(port, await f.as(f.mara.id), past)).map((r) => r.outcome),
+      ).toEqual(["lapsed"]);
+      const again = await askThreadEveryone(port, await f.as(f.mara.id), { now: past });
+      expect(again.kind).toBe("asked");
+      const rows = await port.query({
+        sql: "SELECT outcome, closed_at FROM verified_request WHERE id = ?",
+        params: [asked.requestId],
+      });
+      expect(rows[0]).toEqual({ outcome: "lapsed", closed_at: past });
+      // Purged with its thread.
+      await port.batch(purgeThreadStatements(f.threadId, past));
+      expect(
+        await port.query({
+          sql: "SELECT 1 AS n FROM verified_request WHERE thread_id = ?",
+          params: [f.threadId],
+        }),
+      ).toEqual([]);
+
+      // Alone in it (a poll made to be shared), asking decides it.
+      const solo = await createPollThread(port, {
+        creatorId: f.mara.id,
+        group: null,
+        fields: { title: "Solo", description: null, location: null, allDay: true, tzid: null },
+        candidates: [{ startLocal: "2101-11-21", endLocal: "2101-11-22" }],
+        verified: true,
+        now: T0,
+      });
+      const alone = await findThreadForMember(port, solo.threadId, f.mara.id);
+      if (alone === null) throw new Error("member");
+      expect(await askThreadEveryone(port, alone, { now: T0 })).toMatchObject({
+        kind: "asked",
+        links: [],
+        outcome: "agreed",
+      });
+      expect(
+        (await findThreadForMember(port, solo.threadId, f.mara.id))?.thread.verifiedAt,
+      ).toBeNull();
     });
 
     it("a thread starts verified when asked, or from its group's default; otherwise not (rc42)", async () => {

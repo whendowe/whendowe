@@ -819,6 +819,103 @@ it("vote receipts (rc42): one per answering POST in a verified thread, signed in
   expect(receipts("ana@example.org")).toHaveLength(1);
 });
 
+it("everyone agrees in a thread (rc42): a member asks; each is emailed; the page and history say who", async () => {
+  const b = await browser({ now: () => NOW });
+  const f = await signedInPoll(b, ["david", "ana"]);
+  const csrf = async () => (await home(b)).csrf;
+  expect(await (await b.request(f.thread)).text()).not.toContain("Ask everyone to agree");
+  await b.request(`${f.thread}/verify`, post({ csrf: await csrf() }));
+  expect(await (await b.request(f.thread)).text()).toContain("Ask everyone to agree");
+  expect((await b.request(`${f.thread}/ask`, post({ csrf: "x" }))).status).toBe(403);
+
+  const before = b.sent.length;
+  expect((await b.request(`${f.thread}/ask`, post({ csrf: await csrf() }))).status).toBe(303);
+  const mails = b.sent.slice(before);
+  expect(mails.map((m) => m.to).sort()).toEqual(["ana@example.org", "david@example.org"]);
+  expect(mails[0]?.subject).toBe('Do you agree? "Picnic"');
+  expect(mails[0]?.text).toContain(
+    'asks everyone in "Picnic" to agree to stop verifying answers there.',
+  );
+  const again = await b.request(`${f.thread}/ask`, post({ csrf: await csrf() }));
+  expect(again.status).toBe(409);
+  expect(await again.text()).toContain("Everyone is already being asked");
+  const page = await (await b.request(f.thread)).text();
+  expect(page).toContain(
+    "asks everyone in it to agree to <strong>stop verifying answers here</strong>",
+  );
+  expect(page).toContain('<span class="muted">You said yes. </span>');
+
+  // Ana and David by their emailed links: the last yes turns verifying off.
+  const linkOf = (to: string) =>
+    new URL(
+      /https:\/\/[^\s]+\/agree\?t=[A-Za-z0-9_-]+/.exec(
+        mails.find((m) => m.to === to)?.text ?? "",
+      )?.[0] ?? "https://x/",
+    );
+  const ana = linkOf("ana@example.org");
+  const anaPage = await (await b.request(`${ana.pathname}${ana.search}`)).text();
+  expect(anaPage).toContain(
+    "asks everyone in it to agree to <strong>stop verifying answers here</strong>",
+  );
+  expect(anaPage).toContain("<h1>Picnic</h1>");
+  expect((await b.request("/agree", post({ t: ana.searchParams.get("t") ?? "" }))).status).toBe(
+    400,
+  );
+  expect(
+    (await b.request("/agree", post({ t: ana.searchParams.get("t") ?? "", answer: "yes" }))).status,
+  ).toBe(303);
+  expect(await (await b.request(`${ana.pathname}${ana.search}`)).text()).toContain("You said yes.");
+  const david = linkOf("david@example.org");
+  await b.request("/agree", post({ t: david.searchParams.get("t") ?? "", answer: "yes" }));
+  expect(await (await b.request(`${david.pathname}${david.search}`)).text()).toContain(
+    "Everyone agreed: answers here are no longer verified.",
+  );
+  const after = await (await b.request(f.thread)).text();
+  expect(after).not.toContain("Answers here are verified:");
+  expect(after).toContain("Everyone agreed to stop verifying answers here.");
+  expect(after).toMatch(/said yes to stop verifying answers here \(by their emailed link\)\./);
+  expect(after).toMatch(/asked everyone to agree to stop verifying answers here\./);
+  // The asker's yes is the asking: only the two others' answers are listed.
+  expect(after.match(/ said yes to stop verifying answers here/g)).toHaveLength(2);
+  expect((await b.request(`${f.thread}/ask`, post({ csrf: await csrf() }))).status).toBe(409);
+});
+
+it("everyone agrees in a thread (rc42): a no keeps it verified; answering signed in", async () => {
+  const b = await browser({ now: () => NOW });
+  const f = await signedInPoll(b, ["david"]);
+  const csrf = async () => (await home(b)).csrf;
+  await b.request(`${f.thread}/verify`, post({ csrf: await csrf() }));
+  await b.request(`${f.thread}/ask`, post({ csrf: await csrf() }));
+  await addAccount(b, "david@example.org");
+  const davidPage = await (await b.request(f.thread)).text();
+  const requestId = /name="request" value="([^"]+)"/.exec(davidPage)?.[1] ?? "";
+  expect(
+    (await b.request(`${f.thread}/agree`, post({ csrf: await csrf(), request: requestId }))).status,
+  ).toBe(400);
+  expect(
+    (
+      await b.request(
+        `${f.thread}/agree`,
+        post({ csrf: await csrf(), request: requestId, answer: "no" }),
+      )
+    ).status,
+  ).toBe(303);
+  const kept = await (await b.request(f.thread)).text();
+  expect(kept).toContain("Answers here are verified:");
+  expect(kept).toContain(
+    "Not everyone agreed to stop verifying answers here, so it stays as it is.",
+  );
+  expect(kept).toMatch(/said no to stop verifying answers here \(signed in\)\./);
+  expect(
+    (
+      await b.request(
+        `${f.thread}/agree`,
+        post({ csrf: await csrf(), request: requestId, answer: "yes" }),
+      )
+    ).status,
+  ).toBe(409);
+});
+
 it("only the organizer copies links, and only a member's", async () => {
   const b = await browser({ now: () => NOW });
   const f = await signedInPoll(b, ["david"]);

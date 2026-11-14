@@ -2077,7 +2077,7 @@ it("everyone agrees (rc42): anyone on it asks; each is emailed a link; the page 
   const h = await harness();
   const { dm, group } = await setup(h);
   const ann = await join(h, dm, group, "ann@example.org", "view", "FULL");
-  const grandma = await join(h, dm, group, "grandma@example.org", "view", "BUSY");
+  await join(h, dm, group, "grandma@example.org", "view", "BUSY");
   const plain = await createVia(h, dm, group);
   expect(await text(h, plain, ann)).not.toContain("Ask everyone to agree");
   const event = await createVia(h, dm, group, { ...NIGHT, verified: "on" });
