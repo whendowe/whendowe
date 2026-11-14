@@ -944,6 +944,42 @@ it("saving replaces the ticks with the ones Google lists; forged and made-by-us 
   expect(await busyRows(h)).toEqual([]);
 });
 
+it("each account's busy page is its own Google connection's; saving touches no one else's", async () => {
+  let account = "someone@example.com";
+  const h = await harness((url, init) => googleFake({ calendarId: account })(url, init));
+  // A connection of another provider, made first, is never the one this page uses.
+  await h.storage.batch([
+    {
+      sql: `INSERT INTO calendar_connection (id, owner_id, provider, account_email, calendar_id,
+              access_token_enc, refresh_token_enc, status, created_at, updated_at)
+            VALUES ('a-dav', ?, 'caldav', 'dav@example.org', 'dav', 'e', 'e', 'active', ?, ?)`,
+      params: [h.personId, NOW, NOW],
+    },
+  ]);
+  const mine = await chooser(h);
+  await chooseTicking(h, mine.pending, "new", ["someone@example.com"]);
+  account = "other@example.com";
+  const other = await signIn(h, "second@example.org");
+  const theirs = await chooser(h, other);
+  await chooseTicking(h, theirs.pending, "new", ["family@group.calendar.google.com"], other);
+
+  const page = await (await busyPage(h)).text();
+  expect(page).toContain('name="busy" value="someone@example.com" checked');
+  expect(page).toContain('name="busy" value="family@group.calendar.google.com" />');
+  // And the other account sees its own.
+  const second = await (
+    await h.app.request(BUSY_PATH, { headers: { cookie: other.cookie } })
+  ).text();
+  expect(second).toContain('name="busy" value="family@group.calendar.google.com" checked');
+  expect(second).toContain('name="busy" value="someone@example.com" />');
+  // Saving replaces this account's ticks only: the other's stays.
+  expect((await saveBusy(h, ["family@group.calendar.google.com"])).status).toBe(303);
+  expect(await busyRows(h)).toEqual([
+    "family@group.calendar.google.com",
+    "family@group.calendar.google.com",
+  ]);
+});
+
 it("an expired access token is refreshed for the page only, and never saved", async () => {
   const log: { url: string; method: string; body: string | undefined }[] = [];
   const h = await harness(googleFake({ log }));
