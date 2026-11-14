@@ -267,14 +267,15 @@ async function chooseTicking(
   pending: string,
   calendar: string,
   busy: readonly string[],
+  as: Session = h.session,
 ): Promise<Response> {
-  const body = new URLSearchParams({ csrf: h.session.csrf, calendar });
+  const body = new URLSearchParams({ csrf: as.csrf, calendar });
   for (const id of busy) body.append("busy", id);
   return h.app.request(CHOOSE_PATH, {
     method: "POST",
     headers: {
       "content-type": "application/x-www-form-urlencoded",
-      cookie: [h.session.cookie, pending].filter((c) => c !== "").join("; "),
+      cookie: [as.cookie, pending].filter((c) => c !== "").join("; "),
     },
     body: body.toString(),
   });
@@ -753,9 +754,12 @@ const WITH_HOLIDAYS: readonly Record<string, unknown>[] = [
   { id: "holidays@group.v.calendar.google.com", summary: "Holidays", accessRole: "reader" },
 ];
 
-async function chooser(h: Harness): Promise<{ page: string; pending: string }> {
-  const { cookie, state } = await startFlow(h);
-  const res = await callback(h, `code=c&state=${encodeURIComponent(state)}`, cookie);
+async function chooser(
+  h: Harness,
+  as: Session = h.session,
+): Promise<{ page: string; pending: string }> {
+  const { cookie, state } = await startFlow(h, as);
+  const res = await callback(h, `code=c&state=${encodeURIComponent(state)}`, cookie, as);
   expect(res.status).toBe(200);
   return { page: await res.text(), pending: pendingCookie(res) };
 }
@@ -802,6 +806,44 @@ it("keeps the ticked calendars Google lists, drops a forged one, and never the o
   expect(await busyRows(h)).toEqual([
     "holidays@group.v.calendar.google.com",
     "someone@example.com",
+  ]);
+});
+
+it("each account's busy calendars are its own connection's, in its own export", async () => {
+  let account = "someone@example.com";
+  const h = await harness((url, init) => googleFake({ calendarId: account })(url, init));
+  const mine = await chooser(h);
+  await chooseTicking(h, mine.pending, "new", ["someone@example.com"]);
+  account = "other@example.com";
+  const other = await signIn(h, "second@example.org");
+  const theirs = await chooser(h, other);
+  await chooseTicking(
+    h,
+    theirs.pending,
+    "family@group.calendar.google.com",
+    ["family@group.calendar.google.com"],
+    other,
+  );
+  const rows = await h.storage.query({
+    sql: `SELECT c.owner_id, b.calendar_id FROM busy_calendar b
+            JOIN calendar_connection c ON c.id = b.connection_id ORDER BY b.calendar_id`,
+    params: [],
+  });
+  const secondId = String(
+    (
+      await h.storage.query({
+        sql: "SELECT id FROM person WHERE email = ?",
+        params: ["second@example.org"],
+      })
+    )[0]?.id,
+  );
+  expect(rows.map((r) => [String(r.owner_id), String(r.calendar_id)])).toEqual([
+    [secondId, "family@group.calendar.google.com"],
+    [h.personId, "someone@example.com"],
+  ]);
+  const exported = await exportPerson(h.storage, h.personId, NOW);
+  expect(exported.calendar_connections.map((c) => c.busy_times_from)).toEqual([
+    ["someone@example.com"],
   ]);
 });
 
