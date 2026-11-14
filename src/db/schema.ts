@@ -896,3 +896,81 @@ export const receiptUnsent = sqliteTable(
     check("receipt_unsent_reason_chk", sql`${t.reason} IN ('suppressed', 'capped', 'failed')`),
   ],
 );
+
+// rc42 (§10 *Who really answered*): what a verified event or thread needs everyone on it to
+// agree to — to stop verifying, to remove an event for good, or to keep it for less long
+// (`retain_days`, the new period). One open at a time per container. Open while closed_at
+// is null and expires_at is ahead; past it, it has lapsed, and is closed as such the next
+// time anyone acts on it. Exactly one container is set.
+export const verifiedRequest = sqliteTable(
+  "verified_request",
+  {
+    id: text("id").primaryKey(),
+    canonicalEventId: text("canonical_event_id").references(() => canonicalEvent.id, {
+      onDelete: "cascade",
+    }),
+    threadId: text("thread_id").references(() => planThread.id, { onDelete: "cascade" }),
+    kind: text("kind").notNull(),
+    retainDays: integer("retain_days"),
+    askedBy: text("asked_by").references(() => person.id, { onDelete: "set null" }),
+    askedAt: text("asked_at").notNull(),
+    expiresAt: text("expires_at").notNull(),
+    closedAt: text("closed_at"),
+    outcome: text("outcome"),
+  },
+  (t) => [
+    uniqueIndex("verified_request_open_event_uq")
+      .on(t.canonicalEventId)
+      .where(sql`${t.closedAt} IS NULL AND ${t.canonicalEventId} IS NOT NULL`),
+    uniqueIndex("verified_request_open_thread_uq")
+      .on(t.threadId)
+      .where(sql`${t.closedAt} IS NULL AND ${t.threadId} IS NOT NULL`),
+    check(
+      "verified_request_one_chk",
+      sql`(${t.canonicalEventId} IS NULL) <> (${t.threadId} IS NULL)`,
+    ),
+    check("verified_request_kind_chk", sql`${t.kind} IN ('unverify', 'remove', 'shorten')`),
+    check(
+      "verified_request_outcome_chk",
+      sql`${t.outcome} IS NULL OR ${t.outcome} IN ('agreed', 'refused', 'lapsed')`,
+    ),
+  ],
+);
+
+// Each person's answer to a request: by a link mailed to them, or signed in — never copied.
+export const verifiedRequestAnswer = sqliteTable(
+  "verified_request_answer",
+  {
+    requestId: text("request_id")
+      .notNull()
+      .references(() => verifiedRequest.id, { onDelete: "cascade" }),
+    personId: text("person_id")
+      .notNull()
+      .references(() => person.id, { onDelete: "cascade" }),
+    answer: text("answer").notNull(),
+    answeredAt: text("answered_at").notNull(),
+    answeredVia: text("answered_via").notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.requestId, t.personId] }),
+    check("verified_request_answer_chk", sql`${t.answer} IN ('yes', 'no')`),
+    check("verified_request_answer_via_chk", sql`${t.answeredVia} IN ('session', 'mailed')`),
+  ],
+);
+
+// The link mailed to each person asked: one per person per request. Only the hash is
+// stored; it lives as long as the request may.
+export const verifiedRequestToken = sqliteTable(
+  "verified_request_token",
+  {
+    tokenHash: text("token_hash").primaryKey(),
+    requestId: text("request_id")
+      .notNull()
+      .references(() => verifiedRequest.id, { onDelete: "cascade" }),
+    personId: text("person_id")
+      .notNull()
+      .references(() => person.id, { onDelete: "cascade" }),
+    expiresAt: text("expires_at").notNull(),
+  },
+  (t) => [unique("verified_request_token_uq").on(t.requestId, t.personId)],
+);

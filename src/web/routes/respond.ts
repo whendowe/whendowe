@@ -2,7 +2,15 @@
 import type { Context, Hono } from "hono";
 import { z } from "zod";
 import type { StoragePort } from "../../db/port.js";
-import type { EventAccess } from "../../events/event.js";
+import {
+  answerRequest,
+  type EventAccess,
+  listVerifiedRequests,
+  type RequestKind,
+  type RequestLink,
+  resolveRequestLink,
+  type VerifiedRequest,
+} from "../../events/event.js";
 import { canSee, listParticipants } from "../../events/participation.js";
 import { type Answer, answerSchema } from "../../events/poll.js";
 import {
@@ -42,6 +50,7 @@ import {
   VOTE_LINK_TTL_MS,
 } from "../../plans/vote-link.js";
 import { dayLabel, spanText, whenText } from "../../plans/weeks.js";
+import { retainLabel } from "../../privacy/retention.js";
 import { isSuppressed } from "../../privacy/suppression.js";
 import {
   type Html,
@@ -71,6 +80,25 @@ export const RESPOND_PATH = "/respond";
 export const VOTE_PATH = "/vote";
 
 /** An event's answer link, as it is emailed or copied (rc36). */
+/** Answering a request everyone must agree to, by the link mailed to you (rc42). */
+export const AGREE_PATH = "/agree";
+
+/** What a request asks, as a phrase: "stop verifying answers here". */
+export function requestWhat(kind: RequestKind, retainDays: number | null): string {
+  switch (kind) {
+    case "unverify":
+      return "stop verifying answers here";
+    case "remove":
+      return "remove it for good";
+    case "shorten":
+      return `keep it for ${retainLabel(retainDays ?? 0)} instead`;
+    default: {
+      const unreachable: never = kind;
+      return unreachable;
+    }
+  }
+}
+
 export function respondUrl(publicBaseUrl: string, token: string): URL {
   const url = new URL(RESPOND_PATH, publicBaseUrl);
   url.searchParams.set("t", token);
@@ -715,6 +743,63 @@ export function registerRespondRoutes(app: Hono<AppEnv>, deps: RespondRouteDeps)
     return c.redirect(`${back.pathname}${back.search}`, 303);
   });
 
+  app.get(AGREE_PATH, async (c) => {
+    sensitive(c);
+    const token = readToken(c.req.query("t"));
+    const now = deps.now();
+    const link = token === null ? null : await resolveRequestLink(deps.storage, token, now);
+    if (token === null || link === null) return c.html(deadLink(), 404);
+    const requests = await listVerifiedRequests(deps.storage, link.access, now);
+    return c.html(
+      agreePage(
+        link.access,
+        requests.find((r) => r.id === link.requestId),
+        token,
+        "",
+      ),
+    );
+  });
+
+  app.post(AGREE_PATH, async (c) => {
+    sensitive(c);
+    const form = await c.req.parseBody();
+    const token = readToken(form.t);
+    const now = deps.now();
+    const link = token === null ? null : await resolveRequestLink(deps.storage, token, now);
+    if (token === null || link === null) return c.html(deadLink(), 404);
+    const answer = form.answer === "yes" || form.answer === "no" ? form.answer : null;
+    const again = async (message: string, status: 400 | 409) => {
+      const requests = await listVerifiedRequests(deps.storage, link.access, now);
+      return c.html(
+        agreePage(
+          link.access,
+          requests.find((r) => r.id === link.requestId),
+          token,
+          html`<p class="error">${message}</p>`,
+        ),
+        status,
+      );
+    };
+    if (answer === null) return again("Pick yes or no.", 400);
+    const result = await answerRequest(deps.storage, link.access, {
+      requestId: link.requestId,
+      answer,
+      via: "mailed",
+      now,
+    });
+    if (result.kind !== "recorded") return again("This was decided meanwhile.", 409);
+    if (
+      result.outcome === "agreed" &&
+      (await resolveRequestLink(deps.storage, token, now)) === null
+    )
+      return c.html(
+        linkPage("Removed", html`<h1>Everyone agreed</h1><p>The event is removed for good.</p>`),
+      );
+    const back = new URL(AGREE_PATH, "http://placeholder");
+    back.searchParams.set("t", token);
+    return c.redirect(`${back.pathname}${back.search}`, 303);
+  });
+
   app.get(VOTE_PATH, async (c) => {
     sensitive(c);
     const token = readToken(c.req.query("t"));
@@ -775,6 +860,81 @@ export function registerRespondRoutes(app: Hono<AppEnv>, deps: RespondRouteDeps)
     back.searchParams.set("t", token);
     back.searchParams.set("saved", "1");
     return c.redirect(`${back.pathname}${back.search}`, 303);
+  });
+}
+
+// --- Everyone agrees, by the link mailed to you (rc42) ------------------------------------
+
+function agreePage(
+  access: EventAccess,
+  request: VerifiedRequest | undefined,
+  token: string,
+  notice: Html | string,
+): string {
+  const { participation } = access;
+  const mine = request?.answers.find((a) => a.personId === participation.personId);
+  const body =
+    request === undefined || request.outcome !== null
+      ? html`<p><strong>This has been decided, or it lapsed.</strong> ${
+          request?.outcome === "agreed"
+            ? "Everyone agreed."
+            : request?.outcome === "refused"
+              ? "Someone said no, so it stays as it is."
+              : "Not everyone answered in time, so it stays as it is."
+        }</p>`
+      : html`<p><strong>${request.askedBy?.name ?? "Someone"}</strong> asks everyone on it to agree to <strong>${requestWhat(request.kind, request.retainDays)}</strong>. It happens only if everyone says yes; one "no" keeps it as it is.</p>
+${mine === undefined ? "" : html`<p class="muted">You said ${mine.answer}. You can change it until it's decided.</p>`}
+<form method="post" action="${AGREE_PATH}">
+  <input type="hidden" name="t" value="${token}" />
+  <p><button type="submit" name="answer" value="yes">Yes, I agree</button> <button type="submit" name="answer" value="no">No</button></p>
+</form>
+<p class="muted">Until ${request.expiresAt.slice(0, 10)}. Still waiting for: ${request.waitingFor.map((w) => w.shown.name).join(", ") || "nobody"}.</p>`;
+  return linkPage(
+    "Everyone agrees",
+    html`${notice}${header(access)}
+${body}
+<p class="muted">This link is just for you — please don't forward it. No account needed.</p>`,
+  );
+}
+
+/**
+ * The email asking someone to agree (rc42): written for their tier, as answer links are —
+ * a BUSY inbox gets no title. Its link is theirs alone and is never copied.
+ */
+export async function sendRequestLink(
+  mail: MailPort,
+  input: {
+    readonly link: RequestLink;
+    readonly access: EventAccess;
+    readonly kind: RequestKind;
+    readonly retainDays: number | null;
+    readonly from: string;
+    readonly publicBaseUrl: string;
+  },
+): Promise<void> {
+  const { link, access, from } = input;
+  const url = new URL(AGREE_PATH, input.publicBaseUrl);
+  url.searchParams.set("t", link.token);
+  const titled = canSee(link.visibility, "title");
+  const when = formatWhen(access.event);
+  const on = titled ? `"${access.event.title}" (${when})` : `an event on ${when}`;
+  await mail.send({
+    to: link.email,
+    subject: titled ? `Do you agree? "${access.event.title}"` : `Do you agree? (${when})`,
+    cause: {
+      kind: "from",
+      senderId: access.participation.personId,
+      groupId: access.event.groupId,
+      why: `${from} asked everyone on an event you're on to agree`,
+    },
+    text: [
+      `${from} asks everyone on ${on} to agree to ${requestWhat(input.kind, input.retainDays)}.`,
+      "",
+      'Answers there are verified, so this happens only if everyone says yes. One "no" keeps it as it is, and so does not answering within 14 days.',
+      "",
+      "Answer here — no account needed:",
+      url.toString(),
+    ].join("\n"),
   });
 }
 

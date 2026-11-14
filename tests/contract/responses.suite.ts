@@ -2,6 +2,8 @@
 import { describe, expect, it } from "vitest";
 import type { StoragePort } from "../../src/db/port.js";
 import {
+  answerRequest,
+  askEveryone,
   createEvent,
   deleteEvent,
   type EventAccess,
@@ -9,12 +11,16 @@ import {
   eventRetention,
   findEventForParticipant,
   listHistory,
+  listVerifiedRequests,
+  resolveRequestLink,
   setCancelled,
   setEventRetention,
   setVerified,
+  VERIFIED_REQUEST_TTL_MS,
 } from "../../src/events/event.js";
 import {
   addParticipant,
+  leaveEvent,
   listParticipantChanges,
   listParticipants,
   removeParticipant,
@@ -796,6 +802,275 @@ export function runResponsesContract(makePort: () => Promise<StoragePort>): void
           params: [event.id],
         }),
       ).toEqual([]);
+    });
+
+    it("everyone agrees (rc42): all yes stops verifying; the asker's yes is the asking; one at a time", async () => {
+      const port = await makePort();
+      const { dm, membership, ann, bob, ghost } = await table(port, "agree");
+      const plain = await createEvent(port, {
+        creatorId: dm.id,
+        group: membership,
+        fields: SESSION,
+        now: T0,
+      });
+      expect(
+        await askEveryone(port, await access(port, plain.id, ann), { kind: "unverify", now: T0 }),
+      ).toEqual({
+        kind: "not_verified",
+      });
+      const event = await createEvent(port, {
+        creatorId: dm.id,
+        group: membership,
+        fields: SESSION,
+        now: T0,
+        verified: true,
+      });
+      // Someone who can't see it can't ask.
+      expect(
+        await askEveryone(port, await access(port, event.id, ghost), { kind: "unverify", now: T0 }),
+      ).toEqual({
+        kind: "forbidden",
+      });
+      const asked = await askEveryone(port, await access(port, event.id, ann), {
+        kind: "unverify",
+        now: T0,
+      });
+      if (asked.kind !== "asked") throw new Error(asked.kind);
+      // A link for each other person who sees it — not the asker, not the HIDDEN member.
+      expect(asked.links.map((l) => l.personId).sort()).toEqual([bob, dm.id].sort());
+      expect(asked.outcome).toBeNull();
+      expect(
+        await askEveryone(port, await access(port, event.id, bob), { kind: "remove", now: T0 }),
+      ).toEqual({
+        kind: "open",
+      });
+      const [open] = await listVerifiedRequests(port, await access(port, event.id, dm.id), T0);
+      expect(open).toMatchObject({ kind: "unverify", askedById: ann, outcome: null });
+      expect(open?.waitingFor.map((w) => w.personId).sort()).toEqual([bob, dm.id].sort());
+
+      // Someone who can't see it can't answer, and a link stops working when they can't.
+      expect(
+        await answerRequest(port, await access(port, event.id, ghost), {
+          requestId: asked.requestId,
+          answer: "yes",
+          via: "session",
+          now: T0,
+        }),
+      ).toEqual({ kind: "forbidden" });
+      const dmToken = asked.links.find((l) => l.personId === dm.id)?.token ?? "";
+      expect(await resolveRequestLink(port, dmToken, later(VERIFIED_REQUEST_TTL_MS))).toBeNull();
+      await port.batch([
+        {
+          sql: "UPDATE event_participation SET visibility = 'HIDDEN' WHERE canonical_event_id = ? AND person_id = ?",
+          params: [event.id, dm.id],
+        },
+      ]);
+      expect(await resolveRequestLink(port, dmToken, T0)).toBeNull();
+      await port.batch([
+        {
+          sql: "UPDATE event_participation SET visibility = 'FULL' WHERE canonical_event_id = ? AND person_id = ?",
+          params: [event.id, dm.id],
+        },
+      ]);
+      expect(await resolveRequestLink(port, dmToken, T0)).not.toBeNull();
+
+      // Bob, by his mailed link; the DM, signed in. The last yes stops verifying.
+      const bobLink = await resolveRequestLink(
+        port,
+        asked.links.find((l) => l.personId === bob)?.token ?? "",
+        T0,
+      );
+      if (bobLink === null) throw new Error("link");
+      expect(bobLink.requestId).toBe(asked.requestId);
+      expect(
+        await answerRequest(port, bobLink.access, {
+          requestId: asked.requestId,
+          answer: "yes",
+          via: "mailed",
+          now: later(1),
+        }),
+      ).toEqual({ kind: "recorded", outcome: null });
+      expect((await access(port, event.id, dm.id)).event.verifiedAt).toBe(T0);
+      expect(
+        await answerRequest(port, await access(port, event.id, dm.id), {
+          requestId: asked.requestId,
+          answer: "yes",
+          via: "session",
+          now: later(2),
+        }),
+      ).toEqual({ kind: "recorded", outcome: "agreed" });
+      const after = await access(port, event.id, dm.id);
+      expect(after.event.verifiedAt).toBeNull();
+      expect((await listHistory(port, after))[0]?.change).toEqual({
+        verified: { before: 1, after: 0 },
+      });
+      const [done] = await listVerifiedRequests(port, after, later(3));
+      expect(done).toMatchObject({ outcome: "agreed", closedAt: later(2), waitingFor: [] });
+      expect(done?.answers.map((a) => [a.personId, a.answer, a.via])).toEqual([
+        [ann, "yes", "session"],
+        [bob, "yes", "mailed"],
+        [dm.id, "yes", "session"],
+      ]);
+      // Decided: no more answers.
+      expect(
+        await answerRequest(port, after, {
+          requestId: asked.requestId,
+          answer: "no",
+          via: "session",
+          now: later(3),
+        }),
+      ).toEqual({ kind: "closed" });
+    });
+
+    it("everyone agrees (rc42): one no ends it; unanswered, it lapses after 14 days; newcomers must agree", async () => {
+      const port = await makePort();
+      const { dm, membership, ann, bob } = await table(port, "agree-no");
+      const event = await createEvent(port, {
+        creatorId: dm.id,
+        group: membership,
+        fields: { ...SESSION, startLocal: "2101-01-01T19:00", endLocal: "2101-01-01T23:00" },
+        now: T0,
+        verified: true,
+      });
+      const ask = async (
+        kind: "unverify" | "remove" | "shorten",
+        now: string,
+        retainDays?: number,
+      ) => {
+        const r = await askEveryone(port, await access(port, event.id, ann), {
+          kind,
+          now,
+          ...(retainDays === undefined ? {} : { retainDays }),
+        });
+        if (r.kind !== "asked") throw new Error(r.kind);
+        return r.requestId;
+      };
+      const answer = async (who: string, requestId: string, a: "yes" | "no", now: string) =>
+        answerRequest(port, await access(port, event.id, who), {
+          requestId,
+          answer: a,
+          via: "session",
+          now,
+        });
+
+      // Bob says no: refused at once, nothing changes, and another may be asked.
+      const first = await ask("remove", T0);
+      expect(await answer(bob, first, "no", later(1))).toEqual({
+        kind: "recorded",
+        outcome: "refused",
+      });
+      expect((await access(port, event.id, dm.id)).event.verifiedAt).toBe(T0);
+
+      // Unanswered: lapsed after 14 days, answers refused; asking again closes it as lapsed.
+      const second = await ask("unverify", later(2));
+      const past = later(2 + VERIFIED_REQUEST_TTL_MS);
+      expect(await answer(dm.id, second, "yes", past)).toEqual({ kind: "closed" });
+      expect(
+        (await listVerifiedRequests(port, await access(port, event.id, dm.id), past)).map(
+          (r) => r.outcome,
+        ),
+      ).toEqual(["refused", "lapsed"]);
+
+      // Shorter only; a newcomer added meanwhile must agree too; agreed, the period changes.
+      expect(
+        await askEveryone(port, await access(port, event.id, ann), {
+          kind: "shorten",
+          retainDays: 730,
+          now: past,
+        }),
+      ).toEqual({
+        kind: "invalid",
+      });
+      // The period it has already is not shorter either.
+      expect(
+        (
+          await askEveryone(port, await access(port, event.id, ann), {
+            kind: "shorten",
+            retainDays: 365,
+            now: past,
+          })
+        ).kind,
+      ).toBe("invalid");
+      const third = await ask("shorten", past, 90);
+      const rows = await port.query({
+        sql: "SELECT closed_at, outcome FROM verified_request WHERE id = ?",
+        params: [second],
+      });
+      expect(rows[0]).toEqual({ closed_at: later(2 + VERIFIED_REQUEST_TTL_MS), outcome: "lapsed" });
+      expect(
+        (
+          await addParticipant(port, await access(port, event.id, dm.id), {
+            email: "resp-cleo-agree-no@example.org",
+            editTier: "view",
+            visibility: "FULL",
+            now: past,
+          })
+        ).kind,
+      ).toBe("added");
+      const cleo = await findOrCreatePerson(port, "resp-cleo-agree-no@example.org", { now: T0 });
+      expect((await answer(bob, third, "yes", past)).kind).toBe("recorded");
+      expect(await answer(dm.id, third, "yes", past)).toEqual({ kind: "recorded", outcome: null });
+      expect(await answer(cleo.id, third, "yes", past)).toEqual({
+        kind: "recorded",
+        outcome: "agreed",
+      });
+      expect(await eventRetention(port, await access(port, event.id, dm.id))).toBe(90);
+    });
+
+    it("everyone agrees (rc42): removing for good purges it; alone, asking is agreeing", async () => {
+      const port = await makePort();
+      const { dm, membership, ann, bob } = await table(port, "agree-rm");
+      const event = await createEvent(port, {
+        creatorId: dm.id,
+        group: membership,
+        fields: SESSION,
+        now: T0,
+        verified: true,
+      });
+      const asked = await askEveryone(port, await access(port, event.id, dm.id), {
+        kind: "remove",
+        now: T0,
+      });
+      if (asked.kind !== "asked") throw new Error(asked.kind);
+      await answerRequest(port, await access(port, event.id, ann), {
+        requestId: asked.requestId,
+        answer: "yes",
+        via: "session",
+        now: T0,
+      });
+      // Bob leaves instead of answering: he is no longer waited for.
+      await leaveEvent(port, await access(port, event.id, bob), { now: T0 });
+      expect(await findEventForParticipant(port, event.id, bob)).toBeNull();
+      expect(
+        await answerRequest(port, await access(port, event.id, ann), {
+          requestId: asked.requestId,
+          answer: "yes",
+          via: "session",
+          now: later(1),
+        }),
+      ).toEqual({ kind: "recorded", outcome: "agreed" });
+      expect(await findEventForParticipant(port, event.id, dm.id)).toBeNull();
+      expect(
+        await port.query({
+          sql: "SELECT 1 AS n FROM verified_request WHERE id = ?",
+          params: [asked.requestId],
+        }),
+      ).toEqual([]);
+
+      // Alone on it, the asking decides it.
+      const solo = await createEvent(port, {
+        creatorId: dm.id,
+        group: null,
+        fields: SESSION,
+        now: T0,
+        verified: true,
+      });
+      const alone = await askEveryone(port, await access(port, solo.id, dm.id), {
+        kind: "unverify",
+        now: T0,
+      });
+      expect(alone).toMatchObject({ kind: "asked", links: [], outcome: "agreed" });
+      expect((await access(port, solo.id, dm.id)).event.verifiedAt).toBeNull();
     });
 
     it("a group's organizers make its new events verified; members can't (rc42)", async () => {

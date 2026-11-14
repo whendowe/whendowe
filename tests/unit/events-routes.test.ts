@@ -2073,6 +2073,159 @@ it("receipts (rc42): an opt-out, the cap or the provider stop one; the answer st
   ).toHaveLength(3);
 });
 
+it("everyone agrees (rc42): anyone on it asks; each is emailed a link; the page and history say who", async () => {
+  const h = await harness();
+  const { dm, group } = await setup(h);
+  const ann = await join(h, dm, group, "ann@example.org", "view", "FULL");
+  const grandma = await join(h, dm, group, "grandma@example.org", "view", "BUSY");
+  const plain = await createVia(h, dm, group);
+  expect(await text(h, plain, ann)).not.toContain("Ask everyone to agree");
+  const event = await createVia(h, dm, group, { ...NIGHT, verified: "on" });
+  const page = await text(h, event, ann);
+  expect(page).toContain("Ask everyone to agree");
+  expect(page).toContain(">Stop verifying answers<");
+  expect(page).toContain(">Remove it for good<");
+  // Shorter than the year it has: three choices, and not the year itself.
+  const asking = page.split("Ask everyone to agree")[1]?.split("</details>")[0] ?? "";
+  expect(asking.match(/<option value="\d+">/g)).toEqual([
+    '<option value="30">',
+    '<option value="90">',
+    '<option value="180">',
+  ]);
+  expect(
+    (await h.app.request(`${event}/ask`, post({ csrf: "x", kind: "unverify" }, ann.cookie))).status,
+  ).toBe(403);
+  expect(
+    (await h.app.request(`${event}/ask`, post({ csrf: ann.csrf, kind: "nope" }, ann.cookie)))
+      .status,
+  ).toBe(400);
+
+  // Ann, a viewer, asks: everyone else who sees it is emailed, in their tier's words.
+  const before = h.sent.length;
+  const asked = await h.app.request(
+    `${event}/ask`,
+    post({ csrf: ann.csrf, kind: "unverify" }, ann.cookie),
+  );
+  expect(asked.status).toBe(303);
+  const mails = h.sent.slice(before);
+  expect(mails.map((m) => m.to).sort()).toEqual(["dm@example.org", "grandma@example.org"]);
+  const toDm = mails.find((m) => m.to === "dm@example.org");
+  expect(toDm?.subject).toBe('Do you agree? "Session 12: the Sunken Keep"');
+  expect(toDm?.text).toContain('asks everyone on "Session 12: the Sunken Keep"');
+  expect(toDm?.text).toContain("to agree to stop verifying answers here.");
+  const toGrandma = mails.find((m) => m.to === "grandma@example.org");
+  expect(toGrandma?.subject).toMatch(/^Do you agree\? \(/);
+  expect(toGrandma?.text).not.toContain("Sunken Keep");
+  const again = await h.app.request(
+    `${event}/ask`,
+    post({ csrf: ann.csrf, kind: "remove" }, ann.cookie),
+  );
+  expect(again.status).toBe(409);
+  expect(await again.text()).toContain("Everyone is already being asked something");
+  // The page says so; Ann said yes by asking, and may still say no, which ends it.
+  const open = await text(h, event, ann);
+  expect(open).toContain(
+    "asks everyone on it to agree to <strong>stop verifying answers here</strong>",
+  );
+  expect(open).toContain('<span class="muted">You said yes. </span>');
+  expect(open).toMatch(/Waiting for: [^<]*dm/);
+
+  // Grandma, by her emailed link (a GET writes nothing, a POST answers).
+  const agreeUrl = new URL(
+    /https:\/\/[^\s]+\/agree\?t=[A-Za-z0-9_-]+/.exec(toGrandma?.text ?? "")?.[0] ?? "https://x/",
+  );
+  const linkPath = `${agreeUrl.pathname}${agreeUrl.search}`;
+  const linkPage = await (await h.app.request(linkPath)).text();
+  expect(linkPage).toContain(
+    "asks everyone on it to agree to <strong>stop verifying answers here</strong>",
+  );
+  expect(linkPage).not.toContain("Sunken Keep");
+  expect(
+    (await h.app.request("/agree", post({ t: agreeUrl.searchParams.get("t") ?? "" }))).status,
+  ).toBe(400);
+  const yes = await h.app.request(
+    "/agree",
+    post({ t: agreeUrl.searchParams.get("t") ?? "", answer: "yes" }),
+  );
+  expect(yes.status).toBe(303);
+  expect(await (await h.app.request(linkPath)).text()).toContain("You said yes.");
+  expect((await h.app.request("/agree", post({ t: "nope", answer: "yes" }))).status).toBe(404);
+
+  // The DM, signed in: the last yes. Verifying is off; the history tells each step.
+  const dmPage = await text(h, event, dm);
+  const requestId = /name="request" value="([^"]+)"/.exec(dmPage)?.[1] ?? "";
+  await h.app.request(
+    `${event}/agree`,
+    post({ csrf: dm.csrf, request: requestId, answer: "yes" }, dm.cookie),
+  );
+  const after = await text(h, event, dm);
+  expect(after).not.toContain("Answers here are verified:");
+  expect(after).not.toContain("Ask everyone to agree");
+  expect(after).toContain("Everyone agreed to stop verifying answers here.");
+  expect(after).toMatch(
+    /grandma said yes to stop verifying answers here <span class="muted">· by their emailed link/,
+  );
+  expect(after).toMatch(/asked everyone to agree to stop verifying answers here/);
+  // The asker's own yes is the asking: it isn't listed again.
+  expect(after.match(/ said yes to stop verifying/g)).toHaveLength(2);
+  expect(after).toContain("verified: verified → not verified");
+});
+
+it("everyone agrees (rc42): one no keeps it; removing for good needs everyone, then it's gone", async () => {
+  const h = await harness();
+  const { dm, group } = await setup(h);
+  const ann = await join(h, dm, group, "ann@example.org", "view", "FULL");
+  const event = await createVia(h, dm, group, { ...NIGHT, verified: "on" });
+  const answer = async (who: Who, a: string) => {
+    const requestId = /name="request" value="([^"]+)"/.exec(await text(h, event, who))?.[1] ?? "";
+    return h.app.request(
+      `${event}/agree`,
+      post({ csrf: who.csrf, request: requestId, answer: a }, who.cookie),
+    );
+  };
+  await h.app.request(
+    `${event}/ask`,
+    post({ csrf: dm.csrf, kind: "shorten", retain_days: "90" }, dm.cookie),
+  );
+  expect(await text(h, event, ann)).toContain("keep it for 3 months instead");
+  expect((await answer(ann, "no")).status).toBe(303);
+  const kept = await text(h, event, dm);
+  expect(kept).toContain(
+    "Not everyone agreed to keep it for 3 months instead, so it stays as it is.",
+  );
+  expect(kept).toContain("Answers here are verified:");
+  expect(
+    (
+      await h.app.request(
+        `${event}/ask`,
+        post({ csrf: dm.csrf, kind: "shorten", retain_days: "730" }, dm.cookie),
+      )
+    ).status,
+  ).toBe(400);
+
+  await h.app.request(`${event}/ask`, post({ csrf: dm.csrf, kind: "remove" }, dm.cookie));
+  // A no-change POST ("Pick yes or no") leaves it open.
+  expect((await answer(ann, "maybe")).status).toBe(400);
+  const gone = await answer(ann, "yes");
+  expect(gone.status).toBe(303);
+  expect(gone.headers.get("location")).toBe("/");
+  expect((await h.app.request(event, { headers: { cookie: dm.cookie } })).status).toBe(404);
+
+  // Alone on an event, asking to remove it is agreeing: it's gone, and you're sent home.
+  const solo = await h.app.request(
+    "/events",
+    post({ csrf: dm.csrf, ...NIGHT, verified: "on" }, dm.cookie),
+  );
+  const soloPath = solo.headers.get("location") ?? "";
+  const alone = await h.app.request(
+    `${soloPath}/ask`,
+    post({ csrf: dm.csrf, kind: "remove" }, dm.cookie),
+  );
+  expect(alone.status).toBe(303);
+  expect(alone.headers.get("location")).toBe("/");
+  expect((await h.app.request(soloPath, { headers: { cookie: dm.cookie } })).status).toBe(404);
+});
+
 it("a group's organizers make its new events verified; a member sees that, and can't change it (rc42)", async () => {
   const h = await harness();
   const { dm, group } = await setup(h);
