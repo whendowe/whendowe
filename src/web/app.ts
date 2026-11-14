@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { Hono } from "hono";
 import { revokeGoogleGrant } from "../oauth/token-exchange.js";
+import { UNAVAILABLE } from "../people/capability.js";
 import { findPersonById } from "../people/person.js";
 import type { RevokeCalendars } from "../privacy/erasure.js";
 import { suppressingMailPort } from "../privacy/suppression.js";
@@ -14,6 +15,7 @@ import { GROUPS_PATH, registerGroupRoutes } from "./routes/groups.js";
 import {
   CONNECT_PATH,
   googleConnectionOf,
+  maySync,
   type OAuthRouteDeps,
   registerOAuthRoutes,
 } from "./routes/oauth.js";
@@ -103,13 +105,22 @@ export function createApp(options: AppOptions = {}): Hono<AppEnv> {
       oauth === undefined || signedIn === null
         ? null
         : await googleConnectionOf(oauth.storage, signedIn.personId);
+    // Without `calendar_sync` (rc43) the button shows disabled with its line, and a
+    // connection already made says why its copies are no longer updated.
+    const allowed =
+      oauth === undefined || signedIn === null
+        ? true
+        : await maySync(oauth.storage, auth?.capabilities, signedIn.personId);
+    const unavailable = html`<span class="muted">${UNAVAILABLE.calendar_sync}</span>`;
     const button = (label: string) =>
       signedIn === null
         ? ""
-        : html`<form method="post" action="${CONNECT_PATH}">
+        : allowed
+          ? html`<form method="post" action="${CONNECT_PATH}">
   <input type="hidden" name="csrf" value="${signedIn.csrfToken}" />
   <button type="submit">${label}</button>
-</form>`;
+</form>`
+          : html`<p><button type="button" disabled>${label}</button> ${unavailable}</p>`;
     const connect =
       oauth === undefined
         ? html`<p class="muted">Google credentials are not configured on this instance.</p>`
@@ -117,7 +128,9 @@ export function createApp(options: AppOptions = {}): Hono<AppEnv> {
           ? button("Connect Google Calendar")
           : connection.status === "auth_error"
             ? html`<p>Google stopped accepting WhenDoWe's access to <strong>${connection.accountEmail}</strong>.</p>${button("Reconnect Google Calendar")}`
-            : html`<p class="muted">Google Calendar connected: ${connection.accountEmail}.</p>`;
+            : allowed
+              ? html`<p class="muted">Google Calendar connected: ${connection.accountEmail}.</p>`
+              : html`<p class="muted">Google Calendar connected: ${connection.accountEmail}. The events already there stay, and are no longer updated. ${UNAVAILABLE.calendar_sync}</p>`;
     return c.html(
       page(
         c,
