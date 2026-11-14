@@ -264,4 +264,6 @@ it("lists every calendar whose busy times can be read, owned ones marked, main f
     { id: "fam@group", name: "Family", primary: false, owned: false },
   ]);
   expect(new URL(calls[0]?.url ?? "").searchParams.get("minAccessRole")).toBe("freeBusyReader");
+  // A page with no items is no calendars.
+  expect(await listBusyCalendars(ACCESS_TOKEN, pagedFetch([{}]).impl)).toEqual([]);
 });

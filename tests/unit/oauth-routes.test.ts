@@ -854,9 +854,16 @@ it("ticking nothing counts no calendar; more than 50 ticks are refused before an
   const many = Array.from({ length: 51 }, (_, i) => `c${i}@group`);
   const refused = await chooseTicking(h, pending, "new", many);
   expect(refused.status).toBe(400);
-  expect(await refused.text()).toContain("Tick at most 50 calendars.");
+  const why = await refused.text();
+  expect(why).toContain("<h1>Choose a calendar</h1>");
+  expect(why).toContain("Tick at most 50 calendars.");
   expect(log.some((r) => r.method === "POST" && r.url === GOOGLE_CALENDARS_URL)).toBe(false);
   expect(await connections(h)).toEqual([]);
+
+  // Exactly 50 is allowed.
+  const h50 = await harness();
+  const fifty = await chooser(h50);
+  expect((await chooseTicking(h50, fifty.pending, "new", many.slice(0, 50))).status).toBe(200);
 
   const h2 = await harness();
   const second = await chooser(h2);
