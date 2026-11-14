@@ -771,7 +771,7 @@ async function chooser(
 it("asks whose busy times count: the calendars you own ticked, ones you follow not", async () => {
   const h = await harness(googleFake({ calendars: WITH_HOLIDAYS }));
   const { page } = await chooser(h);
-  expect(page).toContain("Whose busy times should show while you pick a time?");
+  expect(page).toContain("<fieldset><legend>Whose busy times should show while you pick a time?");
   expect(page).toContain('name="busy" value="someone@example.com" checked');
   expect(page).toContain('name="busy" value="family@group.calendar.google.com" />');
   expect(page).toContain('name="busy" value="holidays@group.v.calendar.google.com" />');
@@ -1756,9 +1756,9 @@ it("without calendar_sync: no Google busy times, the busy page disabled, its tic
 
   const refused = await saveBusy(h, [HOLIDAYS]);
   expect(refused.status).toBe(403);
-  expect(await refused.text()).toContain(
-    "Showing Google busy times isn&#39;t available to this account.",
-  );
+  const refusal = await refused.text();
+  expect(refusal).toContain("<h1>Busy times</h1>");
+  expect(refusal).toContain("Showing Google busy times isn&#39;t available to this account.");
   expect(await busyRows(h)).toEqual([HOLIDAYS, "someone@example.com"]);
 
   // Granted again, the same calendars count.
@@ -1770,4 +1770,36 @@ it("without calendar_sync: no Google busy times, the busy page disabled, its tic
   const enabled = await (await busyPage(h)).text();
   expect(enabled).toContain("<fieldset>");
   expect(enabled).toContain('<button type="submit">Save</button>');
+});
+
+it("the picker asks Google only for this account's own Google connection's ticks", async () => {
+  const log: Call[] = [];
+  let account = "someone@example.com";
+  const google = freeBusyFake({}, log);
+  const h = await harness((url, init) =>
+    url === GOOGLE_PRIMARY_CALENDAR_URL
+      ? googleFake({ calendarId: account })(url, init)
+      : google(url, init),
+  );
+  await connectTicking(h, []);
+  // A calendar of another provider's connection, ticked: never Google's to answer.
+  await h.storage.batch([
+    {
+      sql: `INSERT INTO calendar_connection (id, owner_id, provider, account_email, calendar_id,
+              access_token_enc, refresh_token_enc, status, created_at, updated_at)
+            VALUES ('a-dav', ?, 'caldav', 'dav@example.org', 'dav', 'e', 'e', 'active', ?, ?)`,
+      params: [h.personId, NOW, NOW],
+    },
+    {
+      sql: "INSERT INTO busy_calendar (connection_id, calendar_id) VALUES ('a-dav', 'dav')",
+      params: [],
+    },
+  ]);
+  account = "other@example.com";
+  const other = await signIn(h, "second@example.org");
+  const theirs = await chooser(h, other);
+  await chooseTicking(h, theirs.pending, "new", ["someone@example.com"], other);
+
+  expect(await pickerBusy(h)).toEqual({ busy: [] });
+  expect(freeBusyCalls(log)).toBe(0);
 });

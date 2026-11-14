@@ -316,6 +316,11 @@ it("returns the busy spans of the calendars asked, skipping ones Google couldn't
   ).toEqual([span(1), span(3)]);
 });
 
+it("an answer naming no calendars is no busy times", async () => {
+  const { impl } = fakeFetch(200, JSON.stringify({ kind: "calendar#freeBusy" }));
+  expect(await fetchFreeBusy(ACCESS_TOKEN, { ...RANGE, ids: ["a@example.com"] }, impl)).toEqual([]);
+});
+
 it("asks nothing for no calendars, and passes a failure on without the token", async () => {
   const none = fakeFetch(200, "{}");
   expect(await fetchFreeBusy(ACCESS_TOKEN, { ...RANGE, ids: [] }, none.impl)).toEqual([]);
