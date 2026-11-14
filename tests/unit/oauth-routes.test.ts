@@ -933,7 +933,9 @@ it("saving replaces the ticks with the ones Google lists; forged and made-by-us 
   expect(await busyRows(h)).toEqual([]);
   // CSRF on the POST; too many ticks refused; nothing changed by either.
   await saveBusy(h, ["someone@example.com"]);
-  expect((await saveBusy(h, ["family@group.calendar.google.com"], "forged")).status).toBe(403);
+  const forged = await saveBusy(h, ["family@group.calendar.google.com"], "forged");
+  expect(forged.status).toBe(403);
+  expect(await forged.text()).toContain("<h1>Request rejected</h1><p>Please try again.</p>");
   const many = Array.from({ length: 51 }, (_, i) => `c${i}@group`);
   const tooMany = await saveBusy(h, many);
   expect(tooMany.status).toBe(400);
@@ -997,15 +999,52 @@ it("an expired access token is refreshed for the page only, and never saved", as
   expect(asked).toHaveLength(1);
   expect(new URLSearchParams(asked[0]?.body ?? "").get("grant_type")).toBe("refresh_token");
   expect(await connections(h)).toEqual(before);
+  // Exactly a minute before expiring is not fresh enough either.
+  h.now.value = new Date(new Date(NOW).getTime() + 3600_000 - 60_000).toISOString();
+  log.length = 0;
+  await busyPage(h);
+  expect(log.filter((r) => r.url === GOOGLE_TOKEN_ENDPOINT)).toHaveLength(1);
+  // A minute and a millisecond is.
+  h.now.value = new Date(new Date(NOW).getTime() + 3600_000 - 60_001).toISOString();
+  log.length = 0;
+  await busyPage(h);
+  expect(log.filter((r) => r.url === GOOGLE_TOKEN_ENDPOINT)).toHaveLength(0);
+  // No expiry known: refreshed.
+  await h.storage.batch([
+    { sql: "UPDATE calendar_connection SET token_expiry = NULL", params: [] },
+  ]);
+  log.length = 0;
+  await busyPage(h);
+  expect(log.filter((r) => r.url === GOOGLE_TOKEN_ENDPOINT)).toHaveLength(1);
+});
+
+it("a calendar of your own that events go into is still listed; only one WhenDoWe made isn't", async () => {
+  const h = await harness();
+  const { pending } = await chooser(h);
+  await chooseTicking(h, pending, "family@group.calendar.google.com", []);
+  const page = await (await busyPage(h)).text();
+  expect(page).toContain("<h1>Busy times</h1>");
+  expect(page).toContain('name="busy" value="family@group.calendar.google.com" />');
 });
 
 it("signed out, not connected, Google stopped accepting, or Google not answering", async () => {
   const h = await harness();
   expect((await h.app.request(BUSY_PATH)).status).toBe(303);
+  const signedOut = await h.app.request(BUSY_PATH, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: "busy=someone%40example.com",
+  });
+  expect(signedOut.status).toBe(303);
+  expect(signedOut.headers.get("location")).toBe(SIGN_IN_PATH);
   const none = await busyPage(h);
   expect(none.status).toBe(404);
-  expect(await none.text()).toContain("Connect Google Calendar first");
-  expect((await saveBusy(h, [])).status).toBe(404);
+  const noneText = await none.text();
+  expect(noneText).toContain("<h1>Busy times</h1>");
+  expect(noneText).toContain("Connect Google Calendar first");
+  const noneSave = await saveBusy(h, []);
+  expect(noneSave.status).toBe(404);
+  expect(await noneSave.text()).toContain("<h1>Busy times</h1>");
   await connect(h);
   await h.storage.batch([
     { sql: "UPDATE calendar_connection SET status = 'auth_error'", params: [] },
@@ -1021,9 +1060,12 @@ it("signed out, not connected, Google stopped accepting, or Google not answering
   failing.on = true;
   const page = await busyPage(down);
   expect(page.status).toBe(502);
-  expect(await page.text()).toContain("Google didn't answer just now.");
+  const pageText = await page.text();
+  expect(pageText).toContain("<h1>Busy times</h1>");
+  expect(pageText).toContain("Google didn't answer just now.");
   const save = await saveBusy(down, ["someone@example.com"]);
   expect(save.status).toBe(502);
+  expect(await save.text()).toContain("<h1>Busy times</h1>");
   expect(await busyRows(down)).toEqual([]);
   failing.on = false;
 });
