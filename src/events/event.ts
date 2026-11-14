@@ -5,7 +5,9 @@ import { type Diff, diff } from "../changelog.js";
 import type { SqlStatement, StoragePort } from "../db/port.js";
 import { uuidv7 } from "../ids.js";
 import type { GroupMembership } from "../people/group.js";
-import { type Shown, shownAs } from "../people/person.js";
+import { visibilitySchema } from "../people/invite.js";
+import { type Shown, shownAs, shownRowSchema } from "../people/person.js";
+import { hashToken, issueToken } from "../people/tokens.js";
 import { purge } from "../privacy/purge.js";
 import { expandOccurrences, formatRRule, parseRRule } from "../recurrence.js";
 import {
@@ -907,4 +909,413 @@ export async function setEventRetention(
     },
   ]);
   return "saved";
+}
+
+// --- Everyone agrees (DESIGN §10 rc42 *Who really answered*) ---------------------------
+//
+// A verified event stays as the record: stopping verifying, removing it for good and
+// keeping it for less long each need everyone on it to agree. Anyone on it may ask; each
+// other person answers yes or no, by a link mailed to them or signed in. Any "no" ends the
+// request, and it lapses after 14 days. Everyone who sees the event must have said yes,
+// including someone added meanwhile; someone who left is no longer asked.
+
+export const VERIFIED_REQUEST_TTL_MS = 14 * 24 * 60 * 60 * 1000;
+
+export const requestKindSchema = z.enum(["unverify", "remove", "shorten"]);
+export type RequestKind = z.infer<typeof requestKindSchema>;
+export type RequestOutcome = "agreed" | "refused" | "lapsed";
+
+export interface RequestAnswer {
+  readonly personId: string;
+  readonly shown: Shown;
+  readonly answer: "yes" | "no";
+  readonly via: "session" | "mailed";
+  readonly at: string;
+}
+
+export interface VerifiedRequest {
+  readonly id: string;
+  readonly kind: RequestKind;
+  /** For `shorten`: the period asked for. */
+  readonly retainDays: number | null;
+  readonly askedBy: Shown | null;
+  readonly askedById: string | null;
+  readonly askedAt: string;
+  readonly expiresAt: string;
+  /** Null while open. `lapsed` also for one past its time that nobody has closed yet. */
+  readonly outcome: RequestOutcome | null;
+  readonly closedAt: string | null;
+  readonly answers: readonly RequestAnswer[];
+  /** Who still has to say yes, while it is open. */
+  readonly waitingFor: readonly { readonly personId: string; readonly shown: Shown }[];
+}
+
+/** A link to answer a request, to mail to one person; never stored raw. */
+export interface RequestLink {
+  readonly personId: string;
+  readonly email: string;
+  readonly visibility: EventAccess["participation"]["visibility"];
+  readonly token: string;
+}
+
+export type AskResult =
+  | {
+      readonly kind: "asked";
+      readonly requestId: string;
+      readonly links: readonly RequestLink[];
+      /** Set when nobody else had to agree, so it was decided at once. */
+      readonly outcome: "agreed" | null;
+    }
+  | { readonly kind: "forbidden" }
+  | { readonly kind: "not_verified" }
+  /** Another request is still open. */
+  | { readonly kind: "open" }
+  /** `shorten` to a period that isn't shorter. */
+  | { readonly kind: "invalid" };
+
+/** The people who must say yes: everyone on it who can see it. */
+const MUST_AGREE = `SELECT ep.person_id FROM event_participation ep
+  WHERE ep.canonical_event_id = ? AND ep.visibility <> 'HIDDEN'`;
+
+/** Close a request past its time as lapsed; the next request may then be asked. */
+function lapseStatement(eventId: string, now: string): SqlStatement {
+  return {
+    sql: `UPDATE verified_request SET closed_at = expires_at, outcome = 'lapsed'
+          WHERE canonical_event_id = ? AND closed_at IS NULL AND expires_at <= ?`,
+    params: [eventId, now],
+  };
+}
+
+/** Ask everyone on a verified event to agree. The asker's own yes is the asking. */
+export async function askEveryone(
+  storage: StoragePort,
+  access: EventAccess,
+  input: {
+    readonly kind: RequestKind;
+    readonly retainDays?: number;
+    readonly now: string;
+    readonly newId?: () => string;
+    readonly newToken?: () => Promise<{ readonly token: string; readonly hash: string }>;
+  },
+): Promise<AskResult> {
+  const { event, participation } = access;
+  if (participation.visibility === "HIDDEN") return { kind: "forbidden" };
+  if (event.verifiedAt === null) return { kind: "not_verified" };
+  const retainDays = input.kind === "shorten" ? (input.retainDays ?? null) : null;
+  if (
+    input.kind === "shorten" &&
+    (retainDays === null || retainDays >= (await eventRetention(storage, access)))
+  )
+    return { kind: "invalid" };
+  const id = (input.newId ?? (() => uuidv7()))();
+  const expiresAt = new Date(Date.parse(input.now) + VERIFIED_REQUEST_TTL_MS).toISOString();
+  await storage.batch([
+    lapseStatement(event.id, input.now),
+    {
+      sql: `INSERT INTO verified_request
+              (id, canonical_event_id, kind, retain_days, asked_by, asked_at, expires_at)
+            SELECT ?, ?, ?, ?, ?, ?, ?
+            WHERE NOT EXISTS (SELECT 1 FROM verified_request
+                              WHERE canonical_event_id = ? AND closed_at IS NULL)`,
+      params: [
+        id,
+        event.id,
+        input.kind,
+        retainDays,
+        participation.personId,
+        input.now,
+        expiresAt,
+        event.id,
+      ],
+    },
+    {
+      sql: `INSERT INTO verified_request_answer (request_id, person_id, answer, answered_at, answered_via)
+            SELECT ?, ?, 'yes', ?, 'session' WHERE EXISTS (SELECT 1 FROM verified_request WHERE id = ?)`,
+      params: [id, participation.personId, input.now, id],
+    },
+  ]);
+  const made = await storage.query({
+    sql: "SELECT 1 AS ok FROM verified_request WHERE id = ?",
+    params: [id],
+  });
+  if (made.length === 0) return { kind: "open" };
+
+  const others = (
+    await storage.query({
+      sql: `SELECT ep.person_id, p.email, ep.visibility
+            FROM event_participation ep JOIN person p ON p.id = ep.person_id
+            WHERE ep.canonical_event_id = ? AND ep.visibility <> 'HIDDEN' AND ep.person_id <> ?
+              AND p.erased_at IS NULL
+            ORDER BY p.email`,
+      params: [event.id, participation.personId],
+    })
+  ).map((r) =>
+    z.object({ person_id: z.string(), email: z.string(), visibility: visibilitySchema }).parse(r),
+  );
+  const links: RequestLink[] = [];
+  const statements: SqlStatement[] = [];
+  for (const o of others) {
+    const issued = await (input.newToken ?? issueToken)();
+    statements.push({
+      sql: `INSERT INTO verified_request_token (token_hash, request_id, person_id, expires_at)
+            VALUES (?, ?, ?, ?)`,
+      params: [issued.hash, id, o.person_id, expiresAt],
+    });
+    links.push({
+      personId: o.person_id,
+      email: o.email,
+      visibility: o.visibility,
+      token: issued.token,
+    });
+  }
+  if (statements.length > 0) await storage.batch(statements);
+  const outcome = await decide(storage, access, id, input.now);
+  return { kind: "asked", requestId: id, links, outcome: outcome === "agreed" ? "agreed" : null };
+}
+
+export type AnswerRequestResult =
+  | { readonly kind: "recorded"; readonly outcome: RequestOutcome | null }
+  | { readonly kind: "forbidden" }
+  /** Decided, lapsed, or not this event's. */
+  | { readonly kind: "closed" };
+
+/**
+ * Answer a request yes or no: signed in, or by the link mailed to you — never a copied
+ * link. A "no" ends it at once; the last yes decides it, and what was asked happens.
+ */
+export async function answerRequest(
+  storage: StoragePort,
+  access: EventAccess,
+  input: {
+    readonly requestId: string;
+    readonly answer: "yes" | "no";
+    readonly via: "session" | "mailed";
+    readonly now: string;
+  },
+): Promise<AnswerRequestResult> {
+  if (access.participation.visibility === "HIDDEN") return { kind: "forbidden" };
+  const written = await storage.query({
+    sql: `INSERT INTO verified_request_answer (request_id, person_id, answer, answered_at, answered_via)
+          SELECT r.id, ?, ?, ?, ? FROM verified_request r
+          WHERE r.id = ? AND r.canonical_event_id = ? AND r.closed_at IS NULL AND r.expires_at > ?
+          ON CONFLICT (request_id, person_id) DO UPDATE
+            SET answer = excluded.answer, answered_at = excluded.answered_at,
+                answered_via = excluded.answered_via
+          RETURNING request_id`,
+    params: [
+      access.participation.personId,
+      input.answer,
+      input.now,
+      input.via,
+      input.requestId,
+      access.event.id,
+      input.now,
+    ],
+  });
+  if (written.length === 0) return { kind: "closed" };
+  return { kind: "recorded", outcome: await decide(storage, access, input.requestId, input.now) };
+}
+
+/**
+ * Close the request if it is decided, and do what it asked. Each close is one guarded
+ * UPDATE, so two last answers at once decide it once. Removing for good follows its close:
+ * the event and everything under it go together (purge), unless its copies are still in a
+ * calendar, as for any deletion (rc21).
+ */
+async function decide(
+  storage: StoragePort,
+  access: EventAccess,
+  requestId: string,
+  now: string,
+): Promise<RequestOutcome | null> {
+  const eventId = access.event.id;
+  const refused = await storage.query({
+    sql: `UPDATE verified_request SET closed_at = ?, outcome = 'refused'
+          WHERE id = ? AND closed_at IS NULL
+            AND EXISTS (SELECT 1 FROM verified_request_answer WHERE request_id = ? AND answer = 'no')
+          RETURNING id`,
+    params: [now, requestId, requestId],
+  });
+  if (refused.length > 0) return "refused";
+  const agreed = await storage.query({
+    sql: `UPDATE verified_request SET closed_at = ?, outcome = 'agreed'
+          WHERE id = ? AND closed_at IS NULL
+            AND NOT EXISTS (${MUST_AGREE} AND NOT EXISTS (
+              SELECT 1 FROM verified_request_answer a
+              WHERE a.request_id = ? AND a.person_id = ep.person_id AND a.answer = 'yes'))
+          RETURNING kind, retain_days, asked_by`,
+    params: [now, requestId, eventId, requestId],
+  });
+  const row = agreed[0];
+  if (row === undefined) return null;
+  const r = z
+    .object({
+      kind: requestKindSchema,
+      retain_days: z.number().nullable(),
+      asked_by: z.string().nullable(),
+    })
+    .parse(row);
+  switch (r.kind) {
+    case "unverify":
+      await storage.batch([
+        {
+          sql: `UPDATE canonical_event SET verified_at = NULL, revision = revision + 1, updated_at = ?
+                WHERE id = ? AND verified_at IS NOT NULL`,
+          params: [now, eventId],
+        },
+        {
+          sql: `INSERT INTO change_log (canonical_event_id, revision, actor, source, diff, created_at)
+                SELECT ?, (SELECT revision FROM canonical_event WHERE id = ?), ?, 'ui', ?, ?
+                WHERE changes() = 1`,
+          params: [
+            eventId,
+            eventId,
+            r.asked_by ?? access.participation.personId,
+            JSON.stringify(diff({ verified: 1 }, { verified: 0 })),
+            now,
+          ],
+        },
+      ]);
+      break;
+    case "shorten":
+      await storage.batch([
+        {
+          sql: "UPDATE canonical_event SET retain_days = ? WHERE id = ?",
+          params: [r.retain_days ?? DEFAULT_RETAIN, eventId],
+        },
+      ]);
+      break;
+    case "remove":
+      await purge(storage, "event", eventId, now);
+      break;
+    default: {
+      const unreachable: never = r.kind;
+      return unreachable;
+    }
+  }
+  return "agreed";
+}
+
+const DEFAULT_RETAIN = 365;
+
+const requestRowSchema = z.object({
+  id: z.string(),
+  kind: requestKindSchema,
+  retain_days: z.number().nullable(),
+  asked_by: z.string().nullable(),
+  asked_at: z.string(),
+  expires_at: z.string(),
+  closed_at: z.string().nullable(),
+  outcome: z.enum(["agreed", "refused", "lapsed"]).nullable(),
+  email: z.string().nullable(),
+  display_name: z.string().nullable(),
+  handle: z.string().nullable(),
+  show_email: z.number().nullable(),
+});
+
+const requestAnswerRowSchema = z.object({
+  request_id: z.string(),
+  person_id: z.string(),
+  answer: z.enum(["yes", "no"]),
+  answered_via: z.enum(["session", "mailed"]),
+  answered_at: z.string(),
+  email: z.string(),
+  display_name: z.string().nullable(),
+  handle: z.string().nullable(),
+  show_email: z.number().nullable(),
+});
+
+/** Every request on this event, oldest first, with its answers; for its page and history. */
+export async function listVerifiedRequests(
+  storage: StoragePort,
+  access: EventAccess,
+  now: string,
+): Promise<VerifiedRequest[]> {
+  if (access.participation.visibility === "HIDDEN") return [];
+  const eventId = access.event.id;
+  const requests = (
+    await storage.query({
+      sql: `SELECT r.id, r.kind, r.retain_days, r.asked_by, r.asked_at, r.expires_at, r.closed_at,
+              r.outcome, p.email, p.display_name, ep.handle, ${shownEmailSql("ep")} AS show_email
+            FROM verified_request r LEFT JOIN person p ON p.id = r.asked_by
+              LEFT JOIN event_participation ep
+                ON ep.canonical_event_id = r.canonical_event_id AND ep.person_id = r.asked_by
+            WHERE r.canonical_event_id = ? ORDER BY r.asked_at, r.id`,
+      params: [eventId],
+    })
+  ).map((row) => requestRowSchema.parse(row));
+  const answers = (
+    await storage.query({
+      sql: `SELECT a.request_id, a.person_id, a.answer, a.answered_via, a.answered_at,
+              p.email, p.display_name, ep.handle, ${shownEmailSql("ep")} AS show_email
+            FROM verified_request_answer a
+              JOIN verified_request r ON r.id = a.request_id
+              JOIN person p ON p.id = a.person_id
+              LEFT JOIN event_participation ep
+                ON ep.canonical_event_id = r.canonical_event_id AND ep.person_id = a.person_id
+            WHERE r.canonical_event_id = ? ORDER BY a.answered_at, a.person_id`,
+      params: [eventId],
+    })
+  ).map((row) => requestAnswerRowSchema.parse(row));
+  const waiting = (
+    await storage.query({
+      sql: `SELECT ep.person_id, p.email, p.display_name, ep.handle, ${shownEmailSql("ep")} AS show_email
+            FROM event_participation ep JOIN person p ON p.id = ep.person_id
+            WHERE ep.canonical_event_id = ? AND ep.visibility <> 'HIDDEN'
+            ORDER BY ep.created_at, ep.person_id`,
+      params: [eventId],
+    })
+  ).map((row) => shownRowSchema.extend({ person_id: z.string() }).parse(row));
+  return requests.map((r) => {
+    const mine = answers.filter((a) => a.request_id === r.id);
+    const open = r.closed_at === null && r.expires_at > now;
+    return {
+      id: r.id,
+      kind: r.kind,
+      retainDays: r.retain_days,
+      askedById: r.asked_by,
+      askedBy:
+        r.asked_by === null || r.email === null
+          ? null
+          : shownAs(r.asked_by, { ...r, email: r.email }, eventId),
+      askedAt: r.asked_at,
+      expiresAt: r.expires_at,
+      closedAt: r.closed_at ?? (open ? null : r.expires_at),
+      outcome: r.outcome ?? (open ? null : "lapsed"),
+      answers: mine.map((a) => ({
+        personId: a.person_id,
+        shown: shownAs(a.person_id, a, eventId),
+        answer: a.answer,
+        via: a.answered_via,
+        at: a.answered_at,
+      })),
+      waitingFor: open
+        ? waiting
+            .filter((w) => !mine.some((a) => a.person_id === w.person_id && a.answer === "yes"))
+            .map((w) => ({ personId: w.person_id, shown: shownAs(w.person_id, w, eventId) }))
+        : [],
+    };
+  });
+}
+
+/** The request and the person a mailed request link is for, or null. Read-only. */
+export async function resolveRequestLink(
+  storage: StoragePort,
+  token: string,
+  now: string,
+): Promise<{ readonly access: EventAccess; readonly requestId: string } | null> {
+  if (token === "") return null;
+  const rows = await storage.query({
+    sql: `SELECT t.request_id, t.person_id, r.canonical_event_id
+          FROM verified_request_token t JOIN verified_request r ON r.id = t.request_id
+          WHERE t.token_hash = ? AND t.expires_at > ? AND r.canonical_event_id IS NOT NULL`,
+    params: [await hashToken(token), now],
+  });
+  if (rows[0] === undefined) return null;
+  const r = z
+    .object({ request_id: z.string(), person_id: z.string(), canonical_event_id: z.string() })
+    .parse(rows[0]);
+  const access = await findEventForParticipant(storage, r.canonical_event_id, r.person_id);
+  if (access === null || access.participation.visibility === "HIDDEN") return null;
+  return { access, requestId: r.request_id };
 }

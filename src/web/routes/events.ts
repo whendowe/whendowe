@@ -4,6 +4,8 @@ import { Temporal } from "temporal-polyfill";
 import { ZodError } from "zod";
 import type { StoragePort } from "../../db/port.js";
 import {
+  answerRequest,
+  askEveryone,
   type CanonicalEvent,
   canDelete,
   createEvent,
@@ -19,10 +21,14 @@ import {
   isOver,
   listEventsFor,
   listHistory,
+  listVerifiedRequests,
+  type RequestKind,
+  requestKindSchema,
   setCancelled,
   setEventRetention,
   setVerified,
   type TransitionResult,
+  type VerifiedRequest,
   withdrawProposal,
 } from "../../events/event.js";
 import {
@@ -84,7 +90,7 @@ import {
   ThreadInputError,
   type ThreadSummary,
 } from "../../plans/thread.js";
-import { retainDaysSchema } from "../../privacy/retention.js";
+import { RETAIN_CHOICES, retainDaysSchema } from "../../privacy/retention.js";
 import {
   formatRRule,
   parseRRule,
@@ -116,7 +122,13 @@ import {
 import { appearanceSection, saveAppearance } from "./account.js";
 // A cycle (plans.ts links back to events), safe: both are read only inside handlers.
 import { PLANS_PATH } from "./plans.js";
-import { respondUrl, sendEventReceipt, sendResponseLink } from "./respond.js";
+import {
+  requestWhat,
+  respondUrl,
+  sendEventReceipt,
+  sendRequestLink,
+  sendResponseLink,
+} from "./respond.js";
 
 // Event pages (MVP-2 slice 2B). Every read goes through findEventForParticipant (no
 // IDOR), and every rendering goes through canSee / canSeeField — the single rule for
@@ -993,10 +1005,90 @@ const UNSENT_WHY: Record<ReceiptUnsent, string> = {
   failed: "the email could not be sent",
 };
 
+/**
+ * rc42: what everyone on a verified event must agree to — the open request and your
+ * answer to it, or the ways to ask. Shown to everyone who sees the event.
+ */
+function requestSection(
+  access: EventAccess,
+  requests: readonly VerifiedRequest[],
+  retainDays: number,
+  csrf: string,
+): Html | string {
+  const { event, participation } = access;
+  const open = requests.find((r) => r.outcome === null);
+  if (open !== undefined) {
+    const mine = open.answers.find((a) => a.personId === participation.personId);
+    return html`<section class="wd-agree"><h2>Everyone agrees?</h2>
+<p><strong>${open.askedBy === null ? "Someone" : who(open.askedBy)}</strong> asks everyone on it to agree to <strong>${requestWhat(open.kind, open.retainDays)}</strong>. It happens only if everyone says yes; one "no", or not answering by ${open.expiresAt.slice(0, 10)}, keeps it as it is.</p>
+<p class="muted">Yes so far: ${open.answers
+      .filter((a) => a.answer === "yes")
+      .map((a) => a.shown.name)
+      .join(", ")}. Waiting for: ${open.waitingFor.map((w) => w.shown.name).join(", ")}.</p>
+${
+  mine === undefined || mine.answer === "yes"
+    ? html`<form method="post" action="${EVENTS_PATH}/${event.id}/agree">
+  <input type="hidden" name="csrf" value="${csrf}" /><input type="hidden" name="request" value="${open.id}" />
+  <p>${mine === undefined ? "" : html`<span class="muted">You said yes. </span>`}<button type="submit" name="answer" value="yes">Yes, I agree</button> <button type="submit" name="answer" value="no">No</button></p>
+</form>`
+    : ""
+}</section>`;
+  }
+  if (event.verifiedAt === null) return "";
+  const shorter = RETAIN_CHOICES.filter((c) => c.days < retainDays);
+  const ask = (kind: RequestKind, label: string, extra: Html | string = "") =>
+    html`<form method="post" action="${EVENTS_PATH}/${event.id}/ask" style="display:inline">
+  <input type="hidden" name="csrf" value="${csrf}" /><input type="hidden" name="kind" value="${kind}" />${extra}<button type="submit">${label}</button></form>`;
+  return html`<details class="wd-agree"><summary>Ask everyone to agree</summary>
+<p>Answers here are verified, so these need everyone on it to say yes, by their own email or signed in. Each is asked by email and has 14 days.</p>
+<p>${ask("unverify", "Stop verifying answers")} ${ask("remove", "Remove it for good")}</p>
+${
+  shorter.length === 0
+    ? ""
+    : html`<p>${ask(
+        "shorten",
+        "Keep it for less long",
+        html`<select name="retain_days">${shorter.map((c) => html`<option value="${c.days}">${c.label}</option>`)}</select> `,
+      )}</p>`
+}</details>`;
+}
+
+/** rc42: a request's steps, for the history. */
+function requestHistory(requests: readonly VerifiedRequest[]): { at: string; entry: Html }[] {
+  const at = (s: string) => html`<span class="muted">${s.slice(0, 16).replace("T", " ")}</span> · `;
+  return requests.flatMap((r) => {
+    const what = requestWhat(r.kind, r.retainDays);
+    const steps = [
+      {
+        at: r.askedAt,
+        entry: html`${at(r.askedAt)}${r.askedBy === null ? "someone" : who(r.askedBy)} asked everyone to agree to ${what}`,
+      },
+      ...r.answers
+        .filter((a) => a.personId !== r.askedById)
+        .map((a) => ({
+          at: a.at,
+          entry: html`${at(a.at)}${who(a.shown)} said ${a.answer} to ${what} <span class="muted">· ${a.via === "session" ? "signed in" : "by their emailed link"}</span>`,
+        })),
+    ];
+    if (r.outcome !== null && r.closedAt !== null)
+      steps.push({
+        at: r.closedAt,
+        entry: html`${at(r.closedAt)}${
+          r.outcome === "agreed"
+            ? `Everyone agreed to ${what}.`
+            : r.outcome === "refused"
+              ? `Not everyone agreed to ${what}, so it stays as it is.`
+              : `Not everyone answered in 14 days, so it stays as it is.`
+        }`,
+      });
+    return steps;
+  });
+}
+
 /** rc42: why a verified event isn't deleted for good by one editor. */
 function verifiedKeeps(eventId: string): Html {
   return html`<h1>Answers here are verified</h1>
-<p>So it stays as the record until everyone on it agrees to remove it — asking them comes in a later release. You can cancel it, and you can leave it.</p>
+<p>So it stays as the record until everyone on it agrees to remove it: you can ask them from its page. You can cancel it, and you can leave it.</p>
 <p><a href="${EVENTS_PATH}/${eventId}">← Back</a></p>`;
 }
 
@@ -1136,6 +1228,7 @@ async function eventPage(
     ? await listParticipantChanges(deps.storage, access)
     : [];
   const unsent = see("participants") ? await listUnsentReceipts(deps.storage, access) : [];
+  const requests = await listVerifiedRequests(deps.storage, access, deps.now());
   // One attributed trail, newest first (DESIGN rc15): edits and people changes together.
   const history = [
     ...edits.map((h) => ({ at: h.at, entry: historyEntry(h) })),
@@ -1144,6 +1237,7 @@ async function eventPage(
       at: u.at,
       entry: html`<span class="muted">${u.at.slice(0, 16).replace("T", " ")}</span> · No receipt went to ${who(u.shown)} for their answer: ${UNSENT_WHY[u.reason]}`,
     })),
+    ...requestHistory(requests),
     ...peopleChanges.map((h) => ({
       at: h.at,
       entry: html`<span class="muted">${h.at.slice(0, 16).replace("T", " ")}</span> · ${
@@ -1179,6 +1273,7 @@ ${people.length === 0 ? "" : peopleSection(access, people, csrf)}
 ${see("participants") ? await appearanceSection(deps.storage, { kind: "event", id: event.id }, { personId: participation.personId, csrfToken: csrf }, `${EVENTS_PATH}/${event.id}/me`, "event") : ""}
 ${event.verifiedAt === null ? ownAnswersForm({ action: `${EVENTS_PATH}/${event.id}/own-answers`, hidden: { csrf }, on: participation.ownAnswersOnly, where: "here" }) : ""}
 ${event.verifiedAt === null && participation.editTier === "edit" ? verifyForm(event.id, csrf) : ""}
+${requestSection(access, requests, await eventRetention(deps.storage, access), csrf)}
 ${await responsesSection(deps, access, csrf)}
 ${retentionSection({
   days: await eventRetention(deps.storage, access),
@@ -1685,6 +1780,94 @@ ${pollForm(`/groups/${membership.group.id}/polls`, csrf, values, error, html`${p
       return c.html(notFound(c), 404);
     const id = access.event.id;
     return saveAppearance(c, deps.storage, { kind: "event", id }, `${EVENTS_PATH}/${id}`);
+  });
+
+  // rc42: asking everyone on a verified event to agree, and answering.
+  app.post(`${EVENTS_PATH}/:id/ask`, async (c) => {
+    const me = requireSignedIn(c);
+    if (me instanceof Response) return me;
+    const form = await c.req.parseBody();
+    if (!(await verifyFormCsrf(me, form))) return rejectedPage(c, form);
+    const access = await findEventForParticipant(deps.storage, c.req.param("id"), me.personId);
+    if (access === null || access.participation.visibility === "HIDDEN")
+      return c.html(notFound(c), 404);
+    const kind = requestKindSchema.safeParse(form.kind);
+    const days = retainDaysSchema.safeParse(form.retain_days);
+    const refuse = async (why: string, status: 200 | 400 | 409) =>
+      c.html(await eventPage(c, deps, access, me.csrfToken, why), status);
+    if (!kind.success) return refuse("Choose what to ask.", 400);
+    const now = deps.now();
+    const asked = await askEveryone(deps.storage, access, {
+      kind: kind.data,
+      ...(days.success ? { retainDays: days.data } : {}),
+      now,
+    });
+    switch (asked.kind) {
+      case "forbidden":
+        return c.html(notFound(c), 404);
+      case "not_verified":
+        return refuse("Answers here aren't verified, so this needs nobody else's agreement.", 409);
+      case "open":
+        return refuse(
+          "Everyone is already being asked something; that has to be decided first.",
+          409,
+        );
+      case "invalid":
+        return refuse("Choose a shorter period than it has now.", 400);
+      case "asked":
+        break;
+    }
+    if (asked.outcome === "agreed" && kind.data === "remove") return c.redirect("/", 303);
+    const from =
+      (await appearanceIn(deps.storage, { kind: "event", id: access.event.id }, me.personId))?.shown
+        .name ?? "Someone";
+    let failed = 0;
+    for (const link of asked.links) {
+      try {
+        await sendRequestLink(deps.mail, {
+          link,
+          access,
+          kind: kind.data,
+          retainDays: days.success ? days.data : null,
+          from,
+          publicBaseUrl: deps.publicBaseUrl,
+        });
+      } catch {
+        failed += 1;
+      }
+    }
+    if (failed > 0)
+      return refuse(
+        `Asked. ${failed} of the emails couldn't be sent; they can still answer here, signed in.`,
+        200,
+      );
+    return c.redirect(`${EVENTS_PATH}/${access.event.id}`, 303);
+  });
+
+  app.post(`${EVENTS_PATH}/:id/agree`, async (c) => {
+    const me = requireSignedIn(c);
+    if (me instanceof Response) return me;
+    const form = await c.req.parseBody();
+    if (!(await verifyFormCsrf(me, form))) return rejectedPage(c, form);
+    const access = await findEventForParticipant(deps.storage, c.req.param("id"), me.personId);
+    if (access === null || access.participation.visibility === "HIDDEN")
+      return c.html(notFound(c), 404);
+    const answer = form.answer === "yes" || form.answer === "no" ? form.answer : null;
+    if (answer === null)
+      return c.html(await eventPage(c, deps, access, me.csrfToken, "Pick yes or no."), 400);
+    const result = await answerRequest(deps.storage, access, {
+      requestId: str(form, "request"),
+      answer,
+      via: "session",
+      now: deps.now(),
+    });
+    if (result.kind !== "recorded")
+      return c.html(
+        await eventPage(c, deps, access, me.csrfToken, "This was decided meanwhile."),
+        409,
+      );
+    const still = await findEventForParticipant(deps.storage, access.event.id, me.personId);
+    return c.redirect(still === null ? "/" : `${EVENTS_PATH}/${access.event.id}`, 303);
   });
 
   // rc42: making the event verified, by an editor.
