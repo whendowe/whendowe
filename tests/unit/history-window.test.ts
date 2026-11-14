@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { expect, it } from "vitest";
 import { HISTORY_DAYS, recentHistory } from "../../src/people/capability.js";
+import { visibleHistory } from "../../src/web/routes/events.js";
 
 // The 90-day window on history (DESIGN §10 rc43 `long_history`), at its boundary.
 
@@ -29,4 +30,12 @@ it("with long_history: everything shows, nothing hidden", () => {
 
 it("nothing older than 90 days: nothing is hidden", () => {
   expect(recentHistory(entries.slice(0, 2), NOW, false).hidden).toBe(0);
+});
+
+it("the page's line appears only when something was hidden", () => {
+  expect(visibleHistory(entries.slice(0, 2), NOW, false).note).toBe("");
+  expect(visibleHistory(entries, NOW, true).note).toBe("");
+  expect(String(visibleHistory(entries, NOW, false).note)).toContain(
+    "History older than 90 days isn&#39;t available to this account.",
+  );
 });
