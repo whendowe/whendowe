@@ -402,3 +402,58 @@ export async function leaveThread(
   const gone = await collect(storage, { threads: [t] }, now);
   return { deleted: gone.threads.length > 0 };
 }
+
+// --- Receipts that didn't go out (DESIGN §10 rc42), as on events (events/response.ts) ----
+
+/** Remember that a receipt for this member's votes here didn't go out, for the history. */
+export async function recordUnsentThreadReceipt(
+  storage: StoragePort,
+  input: {
+    readonly threadId: string;
+    readonly personId: string;
+    readonly reason: "suppressed" | "capped" | "failed";
+    readonly now: string;
+    readonly newId?: () => string;
+  },
+): Promise<void> {
+  await storage.batch([
+    {
+      sql: `INSERT INTO receipt_unsent (id, thread_id, person_id, reason, created_at)
+            VALUES (?, ?, ?, ?, ?)`,
+      params: [
+        (input.newId ?? (() => uuidv7()))(),
+        input.threadId,
+        input.personId,
+        input.reason,
+        input.now,
+      ],
+    },
+  ]);
+}
+
+export interface UnsentThreadReceipt {
+  readonly personId: string;
+  readonly reason: "suppressed" | "capped" | "failed";
+  readonly at: string;
+}
+
+const unsentThreadRowSchema = z.object({
+  person_id: z.string(),
+  reason: z.enum(["suppressed", "capped", "failed"]),
+  created_at: z.string(),
+});
+
+/** The receipts that didn't go out in this thread; the caller is a member. */
+export async function listUnsentThreadReceipts(
+  storage: StoragePort,
+  access: ThreadAccess,
+): Promise<UnsentThreadReceipt[]> {
+  const rows = await storage.query({
+    sql: "SELECT person_id, reason, created_at FROM receipt_unsent WHERE thread_id = ? ORDER BY created_at",
+    params: [access.thread.id],
+  });
+  return rows.map((row) => {
+    const r = unsentThreadRowSchema.parse(row);
+    return { personId: r.person_id, reason: r.reason, at: r.created_at };
+  });
+}
