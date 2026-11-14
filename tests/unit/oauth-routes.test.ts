@@ -20,6 +20,7 @@ import {
   grantCapability,
   revokeCapability,
 } from "../../src/people/capability.js";
+import { exportPerson } from "../../src/privacy/export.js";
 import { createApp } from "../../src/web/app.js";
 import { CONFIRM_PATH, GOOGLE_SIGN_IN_PATH, SIGN_IN_PATH } from "../../src/web/routes/auth.js";
 import { CALLBACK_PATH, CHOOSE_PATH, CONNECT_PATH } from "../../src/web/routes/oauth.js";
@@ -258,6 +259,34 @@ async function choose(
     CHOOSE_PATH,
     form({ csrf: as.csrf, calendar }, [as.cookie, pending].filter((c) => c !== "").join("; ")),
   );
+}
+
+/** Choose a calendar and tick busy calendars, each `busy` its own field (rc41). */
+async function chooseTicking(
+  h: Harness,
+  pending: string,
+  calendar: string,
+  busy: readonly string[],
+): Promise<Response> {
+  const body = new URLSearchParams({ csrf: h.session.csrf, calendar });
+  for (const id of busy) body.append("busy", id);
+  return h.app.request(CHOOSE_PATH, {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      cookie: [h.session.cookie, pending].filter((c) => c !== "").join("; "),
+    },
+    body: body.toString(),
+  });
+}
+
+async function busyRows(h: Harness): Promise<string[]> {
+  return (
+    await h.storage.query({
+      sql: "SELECT calendar_id FROM busy_calendar ORDER BY calendar_id",
+      params: [],
+    })
+  ).map((r) => String(r.calendar_id));
 }
 
 /** Connect all the way: Google's consent, then the calendar choice. */
@@ -717,6 +746,85 @@ it("a connection of another provider is not this account's Google connection", a
   expect(home).toContain("Connect Google Calendar");
 });
 
+// --- which calendars' busy times count (rc41) ----------------------------------------
+
+const WITH_HOLIDAYS: readonly Record<string, unknown>[] = [
+  ...CALENDARS,
+  { id: "holidays@group.v.calendar.google.com", summary: "Holidays", accessRole: "reader" },
+];
+
+async function chooser(h: Harness): Promise<{ page: string; pending: string }> {
+  const { cookie, state } = await startFlow(h);
+  const res = await callback(h, `code=c&state=${encodeURIComponent(state)}`, cookie);
+  expect(res.status).toBe(200);
+  return { page: await res.text(), pending: pendingCookie(res) };
+}
+
+it("asks whose busy times count: the calendars you own ticked, ones you follow not", async () => {
+  const h = await harness(googleFake({ calendars: WITH_HOLIDAYS }));
+  const { page } = await chooser(h);
+  expect(page).toContain("Whose busy times should show while you pick a time?");
+  expect(page).toContain('name="busy" value="someone@example.com" checked');
+  expect(page).toContain('name="busy" value="family@group.calendar.google.com" />');
+  expect(page).toContain('name="busy" value="holidays@group.v.calendar.google.com" />');
+  expect(await busyRows(h)).toEqual([]);
+});
+
+it("keeps the ticked calendars Google lists, drops a forged one, and never the one it made", async () => {
+  const h = await harness(googleFake({ calendars: [...WITH_HOLIDAYS, { id: MADE_ID }] }));
+  const { pending } = await chooser(h);
+  const res = await chooseTicking(h, pending, "new", [
+    "someone@example.com",
+    "holidays@group.v.calendar.google.com",
+    "someone@example.com",
+    "forged@example.org",
+    MADE_ID,
+  ]);
+  expect(res.status).toBe(200);
+  expect(await busyRows(h)).toEqual([
+    "holidays@group.v.calendar.google.com",
+    "someone@example.com",
+  ]);
+  // The export says which calendars count; a reconnect keeps them.
+  const exported = await exportPerson(h.storage, h.personId, NOW);
+  expect(exported.calendar_connections).toEqual([
+    {
+      account_email: "someone@example.com",
+      calendar_id: MADE_ID,
+      status: "active",
+      busy_times_from: ["holidays@group.v.calendar.google.com", "someone@example.com"],
+    },
+  ]);
+  const again = await startFlow(h);
+  expect(
+    (await callback(h, `code=c&state=${encodeURIComponent(again.state)}`, again.cookie)).status,
+  ).toBe(200);
+  expect(await busyRows(h)).toEqual([
+    "holidays@group.v.calendar.google.com",
+    "someone@example.com",
+  ]);
+});
+
+it("ticking nothing counts no calendar; more than 50 ticks are refused before anything is made", async () => {
+  const log: { url: string; method: string; body: string | undefined }[] = [];
+  const h = await harness(googleFake({ log }));
+  const { pending } = await chooser(h);
+  const many = Array.from({ length: 51 }, (_, i) => `c${i}@group`);
+  const refused = await chooseTicking(h, pending, "new", many);
+  expect(refused.status).toBe(400);
+  expect(await refused.text()).toContain("Tick at most 50 calendars.");
+  expect(log.some((r) => r.method === "POST" && r.url === GOOGLE_CALENDARS_URL)).toBe(false);
+  expect(await connections(h)).toEqual([]);
+
+  const h2 = await harness();
+  const second = await chooser(h2);
+  expect(
+    (await chooseTicking(h2, second.pending, "family@group.calendar.google.com", [])).status,
+  ).toBe(200);
+  expect(await connections(h2)).toHaveLength(1);
+  expect(await busyRows(h2)).toEqual([]);
+});
+
 // --- calendar_sync (rc43) ---------------------------------------------------------
 
 const GRANTED: CapabilityConfig = { default: "granted", operators: [] };
@@ -1167,7 +1275,9 @@ it("deleting an account revokes its calendar grant at Google, then deletes the t
     }
     return base(url, init);
   });
-  await connect(h);
+  const { pending } = await chooser(h);
+  await chooseTicking(h, pending, "new", ["someone@example.com"]);
+  expect(await busyRows(h)).toEqual(["someone@example.com"]);
   expect(await connections(h)).toHaveLength(1);
 
   const asked = await h.app.request(
@@ -1187,4 +1297,5 @@ it("deleting an account revokes its calendar grant at Google, then deletes the t
   expect(done.status).toBe(200);
   expect(revoked).toEqual([REFRESH_TOKEN]);
   expect(await connections(h)).toHaveLength(0);
+  expect(await busyRows(h)).toEqual([]);
 });
