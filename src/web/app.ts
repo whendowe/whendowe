@@ -15,6 +15,7 @@ import { GROUPS_PATH, registerGroupRoutes } from "./routes/groups.js";
 import {
   BUSY_PATH,
   CONNECT_PATH,
+  googleBusySource,
   googleConnectionOf,
   maySync,
   type OAuthRouteDeps,
@@ -160,7 +161,10 @@ ${connect}`,
     registerPlanRoutes(app, auth);
     registerRespondRoutes(app, auth);
     registerShareRoutes(app, auth);
-    registerFeedRoutes(app, auth);
+    registerFeedRoutes(app, {
+      ...auth,
+      ...(oauth === undefined ? {} : { googleBusy: googleBusySource(oauth, auth.capabilities) }),
+    });
     registerOperatorRoutes(app, auth);
   }
   if (oauth !== undefined) registerOAuthRoutes(app, oauth, auth);

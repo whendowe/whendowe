@@ -2,7 +2,7 @@
 import type { Context, Hono } from "hono";
 import type { TokenCipher } from "../../crypto/tokens.js";
 import type { StoragePort } from "../../db/port.js";
-import { busyQuerySchema, ownBusy } from "../../feeds/busy.js";
+import { busyQuerySchema, type GoogleBusySource, ownBusy } from "../../feeds/busy.js";
 import {
   type FeedScope,
   feedEntries,
@@ -54,6 +54,8 @@ export interface FeedRouteDeps {
   readonly now: () => string;
   /** Absent: this instance has no TOKEN_ENCRYPTION_KEY, so it makes no feed links. */
   readonly feedCipher?: TokenCipher;
+  /** Google's busy times (rc41); absent where the instance has no Google client. */
+  readonly googleBusy?: GoogleBusySource;
 }
 
 /** Where a person makes or replaces their own feed's link, and a group's. */
@@ -195,7 +197,17 @@ export function registerFeedRoutes(app: Hono<AppEnv>, deps: FeedRouteDeps): void
     if (me === null) return c.json({ busy: [] }, 401);
     const query = busyQuerySchema.safeParse(c.req.query());
     if (!query.success) return c.json({ busy: [] }, 400);
-    return c.json({ busy: await ownBusy(deps.storage, me.personId, query.data, deps.now()) });
+    // Both at once, so Google's answer adds no wait to ours. Google's part is named only
+    // when there was something to ask: `google` says shown, unavailable or failed.
+    const [own, google] = await Promise.all([
+      ownBusy(deps.storage, me.personId, query.data, deps.now()),
+      deps.googleBusy?.(me.personId, query.data) ?? { state: "none" as const },
+    ]);
+    if (google.state === "none") return c.json({ busy: own });
+    return c.json({
+      busy: google.state === "shown" ? [...own, ...google.busy] : own,
+      google: google.state,
+    });
   });
   const cipher = deps.feedCipher;
   if (cipher !== undefined) {

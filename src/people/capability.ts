@@ -28,6 +28,9 @@ export const UNAVAILABLE: Record<Capability, string> = {
   long_history: "History older than 90 days isn't available to this account.",
 };
 
+/** Without `calendar_sync`, where Google's busy times would show (rc44). */
+export const GOOGLE_BUSY_UNAVAILABLE = "Showing Google busy times isn't available to this account.";
+
 /** Absent configuration means everything for everyone: a self-hosted instance meets no gate. */
 export const EVERYTHING: CapabilityConfig = { default: "all", operators: [] };
 

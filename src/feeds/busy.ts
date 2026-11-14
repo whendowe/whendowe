@@ -99,3 +99,48 @@ export async function ownBusy(
   }
   return busy;
 }
+
+/** The instants a query's days run between, in its zone: the first midnight to the last. */
+export function rangeOf(query: BusyQuery): { readonly start: string; readonly end: string } {
+  const at = (d: Temporal.PlainDate) => d.toZonedDateTime(query.tz).toInstant().toString();
+  return {
+    start: at(Temporal.PlainDate.from(query.from)),
+    end: at(Temporal.PlainDate.from(query.to).add({ days: 1 })),
+  };
+}
+
+/**
+ * Spans from elsewhere (Google's free/busy, rc41) as wall clock in the asker's zone, to the
+ * minute. A span that isn't two valid times, or ends before it starts, is dropped.
+ */
+export function busyFromSpans(
+  spans: readonly { readonly start: string; readonly end: string }[],
+  tz: string,
+): Busy[] {
+  const busy: Busy[] = [];
+  for (const s of spans) {
+    let start: Temporal.Instant;
+    let end: Temporal.Instant;
+    try {
+      start = Temporal.Instant.from(s.start);
+      end = Temporal.Instant.from(s.end);
+    } catch {
+      continue;
+    }
+    if (Temporal.Instant.compare(start, end) >= 0) continue;
+    const inTz = (i: Temporal.Instant) => minute(i.toZonedDateTimeISO(tz).toPlainDateTime());
+    busy.push({ allDay: false, start: inTz(start), end: inTz(end) });
+  }
+  return busy;
+}
+
+/**
+ * Google's part of the answer (rc41, rc44): `none` when there's nothing to ask (no
+ * connection, no calendar ticked), `unavailable` when the account is connected but lacks
+ * `calendar_sync`, `failed` when Google didn't answer. The picker says which in one line.
+ */
+export type GoogleBusy =
+  | { readonly state: "none" | "unavailable" | "failed" }
+  | { readonly state: "shown"; readonly busy: readonly Busy[] };
+
+export type GoogleBusySource = (personId: string, query: BusyQuery) => Promise<GoogleBusy>;

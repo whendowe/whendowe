@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { createClient } from "@libsql/client";
 import { expect, it } from "vitest";
+import { z } from "zod";
 import { base64ToBytes, bytesToBase64, bytesToBase64Url } from "../../src/crypto/base64.js";
 import { createTokenCipher, type TokenCipher } from "../../src/crypto/tokens.js";
 import { sqliteStoragePort } from "../../src/db/sqlite.js";
+import { createEvent } from "../../src/events/event.js";
 import { UUIDV7_PATTERN } from "../../src/ids.js";
 import type { MailMessage } from "../../src/mail/port.js";
 import { GOOGLE_AUTHORIZE_ENDPOINT } from "../../src/oauth/authorize.js";
@@ -12,6 +14,7 @@ import type { FetchLike } from "../../src/oauth/http.js";
 import {
   GOOGLE_CALENDAR_LIST_URL,
   GOOGLE_CALENDARS_URL,
+  GOOGLE_FREEBUSY_URL,
   GOOGLE_PRIMARY_CALENDAR_URL,
 } from "../../src/oauth/primary-calendar.js";
 import { GOOGLE_REVOKE_ENDPOINT, GOOGLE_TOKEN_ENDPOINT } from "../../src/oauth/token-exchange.js";
@@ -22,6 +25,7 @@ import {
 } from "../../src/people/capability.js";
 import { exportPerson } from "../../src/privacy/export.js";
 import { createApp } from "../../src/web/app.js";
+import { BUSY_PATH as PICKER_BUSY_PATH } from "../../src/web/layout.js";
 import { CONFIRM_PATH, GOOGLE_SIGN_IN_PATH, SIGN_IN_PATH } from "../../src/web/routes/auth.js";
 import { BUSY_PATH, CALLBACK_PATH, CHOOSE_PATH, CONNECT_PATH } from "../../src/web/routes/oauth.js";
 import { loadMigrationSql } from "../conftest.js";
@@ -1545,4 +1549,225 @@ it("deleting an account revokes its calendar grant at Google, then deletes the t
   expect(revoked).toEqual([REFRESH_TOKEN]);
   expect(await connections(h)).toHaveLength(0);
   expect(await busyRows(h)).toEqual([]);
+});
+
+// --- Google's busy times in the picker (rc41, rc44) -----------------------------------
+
+interface Call {
+  url: string;
+  method: string;
+  body?: string;
+  auth?: string;
+}
+
+/** Google with free/busy: each calendar asked gets `spans[id]`, or an error if `broken`. */
+function freeBusyFake(
+  spans: Record<string, readonly { start: string; end: string }[]>,
+  log: Call[] = [],
+  options: { broken?: readonly string[]; down?: { on: boolean } } = {},
+): FetchLike {
+  const google = googleFake({ calendars: WITH_HOLIDAYS });
+  return (url, init) => {
+    log.push({ url, method: init.method, body: init.body, auth: init.headers.authorization });
+    if (url !== GOOGLE_FREEBUSY_URL) return google(url, init);
+    if (options.down?.on === true) return json({ error: { message: "Backend Error" } }, 503);
+    const asked = z
+      .object({ items: z.array(z.object({ id: z.string() })) })
+      .parse(JSON.parse(init.body ?? "{}"));
+    const calendars: Record<string, unknown> = {};
+    for (const { id } of asked.items) {
+      calendars[id] = options.broken?.includes(id)
+        ? { errors: [{ domain: "global", reason: "notFound" }] }
+        : { busy: spans[id] ?? [] };
+    }
+    return json({ kind: "calendar#freeBusy", calendars });
+  };
+}
+
+/** Connect, ticking these calendars' busy times. */
+async function connectTicking(h: Harness, busy: readonly string[]): Promise<void> {
+  const { pending } = await chooser(h);
+  expect((await chooseTicking(h, pending, "new", busy)).status).toBe(200);
+}
+
+/** The picker's busy times for 14–20 September 2026 in Prague, as the owner. */
+async function pickerBusy(h: Harness): Promise<unknown> {
+  const q = new URLSearchParams({ from: "2026-09-14", to: "2026-09-20", tz: "Europe/Prague" });
+  const res = await h.app.request(`${PICKER_BUSY_PATH}?${q}`, {
+    headers: { cookie: h.session.cookie },
+  });
+  expect(res.status).toBe(200);
+  expect(res.headers.get("cache-control")).toBe("no-store");
+  return res.json();
+}
+
+const HOLIDAYS = "holidays@group.v.calendar.google.com";
+const freeBusyCalls = (log: { url: string }[]) =>
+  log.filter((l) => l.url === GOOGLE_FREEBUSY_URL).length;
+
+it("the picker shows the ticked calendars' Google busy times, times only, for the days asked", async () => {
+  const log: Call[] = [];
+  const h = await harness(
+    freeBusyFake(
+      {
+        "someone@example.com": [{ start: "2026-09-15T08:00:00Z", end: "2026-09-15T09:30:00Z" }],
+        [HOLIDAYS]: [{ start: "2026-09-17T22:00:00Z", end: "2026-09-18T22:00:00Z" }],
+        "family@group.calendar.google.com": [
+          { start: "2026-09-16T08:00:00Z", end: "2026-09-16T09:00:00Z" },
+        ],
+      },
+      log,
+    ),
+  );
+  await connectTicking(h, ["someone@example.com", HOLIDAYS]);
+  expect(await pickerBusy(h)).toEqual({
+    // In the order asked: calendars by id.
+    busy: [
+      { allDay: false, start: "2026-09-18T00:00", end: "2026-09-19T00:00" },
+      { allDay: false, start: "2026-09-15T10:00", end: "2026-09-15T11:30" },
+    ],
+    google: "shown",
+  });
+  const asked = log.filter((l) => l.url === GOOGLE_FREEBUSY_URL);
+  expect(asked).toHaveLength(1);
+  expect(asked[0]?.method).toBe("POST");
+  expect(asked[0]?.auth).toBe(`Bearer ${ACCESS_TOKEN}`);
+  // The days on screen, Prague's midnights; only the ticked calendars, never the family one.
+  expect(JSON.parse(asked[0]?.body ?? "")).toEqual({
+    timeMin: "2026-09-13T22:00:00Z",
+    timeMax: "2026-09-20T22:00:00Z",
+    items: [{ id: HOLIDAYS }, { id: "someone@example.com" }],
+  });
+});
+
+it("Google's busy times join your WhenDoWe events; a calendar Google can't read is skipped", async () => {
+  const h = await harness(
+    freeBusyFake(
+      { "someone@example.com": [{ start: "2026-09-15T08:00:00Z", end: "2026-09-15T09:00:00Z" }] },
+      [],
+      { broken: [HOLIDAYS] },
+    ),
+  );
+  await connectTicking(h, ["someone@example.com", HOLIDAYS]);
+  await createEvent(h.storage, {
+    creatorId: h.personId,
+    group: null,
+    fields: {
+      title: "Dinner",
+      description: null,
+      location: null,
+      allDay: false,
+      startLocal: "2026-09-16T18:00",
+      endLocal: "2026-09-16T20:00",
+      tzid: "Europe/Prague",
+      rrule: null,
+    },
+    now: NOW,
+  });
+  expect(await pickerBusy(h)).toEqual({
+    busy: [
+      { allDay: false, start: "2026-09-16T18:00", end: "2026-09-16T20:00" },
+      { allDay: false, start: "2026-09-15T10:00", end: "2026-09-15T11:00" },
+    ],
+    google: "shown",
+  });
+});
+
+it("when Google doesn't answer, your WhenDoWe events still come and the answer says so", async () => {
+  const down = { on: false };
+  const h = await harness(freeBusyFake({}, [], { down }));
+  await connectTicking(h, ["someone@example.com"]);
+  await createEvent(h.storage, {
+    creatorId: h.personId,
+    group: null,
+    fields: {
+      title: "Dinner",
+      description: null,
+      location: null,
+      allDay: false,
+      startLocal: "2026-09-16T18:00",
+      endLocal: "2026-09-16T20:00",
+      tzid: "Europe/Prague",
+      rrule: null,
+    },
+    now: NOW,
+  });
+  down.on = true;
+  expect(await pickerBusy(h)).toEqual({
+    busy: [{ allDay: false, start: "2026-09-16T18:00", end: "2026-09-16T20:00" }],
+    google: "failed",
+  });
+});
+
+it("nothing ticked, or no connection: Google isn't asked and the answer doesn't mention it", async () => {
+  const log: Call[] = [];
+  const h = await harness(freeBusyFake({}, log));
+  expect(await pickerBusy(h)).toEqual({ busy: [] });
+  await connectTicking(h, []);
+  expect(await pickerBusy(h)).toEqual({ busy: [] });
+  expect(freeBusyCalls(log)).toBe(0);
+});
+
+it("an expired token is refreshed for the picker's request and not saved", async () => {
+  const log: Call[] = [];
+  const h = await harness(freeBusyFake({}, log));
+  await connectTicking(h, ["someone@example.com"]);
+  const before = await h.storage.query({
+    sql: "SELECT access_token_enc, token_expiry FROM calendar_connection",
+    params: [],
+  });
+  h.now.value = "2026-09-12T14:00:00.000Z";
+  const refreshes = log.filter((l) => l.url === GOOGLE_TOKEN_ENDPOINT).length;
+  expect(await pickerBusy(h)).toEqual({ busy: [], google: "shown" });
+  expect(log.filter((l) => l.url === GOOGLE_TOKEN_ENDPOINT).length).toBe(refreshes + 1);
+  expect(
+    await h.storage.query({
+      sql: "SELECT access_token_enc, token_expiry FROM calendar_connection",
+      params: [],
+    }),
+  ).toEqual(before);
+});
+
+it("without calendar_sync: no Google busy times, the busy page disabled, its ticks kept (rc44)", async () => {
+  const log: Call[] = [];
+  const h = await harness(
+    freeBusyFake(
+      { "someone@example.com": [{ start: "2026-09-15T08:00:00Z", end: "2026-09-15T09:00:00Z" }] },
+      log,
+    ),
+    GRANTED,
+  );
+  // Never connected and not granted: nothing to say about Google.
+  expect(await pickerBusy(h)).toEqual({ busy: [] });
+  await grant(h);
+  await connectTicking(h, ["someone@example.com", HOLIDAYS]);
+  await revoke(h);
+
+  expect(await pickerBusy(h)).toEqual({ busy: [], google: "unavailable" });
+  expect(freeBusyCalls(log)).toBe(0);
+
+  const page = await busyPage(h);
+  expect(page.status).toBe(200);
+  const body = await page.text();
+  expect(body).toContain("<fieldset disabled>");
+  expect(body).toContain('name="busy" value="someone@example.com" checked');
+  expect(body).toContain("Showing Google busy times isn&#39;t available to this account.");
+  expect(body).not.toContain('<button type="submit">Save</button>');
+
+  const refused = await saveBusy(h, [HOLIDAYS]);
+  expect(refused.status).toBe(403);
+  expect(await refused.text()).toContain(
+    "Showing Google busy times isn&#39;t available to this account.",
+  );
+  expect(await busyRows(h)).toEqual([HOLIDAYS, "someone@example.com"]);
+
+  // Granted again, the same calendars count.
+  await grant(h);
+  expect(await pickerBusy(h)).toEqual({
+    busy: [{ allDay: false, start: "2026-09-15T10:00", end: "2026-09-15T11:00" }],
+    google: "shown",
+  });
+  const enabled = await (await busyPage(h)).text();
+  expect(enabled).toContain("<fieldset>");
+  expect(enabled).toContain('<button type="submit">Save</button>');
 });

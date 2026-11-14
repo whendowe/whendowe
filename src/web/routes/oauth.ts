@@ -4,6 +4,7 @@ import { z } from "zod";
 import type { TokenCipher } from "../../crypto/tokens.js";
 import type { StoragePort } from "../../db/port.js";
 import { stmt } from "../../db/port.js";
+import { busyFromSpans, type GoogleBusySource, rangeOf } from "../../feeds/busy.js";
 import { uuidv7 } from "../../ids.js";
 import { buildAuthorizeUrl } from "../../oauth/authorize.js";
 import {
@@ -31,6 +32,7 @@ import {
   type BusyChoice,
   type CalendarChoice,
   createCalendar,
+  fetchFreeBusy,
   fetchPrimaryCalendar,
   findWritableCalendar,
   listBusyCalendars,
@@ -45,6 +47,7 @@ import {
 import {
   type CapabilityConfig,
   EVERYTHING,
+  GOOGLE_BUSY_UNAVAILABLE,
   hasCapability,
   UNAVAILABLE,
 } from "../../people/capability.js";
@@ -177,11 +180,16 @@ function result(c: Context<AppEnv>, title: string, body: Html): string {
 const EXPIRED = html`<p>This attempt is no longer valid. Please start again.</p>`;
 
 const NOT_AVAILABLE = html`<p>${UNAVAILABLE.calendar_sync}</p>`;
+const BUSY_NOT_AVAILABLE = html`<p>${GOOGLE_BUSY_UNAVAILABLE}</p>`;
 
 /** The ticks for whose busy times count (rc41), on connecting and on changing them later. */
-function busyField(busy: readonly BusyChoice[], ticked: (cal: BusyChoice) => boolean): Html {
+function busyField(
+  busy: readonly BusyChoice[],
+  ticked: (cal: BusyChoice) => boolean,
+  disabled = false,
+): Html {
   // Calendar names are whatever the account holder typed: untrusted, escaped (§13).
-  return html`<fieldset><legend>Whose busy times should show while you pick a time?</legend>
+  return html`<fieldset${disabled ? html` disabled` : ""}><legend>Whose busy times should show while you pick a time?</legend>
   <p class="muted">Only you see them, and only when, never what. The calendars you own are ticked; ones you only follow, like holidays, aren't.</p>
   ${busy.map(
     (cal) =>
@@ -214,6 +222,107 @@ async function flowOf(c: Context<AppEnv>, deps: OAuthRouteDeps): Promise<OAuthFl
     // either, because the message could name fields of a hostile cookie.
     return null;
   }
+}
+
+/**
+ * The signed-in person's active Google connection and an access token for this request
+ * only (rc41): a token about to expire is refreshed and not saved, so a GET writes
+ * nothing. Null with no active connection; throws if Google refuses or doesn't answer.
+ */
+async function liveConnection(
+  deps: OAuthRouteDeps,
+  personId: string,
+): Promise<{
+  readonly id: string;
+  readonly calendarId: string;
+  readonly madeByUs: boolean;
+  readonly accessToken: string;
+} | null> {
+  const [row] = await deps.storage.query(
+    stmt(
+      `SELECT id, calendar_id, made_by_us, access_token_enc, refresh_token_enc, token_expiry
+         FROM calendar_connection WHERE owner_id = ? AND provider = 'google' AND status = 'active'`,
+      personId,
+    ),
+  );
+  if (row === undefined) return null;
+  const conn = z
+    .object({
+      id: z.string(),
+      calendar_id: z.string(),
+      made_by_us: z.number(),
+      access_token_enc: z.string(),
+      refresh_token_enc: z.string(),
+      token_expiry: z.string().nullable(),
+    })
+    .parse(row);
+  const now = deps.now();
+  // A minute's margin, so the token can't expire between here and Google.
+  const fresh =
+    conn.token_expiry !== null &&
+    new Date(conn.token_expiry).getTime() - new Date(now).getTime() > 60_000;
+  const accessToken = fresh
+    ? await deps.cipher.decrypt(conn.access_token_enc)
+    : (
+        await refreshAccessToken({
+          refreshToken: await deps.cipher.decrypt(conn.refresh_token_enc),
+          clientId: deps.clientId,
+          clientSecret: deps.clientSecret,
+          now,
+          fetchImpl: deps.fetchImpl,
+        })
+      ).accessToken;
+  return {
+    id: conn.id,
+    calendarId: conn.calendar_id,
+    madeByUs: conn.made_by_us === 1,
+    accessToken,
+  };
+}
+
+/**
+ * Google's busy times for the picker (rc41, rc44), for GET /busy: the ticked calendars'
+ * free/busy for the days asked, times only, never stored or logged. Checks `calendar_sync`
+ * before touching a token; an account without it that is connected hears so. Any failure
+ * — a refused refresh, a Google error, a malformed answer — is just `failed`: the reason
+ * isn't kept, since it could carry a token.
+ */
+export function googleBusySource(
+  deps: OAuthRouteDeps,
+  capabilities: CapabilityConfig | undefined,
+): GoogleBusySource {
+  return async (personId, query) => {
+    if (!(await maySync(deps.storage, capabilities, personId))) {
+      return (await googleConnectionOf(deps.storage, personId)) === null
+        ? { state: "none" }
+        : { state: "unavailable" };
+    }
+    const ids = (
+      await deps.storage.query(
+        stmt(
+          `SELECT b.calendar_id FROM busy_calendar b
+             JOIN calendar_connection c ON c.id = b.connection_id
+            WHERE c.owner_id = ? AND c.provider = 'google' AND c.status = 'active'
+            ORDER BY b.calendar_id`,
+          personId,
+        ),
+      )
+    ).map((r) => String(r.calendar_id));
+    if (ids.length === 0) return { state: "none" };
+    try {
+      const conn = await liveConnection(deps, personId);
+      if (conn === null) return { state: "none" };
+      const range = rangeOf(query);
+      const spans = await fetchFreeBusy(
+        conn.accessToken,
+        { timeMin: range.start, timeMax: range.end, ids },
+        deps.fetchImpl,
+      );
+      return { state: "shown", busy: busyFromSpans(spans, query.tz) };
+    } catch {
+      return { state: "failed" };
+    }
+  };
 }
 
 export function registerOAuthRoutes(
@@ -526,59 +635,6 @@ ${EMAIL_LINK}`,
     );
   });
 
-  /**
-   * The signed-in person's active Google connection and an access token for this request
-   * only (rc41): a token about to expire is refreshed and not saved, so a GET writes
-   * nothing. Null with no active connection; throws if Google refuses or doesn't answer.
-   */
-  async function liveConnection(personId: string): Promise<{
-    readonly id: string;
-    readonly calendarId: string;
-    readonly madeByUs: boolean;
-    readonly accessToken: string;
-  } | null> {
-    const [row] = await deps.storage.query(
-      stmt(
-        `SELECT id, calendar_id, made_by_us, access_token_enc, refresh_token_enc, token_expiry
-           FROM calendar_connection WHERE owner_id = ? AND provider = 'google' AND status = 'active'`,
-        personId,
-      ),
-    );
-    if (row === undefined) return null;
-    const conn = z
-      .object({
-        id: z.string(),
-        calendar_id: z.string(),
-        made_by_us: z.number(),
-        access_token_enc: z.string(),
-        refresh_token_enc: z.string(),
-        token_expiry: z.string().nullable(),
-      })
-      .parse(row);
-    const now = deps.now();
-    // A minute's margin, so the token can't expire between here and Google.
-    const fresh =
-      conn.token_expiry !== null &&
-      new Date(conn.token_expiry).getTime() - new Date(now).getTime() > 60_000;
-    const accessToken = fresh
-      ? await deps.cipher.decrypt(conn.access_token_enc)
-      : (
-          await refreshAccessToken({
-            refreshToken: await deps.cipher.decrypt(conn.refresh_token_enc),
-            clientId: deps.clientId,
-            clientSecret: deps.clientSecret,
-            now,
-            fetchImpl: deps.fetchImpl,
-          })
-        ).accessToken;
-    return {
-      id: conn.id,
-      calendarId: conn.calendar_id,
-      madeByUs: conn.made_by_us === 1,
-      accessToken,
-    };
-  }
-
   /** The calendars that may count: Google's list, never the one WhenDoWe made (rc41). */
   async function busyChoices(conn: {
     readonly calendarId: string;
@@ -599,13 +655,15 @@ ${EMAIL_LINK}`,
     let conn: Awaited<ReturnType<typeof liveConnection>>;
     let busy: BusyChoice[];
     try {
-      conn = await liveConnection(me.personId);
+      conn = await liveConnection(deps, me.personId);
       busy = conn === null ? [] : await busyChoices(conn);
     } catch {
       // Neither Google's answer nor the reason is shown or logged: either could carry a token.
       return c.html(result(c, "Busy times", UNREACHABLE), 502);
     }
     if (conn === null) return c.html(result(c, "Busy times", NOT_CONNECTED), 404);
+    // Without calendar_sync (rc44) the ticks show, disabled, and stay kept for a regrant.
+    const allowed = await maySync(deps.storage, auth?.capabilities, me.personId);
     const counting = new Set(
       (
         await deps.storage.query(
@@ -619,9 +677,9 @@ ${EMAIL_LINK}`,
         "Busy times",
         html`<form method="post" action="${BUSY_PATH}">
   <input type="hidden" name="csrf" value="${me.csrfToken}" />
-  ${busyField(busy, (cal) => counting.has(cal.id))}
+  ${busyField(busy, (cal) => counting.has(cal.id), !allowed)}
   <p class="muted">The calendar WhenDoWe puts your events in isn't listed: everything in it is already counted.</p>
-  <p><button type="submit">Save</button></p>
+  ${allowed ? html`<p><button type="submit">Save</button></p>` : BUSY_NOT_AVAILABLE}
 </form>`,
       ),
     );
@@ -635,6 +693,9 @@ ${EMAIL_LINK}`,
     if (!(await verifyFormCsrf(me, body))) {
       return c.html(result(c, "Request rejected", html`<p>Please try again.</p>`), 403);
     }
+    if (!(await maySync(deps.storage, auth?.capabilities, me.personId))) {
+      return c.html(result(c, "Busy times", BUSY_NOT_AVAILABLE), 403);
+    }
     const ticked = busySchema.safeParse(body.busy);
     if (!ticked.success || ticked.data.length > MAX_BUSY) {
       return c.html(result(c, "Busy times", html`<p>Tick at most ${MAX_BUSY} calendars.</p>`), 400);
@@ -642,7 +703,7 @@ ${EMAIL_LINK}`,
     let conn: Awaited<ReturnType<typeof liveConnection>>;
     let known: Set<string>;
     try {
-      conn = await liveConnection(me.personId);
+      conn = await liveConnection(deps, me.personId);
       known = new Set(conn === null ? [] : (await busyChoices(conn)).map((cal) => cal.id));
     } catch {
       return c.html(result(c, "Busy times", UNREACHABLE), 502);

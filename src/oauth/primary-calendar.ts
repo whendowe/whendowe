@@ -221,3 +221,59 @@ export async function createCalendar(
   );
   return created.id;
 }
+
+export const GOOGLE_FREEBUSY_URL = "https://www.googleapis.com/calendar/v3/freeBusy";
+
+const freeBusySchema = z.object({
+  calendars: z
+    .record(
+      z.string(),
+      z.object({
+        busy: z.array(z.object({ start: z.string(), end: z.string() })).nullish(),
+        errors: z.array(z.unknown()).nullish(),
+      }),
+    )
+    .nullish(),
+});
+
+/** A busy span as Google sends it: two RFC 3339 times, and nothing about what it is. */
+export interface BusySpan {
+  readonly start: string;
+  readonly end: string;
+}
+
+/**
+ * When these calendars are busy between two instants (rc41), through `calendar.freebusy`:
+ * Google answers with times only — no title, place or attendees — and leaves out events
+ * marked free and invitations declined. A calendar Google can't read (gone, or no longer
+ * shared) is skipped rather than failing the rest.
+ */
+export async function fetchFreeBusy(
+  accessToken: string,
+  query: { readonly timeMin: string; readonly timeMax: string; readonly ids: readonly string[] },
+  fetchImpl: FetchLike = defaultFetch,
+): Promise<BusySpan[]> {
+  if (query.ids.length === 0) return [];
+  const body = await requestJson(
+    fetchImpl,
+    GOOGLE_FREEBUSY_URL,
+    {
+      method: "POST",
+      headers: { ...bearer(accessToken), "content-type": "application/json" },
+      body: JSON.stringify({
+        timeMin: query.timeMin,
+        timeMax: query.timeMax,
+        items: query.ids.map((id) => ({ id })),
+      }),
+    },
+    freeBusySchema,
+    "free/busy",
+  );
+  const spans: BusySpan[] = [];
+  for (const id of query.ids) {
+    const cal = body.calendars?.[id];
+    if (cal === undefined || (cal.errors ?? []).length > 0) continue;
+    spans.push(...(cal.busy ?? []));
+  }
+  return spans;
+}

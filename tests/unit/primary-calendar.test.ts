@@ -3,10 +3,12 @@ import { expect, it } from "vitest";
 import type { FetchLike, HttpRequestInit } from "../../src/oauth/http.js";
 import {
   createCalendar,
+  fetchFreeBusy,
   fetchPrimaryCalendar,
   findWritableCalendar,
   GOOGLE_CALENDAR_LIST_URL,
   GOOGLE_CALENDARS_URL,
+  GOOGLE_FREEBUSY_URL,
   GOOGLE_PRIMARY_CALENDAR_URL,
   listBusyCalendars,
   listWritableCalendars,
@@ -266,4 +268,63 @@ it("lists every calendar whose busy times can be read, owned ones marked, main f
   expect(new URL(calls[0]?.url ?? "").searchParams.get("minAccessRole")).toBe("freeBusyReader");
   // A page with no items is no calendars.
   expect(await listBusyCalendars(ACCESS_TOKEN, pagedFetch([{}]).impl)).toEqual([]);
+});
+
+// --- free/busy (rc41) ---
+
+const RANGE = { timeMin: "2026-09-13T22:00:00Z", timeMax: "2026-09-20T22:00:00Z" };
+
+it("asks free/busy for the calendars and range given, with a bearer token, as JSON", async () => {
+  const { impl, calls } = fakeFetch(200, JSON.stringify({ calendars: {} }));
+  await fetchFreeBusy(ACCESS_TOKEN, { ...RANGE, ids: ["a@example.com", "b@example.com"] }, impl);
+  expect(calls).toHaveLength(1);
+  expect(calls[0]?.url).toBe(GOOGLE_FREEBUSY_URL);
+  expect(calls[0]?.init.method).toBe("POST");
+  expect(calls[0]?.init.headers.authorization).toBe(`Bearer ${ACCESS_TOKEN}`);
+  expect(calls[0]?.init.headers["content-type"]).toBe("application/json");
+  expect(JSON.parse(calls[0]?.init.body ?? "")).toEqual({
+    ...RANGE,
+    items: [{ id: "a@example.com" }, { id: "b@example.com" }],
+  });
+});
+
+it("returns the busy spans of the calendars asked, skipping ones Google couldn't read", async () => {
+  const span = (h: number) => ({
+    start: `2026-09-15T0${h}:00:00Z`,
+    end: `2026-09-15T0${h + 1}:00:00Z`,
+  });
+  const { impl } = fakeFetch(
+    200,
+    JSON.stringify({
+      calendars: {
+        "a@example.com": { busy: [span(1), span(3)] },
+        "gone@example.com": { errors: [{ domain: "global", reason: "notFound" }], busy: [span(5)] },
+        "quiet@example.com": {},
+        "unasked@example.com": { busy: [span(7)] },
+      },
+    }),
+  );
+  expect(
+    await fetchFreeBusy(
+      ACCESS_TOKEN,
+      {
+        ...RANGE,
+        ids: ["a@example.com", "gone@example.com", "quiet@example.com", "x@example.com"],
+      },
+      impl,
+    ),
+  ).toEqual([span(1), span(3)]);
+});
+
+it("asks nothing for no calendars, and passes a failure on without the token", async () => {
+  const none = fakeFetch(200, "{}");
+  expect(await fetchFreeBusy(ACCESS_TOKEN, { ...RANGE, ids: [] }, none.impl)).toEqual([]);
+  expect(none.calls).toHaveLength(0);
+  const { impl } = fakeFetch(
+    403,
+    JSON.stringify({ error: { message: "Insufficient Permission" } }),
+  );
+  const failed = fetchFreeBusy(ACCESS_TOKEN, { ...RANGE, ids: ["a@example.com"] }, impl);
+  await expect(failed).rejects.toThrow(/free\/busy failed: HTTP 403/);
+  await expect(failed).rejects.not.toThrow(ACCESS_TOKEN);
 });
