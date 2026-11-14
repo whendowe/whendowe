@@ -13,6 +13,7 @@ import { EVENTS_PATH, POLLS_PATH, registerEventRoutes, yourEvents } from "./rout
 import { registerFeedRoutes } from "./routes/feeds.js";
 import { GROUPS_PATH, registerGroupRoutes } from "./routes/groups.js";
 import {
+  BUSY_PATH,
   CONNECT_PATH,
   googleConnectionOf,
   maySync,
@@ -129,7 +130,7 @@ export function createApp(options: AppOptions = {}): Hono<AppEnv> {
           : connection.status === "auth_error"
             ? html`<p>Google stopped accepting WhenDoWe's access to <strong>${connection.accountEmail}</strong>.</p>${button("Reconnect Google Calendar")}`
             : allowed
-              ? html`<p class="muted">Google Calendar connected: ${connection.accountEmail}.</p>`
+              ? html`<p class="muted">Google Calendar connected: ${connection.accountEmail}. <a href="${BUSY_PATH}">Choose whose busy times count</a></p>`
               : html`<p class="muted">Google Calendar connected: ${connection.accountEmail}. The events already there stay, and are no longer updated. ${UNAVAILABLE.calendar_sync}</p>`;
     return c.html(
       page(
