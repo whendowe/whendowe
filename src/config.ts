@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { z } from "zod";
 import type { MailCap } from "./mail/capped.js";
+import type { CapabilityConfig } from "./people/capability.js";
+import { normalizeEmail } from "./people/person.js";
 
 // Config comes from env, parsed and validated here (DESIGN.md §13).
 // Platform adapters in deploy/ pass their env source in; domain code never
@@ -83,6 +85,12 @@ export const configSchema = z.object({
   CLOUDFLARE_ACCOUNT_ID: z.string().min(1).optional(),
   CLOUDFLARE_EMAIL_API_TOKEN: z.string().min(1).optional(),
 
+  // rc43 capabilities: `all` (the default, so a self-hosted instance never meets a gate) or
+  // `granted`, where only accounts an operator granted may use them. Operators by address,
+  // comma-separated; none means no operator page.
+  CAPABILITIES_DEFAULT: z.enum(["all", "granted"]).default("all"),
+  OPERATOR_EMAILS: z.string().default(""),
+
   GOOGLE_CLIENT_ID: googleOAuthFields.GOOGLE_CLIENT_ID.optional(),
   GOOGLE_CLIENT_SECRET: googleOAuthFields.GOOGLE_CLIENT_SECRET.optional(),
   GOOGLE_REDIRECT_URI: googleOAuthFields.GOOGLE_REDIRECT_URI.optional(),
@@ -143,5 +151,16 @@ export function mailCapOf(c: Config): MailCap {
       ? {}
       : { newSenderDaily: c.MAIL_NEW_SENDER_DAILY_CAP }),
     ...(c.MAIL_NEW_SENDER_DAYS === undefined ? {} : { newSenderDays: c.MAIL_NEW_SENDER_DAYS }),
+  };
+}
+
+/** The instance's capability settings (DESIGN §10 rc43), for the app. */
+export function capabilityConfigOf(c: Config): CapabilityConfig {
+  return {
+    default: c.CAPABILITIES_DEFAULT,
+    operators: c.OPERATOR_EMAILS.split(",")
+      .map((e) => e.trim())
+      .filter((e) => e !== "")
+      .map(normalizeEmail),
   };
 }

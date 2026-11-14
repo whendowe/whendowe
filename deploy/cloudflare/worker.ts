@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import type { Hono } from "hono";
-import { anyGoogleOAuthConfigured, type Config, loadConfig, mailCapOf } from "../../src/config.js";
+import {
+  anyGoogleOAuthConfigured,
+  type Config,
+  capabilityConfigOf,
+  loadConfig,
+  mailCapOf,
+} from "../../src/config.js";
 import { d1StoragePort } from "../../src/db/d1.js";
 import type { StoragePort } from "../../src/db/port.js";
 import { cappedMailPort } from "../../src/mail/capped.js";
@@ -32,6 +38,9 @@ export interface Env {
   // an instance overlay may restrict it to verified recipients before Workers Paid
   // (DESIGN §13/§18 rc14). It is used only when MAIL_PROVIDER=cloudflare.
   PUBLIC_BASE_URL?: string;
+  // rc43: capabilities, and the operators who grant them (§10 Capabilities).
+  CAPABILITIES_DEFAULT?: string;
+  OPERATOR_EMAILS?: string;
   MAIL_PROVIDER?: string;
   MAIL_FROM_ADDRESS?: string;
   MAIL_FROM_NAME?: string;
@@ -102,6 +111,8 @@ async function build(env: Env): Promise<Built> {
     MAIL_SENDER_MONTHLY_CAP: env.MAIL_SENDER_MONTHLY_CAP,
     MAIL_NEW_SENDER_DAILY_CAP: env.MAIL_NEW_SENDER_DAILY_CAP,
     MAIL_NEW_SENDER_DAYS: env.MAIL_NEW_SENDER_DAYS,
+    CAPABILITIES_DEFAULT: env.CAPABILITIES_DEFAULT,
+    OPERATOR_EMAILS: env.OPERATOR_EMAILS,
   });
   const storage = d1StoragePort(env.DB);
   const oauth = anyGoogleOAuthConfigured(config)
@@ -120,6 +131,8 @@ async function build(env: Env): Promise<Built> {
         config.TOKEN_ENCRYPTION_KEY === undefined
           ? undefined
           : await tokenCipherFor(config.TOKEN_ENCRYPTION_KEY),
+      // Capabilities (rc43): who may use what, and the operators who decide.
+      capabilities: capabilityConfigOf(config),
     },
     oauth,
   });

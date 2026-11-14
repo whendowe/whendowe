@@ -974,3 +974,37 @@ export const verifiedRequestToken = sqliteTable(
   },
   (t) => [unique("verified_request_token_uq").on(t.requestId, t.personId)],
 );
+
+// rc43 (§10 *Capabilities*): what an account may use where the instance limits it.
+export const accountCapability = sqliteTable(
+  "account_capability",
+  {
+    personId: text("person_id")
+      .notNull()
+      .references(() => person.id, { onDelete: "cascade" }),
+    capability: text("capability").notNull(),
+    grantedAt: text("granted_at").notNull(),
+    grantedBy: text("granted_by").references(() => person.id, { onDelete: "set null" }),
+  },
+  (t) => [
+    primaryKey({ columns: [t.personId, t.capability] }),
+    check(
+      "account_capability_chk",
+      sql`${t.capability} IN ('verify', 'calendar_sync', 'long_history')`,
+    ),
+  ],
+);
+
+// The operator page's log: every grant and revoke, and who did it.
+export const capabilityChange = sqliteTable(
+  "capability_change",
+  {
+    id: text("id").primaryKey(),
+    personId: text("person_id").references(() => person.id, { onDelete: "set null" }),
+    capability: text("capability").notNull(),
+    action: text("action").notNull(),
+    actorId: text("actor_id").references(() => person.id, { onDelete: "set null" }),
+    createdAt: text("created_at").notNull(),
+  },
+  (t) => [check("capability_change_action_chk", sql`${t.action} IN ('granted', 'revoked')`)],
+);

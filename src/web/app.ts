@@ -17,6 +17,7 @@ import {
   type OAuthRouteDeps,
   registerOAuthRoutes,
 } from "./routes/oauth.js";
+import { registerOperatorRoutes } from "./routes/operator.js";
 import { PLANS_PATH, registerPlanRoutes } from "./routes/plans.js";
 import { registerRespondRoutes } from "./routes/respond.js";
 import { registerShareRoutes } from "./routes/share.js";
@@ -146,6 +147,7 @@ ${connect}`,
     registerRespondRoutes(app, auth);
     registerShareRoutes(app, auth);
     registerFeedRoutes(app, auth);
+    registerOperatorRoutes(app, auth);
   }
   if (oauth !== undefined) registerOAuthRoutes(app, oauth, auth);
 

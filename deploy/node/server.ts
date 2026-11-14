@@ -1,7 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { serve } from "@hono/node-server";
 import { createClient } from "@libsql/client";
-import { anyGoogleOAuthConfigured, type Config, loadConfig, mailCapOf } from "../../src/config.js";
+import {
+  anyGoogleOAuthConfigured,
+  type Config,
+  capabilityConfigOf,
+  loadConfig,
+  mailCapOf,
+} from "../../src/config.js";
 import type { StoragePort } from "../../src/db/port.js";
 import { sqliteStoragePort } from "../../src/db/sqlite.js";
 import { cappedMailPort } from "../../src/mail/capped.js";
@@ -75,6 +81,8 @@ const app = createApp({
       config.TOKEN_ENCRYPTION_KEY === undefined
         ? undefined
         : await tokenCipherFor(config.TOKEN_ENCRYPTION_KEY),
+    // Capabilities (rc43): who may use what, and the operators who decide.
+    capabilities: capabilityConfigOf(config),
   },
   oauth,
 });
