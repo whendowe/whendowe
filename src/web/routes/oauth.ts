@@ -39,6 +39,12 @@ import {
   exchangeForIdToken,
   revokeGoogleGrant,
 } from "../../oauth/token-exchange.js";
+import {
+  type CapabilityConfig,
+  EVERYTHING,
+  hasCapability,
+  UNAVAILABLE,
+} from "../../people/capability.js";
 import { findOrCreatePerson, findPersonByEmail, normalizeEmail } from "../../people/person.js";
 import { type Html, html } from "../layout.js";
 import {
@@ -131,6 +137,18 @@ export async function googleConnectionOf(
       };
 }
 
+/**
+ * Whether this account may connect Google Calendar (rc43 `calendar_sync`). Checked at every
+ * step that starts or completes a connection, so a flow begun before a revoke can't finish.
+ */
+export function maySync(
+  storage: StoragePort,
+  capabilities: CapabilityConfig | undefined,
+  personId: string,
+): Promise<boolean> {
+  return hasCapability(storage, capabilities ?? EVERYTHING, personId, "calendar_sync");
+}
+
 /** Truncated so a hostile `?error=` cannot flood the response. Escaped by `html`. */
 function shortCode(value: string): string {
   return value.slice(0, 64);
@@ -145,6 +163,8 @@ function result(c: Context<AppEnv>, title: string, body: Html): string {
 }
 
 const EXPIRED = html`<p>This attempt is no longer valid. Please start again.</p>`;
+
+const NOT_AVAILABLE = html`<p>${UNAVAILABLE.calendar_sync}</p>`;
 
 const EMAIL_LINK = html`<p><a href="${SIGN_IN_PATH}">Sign in with an email link</a></p>`;
 
@@ -211,6 +231,9 @@ export function registerOAuthRoutes(
     if (me instanceof Response) return me;
     if (!(await verifyFormCsrf(me, await c.req.parseBody()))) {
       return c.html(result(c, "Request rejected", html`<p>Please try again.</p>`), 403);
+    }
+    if (!(await maySync(deps.storage, auth?.capabilities, me.personId))) {
+      return c.html(result(c, "Not connected", NOT_AVAILABLE), 403);
     }
     return begin(c, { purpose: "connect", personId: me.personId });
   });
@@ -312,6 +335,10 @@ ${EMAIL_LINK}`,
         403,
       );
     }
+    // Revoked while at Google: refused before the code is exchanged, so no grant exists.
+    if (!(await maySync(deps.storage, auth?.capabilities, me.personId))) {
+      return c.html(result(c, "Not connected", NOT_AVAILABLE), 403);
+    }
 
     const tokens = await exchangeAuthorizationCode({
       code,
@@ -406,6 +433,11 @@ ${EMAIL_LINK}`,
         ),
         403,
       );
+    }
+    // Revoked while choosing: the grant waiting in the cookie is given back, not kept.
+    if (!(await maySync(deps.storage, auth?.capabilities, me.personId))) {
+      await revokeGoogleGrant(pending.refreshToken, deps.fetchImpl);
+      return c.html(result(c, "Not connected", NOT_AVAILABLE), 403);
     }
     const choice = choiceSchema.safeParse(body.calendar);
     if (!choice.success) {

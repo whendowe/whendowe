@@ -15,6 +15,11 @@ import {
   GOOGLE_PRIMARY_CALENDAR_URL,
 } from "../../src/oauth/primary-calendar.js";
 import { GOOGLE_REVOKE_ENDPOINT, GOOGLE_TOKEN_ENDPOINT } from "../../src/oauth/token-exchange.js";
+import {
+  type CapabilityConfig,
+  grantCapability,
+  revokeCapability,
+} from "../../src/people/capability.js";
 import { createApp } from "../../src/web/app.js";
 import { CONFIRM_PATH, GOOGLE_SIGN_IN_PATH, SIGN_IN_PATH } from "../../src/web/routes/auth.js";
 import { CALLBACK_PATH, CHOOSE_PATH, CONNECT_PATH } from "../../src/web/routes/oauth.js";
@@ -155,7 +160,10 @@ async function signIn(
   return { cookie, csrf: /name="csrf" value="([^"]+)"/.exec(home)?.[1] ?? "" };
 }
 
-async function harness(fetchImpl: FetchLike = googleFake()): Promise<Harness> {
+async function harness(
+  fetchImpl: FetchLike = googleFake(),
+  capabilities?: CapabilityConfig,
+): Promise<Harness> {
   const storage = await makeStorage();
   const cipher = await createTokenCipher([KEY], 1);
   const now = { value: NOW };
@@ -174,6 +182,7 @@ async function harness(fetchImpl: FetchLike = googleFake()): Promise<Harness> {
       secureCookies: false,
       // Sessions must outlive the scenario clock jumps below, so they use real time.
       now: () => new Date().toISOString(),
+      ...(capabilities === undefined ? {} : { capabilities }),
     },
     oauth: {
       storage,
@@ -704,6 +713,116 @@ it("a connection of another provider is not this account's Google connection", a
   ]);
   const home = await (await h.app.request("/", { headers: { cookie: h.session.cookie } })).text();
   expect(home).toContain("Connect Google Calendar");
+});
+
+// --- calendar_sync (rc43) ---------------------------------------------------------
+
+const GRANTED: CapabilityConfig = { default: "granted", operators: [] };
+const OFF = "Connecting Google Calendar isn&#39;t available to this account.";
+
+/** A fake Google that records the refresh tokens given back. */
+function revoking(revoked: string[]): FetchLike {
+  return (url, init) => {
+    if (url === GOOGLE_REVOKE_ENDPOINT) {
+      revoked.push(new URLSearchParams(init.body ?? "").get("token") ?? "");
+      return json({});
+    }
+    return googleFake()(url, init);
+  };
+}
+
+async function grant(h: Harness): Promise<void> {
+  await grantCapability(h.storage, {
+    email: OWNER_EMAIL,
+    capability: "calendar_sync",
+    actorId: h.personId,
+    now: NOW,
+  });
+}
+
+async function revoke(h: Harness): Promise<void> {
+  await revokeCapability(h.storage, {
+    personId: h.personId,
+    capability: "calendar_sync",
+    actorId: h.personId,
+    now: NOW,
+  });
+}
+
+it("without calendar_sync, connect shows disabled with its line and its POST is refused", async () => {
+  const h = await harness(googleFake(), GRANTED);
+  const home = await (await h.app.request("/", { headers: { cookie: h.session.cookie } })).text();
+  expect(home).toContain('<button type="button" disabled>Connect Google Calendar</button>');
+  expect(home).toContain(OFF);
+  expect(home).not.toContain(`action="${CONNECT_PATH}"`);
+  const res = await h.app.request(CONNECT_PATH, form({ csrf: h.session.csrf }, h.session.cookie));
+  expect(res.status).toBe(403);
+  const refusal = await res.text();
+  expect(refusal).toContain("<h1>Not connected</h1>");
+  expect(refusal).toContain(OFF);
+  expect(res.headers.get("set-cookie") ?? "").not.toContain(FLOW_COOKIE_NAME);
+  // Granted, the same account connects as anyone does where everyone has everything.
+  await grant(h);
+  const now = await (await h.app.request("/", { headers: { cookie: h.session.cookie } })).text();
+  expect(now).toContain(`action="${CONNECT_PATH}"`);
+  expect(now).not.toContain(OFF);
+  expect((await connect(h)).status).toBe(200);
+  expect(await connections(h)).toHaveLength(1);
+});
+
+it("a flow begun before a revoke can't finish: the code is never exchanged", async () => {
+  const log: { url: string; method: string; body: string | undefined }[] = [];
+  const h = await harness(googleFake({ log }), GRANTED);
+  await grant(h);
+  const { cookie, state } = await startFlow(h);
+  await revoke(h);
+  const res = await callback(h, `code=c&state=${encodeURIComponent(state)}`, cookie);
+  expect(res.status).toBe(403);
+  const refusal = await res.text();
+  expect(refusal).toContain("<h1>Not connected</h1>");
+  expect(refusal).toContain(OFF);
+  expect(log).toEqual([]);
+  expect(await connections(h)).toEqual([]);
+});
+
+it("revoked while choosing a calendar, the waiting grant is given back and nothing stored", async () => {
+  const revoked: string[] = [];
+  const h = await harness(revoking(revoked), GRANTED);
+  await grant(h);
+  const { cookie, state } = await startFlow(h);
+  const chooser = await callback(h, `code=c&state=${encodeURIComponent(state)}`, cookie);
+  expect(chooser.status).toBe(200);
+  await revoke(h);
+  const res = await choose(h, pendingCookie(chooser), "new");
+  expect(res.status).toBe(403);
+  const refusal = await res.text();
+  expect(refusal).toContain("<h1>Not connected</h1>");
+  expect(refusal).toContain(OFF);
+  expect(revoked).toEqual([REFRESH_TOKEN]);
+  expect(await connections(h)).toEqual([]);
+});
+
+it("losing calendar_sync keeps the connection, says why on home, and refuses a reconnect", async () => {
+  const h = await harness(googleFake(), GRANTED);
+  await grant(h);
+  await connect(h);
+  await revoke(h);
+  const home = async () =>
+    (await h.app.request("/", { headers: { cookie: h.session.cookie } })).text();
+  expect(await home()).toContain(
+    `Google Calendar connected: someone@example.com. The events already there stay, and are no longer updated. ${OFF}`,
+  );
+  expect(await connections(h)).toHaveLength(1);
+  await h.storage.batch([
+    { sql: "UPDATE calendar_connection SET status = 'auth_error'", params: [] },
+  ]);
+  const broken = await home();
+  expect(broken).toContain('<button type="button" disabled>Reconnect Google Calendar</button>');
+  expect(broken).toContain(OFF);
+  expect(broken).not.toContain(`action="${CONNECT_PATH}"`);
+  // A reconnect started anyway is refused before Google is asked.
+  const res = await h.app.request(CONNECT_PATH, form({ csrf: h.session.csrf }, h.session.cookie));
+  expect(res.status).toBe(403);
 });
 
 // --- the callback leg, rejections ---
