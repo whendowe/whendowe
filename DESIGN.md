@@ -1931,6 +1931,27 @@ whom, is the instance's business and lives with it (§18), never here. Owner dec
     capability; participating is never refused for want of one; the operator page is a 404 for
     everyone but listed operators, and a 404 with no operators configured;
   - history: the 90-day boundary, on each side, for both history pages.
+- **As built, slices 1–4** (#23–#26, owner-merged 2026-11-14). Where the text above leaves a
+  choice, this is what was chosen:
+  - *The store (1).* Absent configuration is `all` with no operators, so tests and a
+    self-hosted instance meet no gate. `OPERATOR_EMAILS` is comma-separated and normalised as
+    sign-in normalises an address. On `all` the operator page still works, and says grants
+    change nothing until the instance gives capabilities only to granted accounts.
+  - *`verify` (2).* Checked on making an event, poll or plan with the box ticked, on "Verify
+    answers here" for events and threads, and on turning a group's default on; turning the
+    default off is never refused. A refused POST is a 403 with the line.
+  - *`calendar_sync` (3).* "Connect Google Calendar", and "Reconnect" after `auth_error`, show
+    disabled with the line, and the connect POST is refused. It is checked again at Google's
+    callback, before the code is exchanged, and at the calendar choice, where the grant waiting
+    in the cookie is revoked at Google: a flow begun before a revoke can't finish. "The account
+    page" is home, where the connection is shown: it says the events already there stay and
+    are no longer updated.
+    - **Sending is not gated yet, because nothing sends:** the push tick is MVP-4's G2, which
+      must check `calendar_sync` for the connection's owner before each push, and without it
+      leave the copies as they are (§15).
+  - *`long_history` (4).* The event page's and the thread page's History. The cut is the
+    viewer's now less 90 × 24 hours; an entry exactly that old still shows. The line shows only
+    when something was hidden.
 
 ```sql
 -- rc43
@@ -2165,7 +2186,7 @@ The new milestones are labelled **MVP-1…MVP-5**, deliberately *not* reusing M2
 - **Agreeing first (rc25) — after R5, before MVP-3** (owner, 2026-11-01: "the core is agree on a date"). P6 polls as one-event plans, which brings voting without an account back (WORKFLOWS §2): P6a schema and domain (a poll as a thread, deciding with one-event plans, `location`/`description`, the vote-link table; migration first) · P6b the poll form making a thread, the cards, voting, suggesting another time · P6c vote links by email · P6d removing the event-poll path, (rc35) with a migration that withdraws any event-poll still open · (rc28) one list of open questions on home, and notes with votes — P5's first slice · L1 shared links: the link, a signed-in vote, claiming a name, guests (migration first); (rc29) the organizer deciding while a link is live, a poll of one, the claimed name as handle, the claim cookie · L2 confirming a guest by email and the claim link; (rc30) the email link moving the answers itself, (rc32) the later answer winning, removing a guest · L3 previews and the share button. *Accept: an organizer pastes one link into a WhatsApp group; people vote from it, signed in or not, and the card in the chat shows the title and time.*
 - **Sealed groups and events (to be designed; its rc is numbered when its docs PR lands) — after rc21.** Three privacy levels: public, normal, and *sealed* — "this is on the DL, we're sending private links". What is sealed is encrypted in the browser and the server stores ciphertext; stage 1 carries the key in a private link (`#key`), stage 2 keeps it in a keyring unlocked by a passkey (WebAuthn PRF), with recovery by another member. Plus explicit consent on joining a sealed group (§13 rc21). Its own docs PR first.
 - **MVP-3 — Feeds & sharing.** Read-only ICS feed per person and per group (rc34: specified in §10 *Calendar feeds* — a secret link per person and per group, agreed events at your tier, rendered on request rather than through the §5 artifact store; Google polls subscribed feeds slowly — hours — which is stated to users, not hidden); unlisted and invite-only views (rc36: §10 *Group calendar links and copyable answer links* — invite-only is adding people, whose links can be copied; unlisted is a group calendar link, page and feed, capped by its keeper); `project()` tiers enforced in every output (§9 visibility integrity becomes load-bearing). *Accept: a player subscribes from an iPhone.*
-- **MVP-4 — Google one-way.** "Sign in with Google" on its own Production client if not moved already (built in rc20, §13; basic scopes only — must not consume the sensitive-scope user cap, §12), calendar connection as a *separate*, opt-in grant, token refresh, the reconcile loop and PUSH (§11). rc40 specifies it: §10 *Google Calendar, one way* — three narrow scopes, a calendar you choose, your feed's events, edits in Google overwritten until MVP-5 and said so, deletes there an unsubscribe, an explicit choice on disconnect. rc41 adds §10 *Busy times while you pick*. Slices, one PR at a time: G1 connect, choose the calendar, the narrow scopes · B1 (rc41) your WhenDoWe events in the picker · B2 the fourth scope, `busy_calendar` and choosing what counts (migration first) · B3 Google's busy times in the picker · G2 the push tick on both targets · G3 disconnect, account deletion's choice, the reconnect banner and email, Don't put this in my calendar. *Accept: the owner's household lives on it.*
+- **MVP-4 — Google one-way.** "Sign in with Google" on its own Production client if not moved already (built in rc20, §13; basic scopes only — must not consume the sensitive-scope user cap, §12), calendar connection as a *separate*, opt-in grant, token refresh, the reconcile loop and PUSH (§11). rc40 specifies it: §10 *Google Calendar, one way* — three narrow scopes, a calendar you choose, your feed's events, edits in Google overwritten until MVP-5 and said so, deletes there an unsubscribe, an explicit choice on disconnect. rc41 adds §10 *Busy times while you pick*. Slices, one PR at a time: G1 connect, choose the calendar, the narrow scopes · B1 (rc41) your WhenDoWe events in the picker · B2 the fourth scope, `busy_calendar` and choosing what counts (migration first) · B3 Google's busy times in the picker · G2 the push tick on both targets, which pushes nothing for an account without `calendar_sync` (rc43) · G3 disconnect, account deletion's choice, the reconnect banner and email, Don't put this in my calendar. *Accept: the owner's household lives on it.*
 - **MVP-5 — Google two-way.** PULL classification, echo detection, tier-gated inbound edits (§11), inbound deletes as unsubscribe, conflict policy, 410 full resync with the reverse diff. *Accept: a member moves an event in Google and the group follows or receives a proposal (US-15).*
 - **→ Public MVP: the first ~100.**
 - **Later:** Microsoft Graph and CalDAV two-way; Google OAuth verification (required before user 101 — start it before it is needed); hardening of whole-series recurrence end to end.
