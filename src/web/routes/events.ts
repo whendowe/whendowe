@@ -58,8 +58,10 @@ import {
   issueResponseLinks,
   listRequests,
   listResponses,
+  listUnsentReceipts,
   needsAcknowledgment,
   RESPONSE_TOKEN_TTL_MS,
+  type ReceiptUnsent,
   revokeUndeliveredLink,
   SIGNED_IN,
   setAttendance,
@@ -114,7 +116,7 @@ import {
 import { appearanceSection, saveAppearance } from "./account.js";
 // A cycle (plans.ts links back to events), safe: both are read only inside handlers.
 import { PLANS_PATH } from "./plans.js";
-import { respondUrl, sendResponseLink } from "./respond.js";
+import { respondUrl, sendEventReceipt, sendResponseLink } from "./respond.js";
 
 // Event pages (MVP-2 slice 2B). Every read goes through findEventForParticipant (no
 // IDOR), and every rendering goes through canSee / canSeeField — the single rule for
@@ -984,6 +986,13 @@ export function verifiedLine(event: CanonicalEvent): Html | string {
     : html`<p class="wd-verified"><strong>Answers here are verified:</strong> each person's own email, or signed in.</p>`;
 }
 
+/** rc42: why a receipt didn't go out, in the history's words. */
+const UNSENT_WHY: Record<ReceiptUnsent, string> = {
+  suppressed: "their address takes no mail from here",
+  capped: "the email limit was reached",
+  failed: "the email could not be sent",
+};
+
 /** rc42: why a verified event isn't deleted for good by one editor. */
 function verifiedKeeps(eventId: string): Html {
   return html`<h1>Answers here are verified</h1>
@@ -1126,9 +1135,15 @@ async function eventPage(
   const peopleChanges = see("participants")
     ? await listParticipantChanges(deps.storage, access)
     : [];
+  const unsent = see("participants") ? await listUnsentReceipts(deps.storage, access) : [];
   // One attributed trail, newest first (DESIGN rc15): edits and people changes together.
   const history = [
     ...edits.map((h) => ({ at: h.at, entry: historyEntry(h) })),
+    // rc42: a receipt that didn't go out is in the history, for everyone who sees it.
+    ...unsent.map((u) => ({
+      at: u.at,
+      entry: html`<span class="muted">${u.at.slice(0, 16).replace("T", " ")}</span> · No receipt went to ${who(u.shown)} for their answer: ${UNSENT_WHY[u.reason]}`,
+    })),
     ...peopleChanges.map((h) => ({
       at: h.at,
       entry: html`<span class="muted">${h.at.slice(0, 16).replace("T", " ")}</span> · ${
@@ -1716,9 +1731,10 @@ ${pollForm(`/groups/${membership.group.id}/polls`, csrf, values, error, html`${p
         await eventPage(c, deps, access, me.csrfToken, "Pick one of the answers."),
         400,
       );
+    const now = deps.now();
     const result = await setAttendance(deps.storage, access, {
       attendance: attendance.data,
-      now: deps.now(),
+      now,
       arrival: SIGNED_IN,
     });
     if (result.kind !== "recorded")
@@ -1726,6 +1742,7 @@ ${pollForm(`/groups/${membership.group.id}/polls`, csrf, values, error, html`${p
         await eventPage(c, deps, access, me.csrfToken, "This event isn't taking answers."),
         409,
       );
+    await sendEventReceipt(deps, access, { answered: [attendance.data], arrival: SIGNED_IN, now });
     return c.redirect(`${EVENTS_PATH}/${access.event.id}`, 303);
   });
 
@@ -1737,13 +1754,15 @@ ${pollForm(`/groups/${membership.group.id}/polls`, csrf, values, error, html`${p
     const access = await findEventForParticipant(deps.storage, c.req.param("id"), me.personId);
     if (access === null || access.participation.visibility === "HIDDEN")
       return c.html(notFound(c), 404);
+    const now = deps.now();
     const result = await addFeedback(deps.storage, access, {
       body: str(form, "note"),
-      now: deps.now(),
+      now,
       arrival: SIGNED_IN,
     });
     switch (result.kind) {
       case "recorded":
+        await sendEventReceipt(deps, access, { answered: ["note"], arrival: SIGNED_IN, now });
         return c.redirect(`${EVENTS_PATH}/${access.event.id}`, 303);
       case "invalid":
         return c.html(await eventPage(c, deps, access, me.csrfToken, result.reason), 400);
@@ -2105,11 +2124,16 @@ ${pollForm(`/groups/${membership.group.id}/polls`, csrf, values, error, html`${p
       now,
       arrival: SIGNED_IN,
     });
-    return result.kind === "recorded" ? { kind: "done", status: result.status } : result;
+    if (result.kind !== "recorded") return result;
+    await sendEventReceipt(deps, access, { answered: [answer], arrival: SIGNED_IN, now });
+    return { kind: "done", status: result.status };
   });
   lifecycle("acknowledge", async (access, _form, now) => {
     const result = await acknowledge(deps.storage, access, { now, arrival: SIGNED_IN });
-    if (result.kind === "recorded") return { kind: "done", status: access.event.status };
+    if (result.kind === "recorded") {
+      await sendEventReceipt(deps, access, { answered: ["acknowledge"], arrival: SIGNED_IN, now });
+      return { kind: "done", status: access.event.status };
+    }
     return result.kind === "invalid" ? { kind: "invalid" } : result;
   });
   lifecycle("withdraw", (access, _form, now) => withdrawProposal(deps.storage, access, { now }));

@@ -639,3 +639,75 @@ export async function listRequests(
     };
   });
 }
+
+// --- Receipts (DESIGN §10 rc42 *Who really answered*) ----------------------------------
+
+/** Why a receipt didn't go out: an opt-out, the mail cap, or the provider. */
+export const receiptUnsentSchema = z.enum(["suppressed", "capped", "failed"]);
+export type ReceiptUnsent = z.infer<typeof receiptUnsentSchema>;
+
+/** Remember that a receipt for this person's answer here didn't go out, for the history. */
+export async function recordUnsentReceipt(
+  storage: StoragePort,
+  input: {
+    readonly eventId: string;
+    readonly personId: string;
+    readonly reason: ReceiptUnsent;
+    readonly now: string;
+    readonly newId?: () => string;
+  },
+): Promise<void> {
+  await storage.batch([
+    {
+      sql: `INSERT INTO receipt_unsent (id, canonical_event_id, person_id, reason, created_at)
+            VALUES (?, ?, ?, ?, ?)`,
+      params: [
+        (input.newId ?? (() => uuidv7()))(),
+        input.eventId,
+        input.personId,
+        input.reason,
+        input.now,
+      ],
+    },
+  ]);
+}
+
+export interface UnsentReceiptEntry {
+  readonly personId: string;
+  /** As the event's people see them (rc21; rc42: with the address, since it is verified). */
+  readonly shown: Shown;
+  readonly reason: ReceiptUnsent;
+  readonly at: string;
+}
+
+const unsentRowSchema = shownRowSchema.extend({
+  person_id: z.string(),
+  reason: receiptUnsentSchema,
+  created_at: z.string(),
+});
+
+/** The receipts that didn't go out on this event, for its history. */
+export async function listUnsentReceipts(
+  storage: StoragePort,
+  access: EventAccess,
+): Promise<UnsentReceiptEntry[]> {
+  if (access.participation.visibility === "HIDDEN") return [];
+  const rows = await storage.query({
+    sql: `SELECT r.person_id, r.reason, r.created_at, p.email, p.display_name, ep.handle,
+            ${shownEmailSql("ep")} AS show_email
+          FROM receipt_unsent r JOIN person p ON p.id = r.person_id
+            LEFT JOIN event_participation ep
+              ON ep.canonical_event_id = r.canonical_event_id AND ep.person_id = r.person_id
+          WHERE r.canonical_event_id = ? ORDER BY r.created_at`,
+    params: [access.event.id],
+  });
+  return rows.map((row) => {
+    const r = unsentRowSchema.parse(row);
+    return {
+      personId: r.person_id,
+      shown: shownAs(r.person_id, r, access.event.id),
+      reason: r.reason,
+      at: r.created_at,
+    };
+  });
+}

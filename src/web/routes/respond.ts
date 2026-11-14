@@ -15,12 +15,16 @@ import {
   type IssuedLink,
   needsAcknowledgment,
   RESPONSE_TOKEN_TTL_MS,
+  type ReceiptUnsent,
   type ResolvedLink,
+  recordUnsentReceipt,
   resolveResponseLink,
   setAttendance,
   setOwnAnswersOnly,
 } from "../../events/response.js";
+import { MailCapReachedError } from "../../mail/capped.js";
 import type { MailPort } from "../../mail/port.js";
+import { findPersonById } from "../../people/person.js";
 import { addVoteNote, listNotes, type PlanNote } from "../../plans/note.js";
 import {
   castVote,
@@ -38,10 +42,11 @@ import {
   VOTE_LINK_TTL_MS,
 } from "../../plans/vote-link.js";
 import { dayLabel, spanText, whenText } from "../../plans/weeks.js";
+import { isSuppressed } from "../../privacy/suppression.js";
 import { type Html, html, ownAnswersForm, type Preview, renderPage } from "../layout.js";
 import { busyAssets, busyAttrs, busyClash, PLAN_STYLE } from "../plan-editor.js";
 import type { AppEnv } from "../session.js";
-import { BUSY_LABEL, describeRRule, formatWhen, verifiedLine } from "./events.js";
+import { BUSY_LABEL, describeRRule, EVENTS_PATH, formatWhen, verifiedLine } from "./events.js";
 
 // Account-less responses (MVP-2 slice 2D; WORKFLOWS §2: responding never requires an
 // account). The emailed link IS the person, for one event and one question:
@@ -75,6 +80,10 @@ export function voteUrl(publicBaseUrl: string, token: string): URL {
 export interface RespondRouteDeps {
   readonly storage: StoragePort;
   readonly now: () => string;
+  /** Receipts on verified events and threads (rc42) go out through it. */
+  readonly mail: MailPort;
+  /** Links are built from this, never the Host header. */
+  readonly publicBaseUrl: string;
 }
 
 const tokenSchema = z.string().min(1).max(256);
@@ -500,6 +509,8 @@ export function registerRespondRoutes(app: Hono<AppEnv>, deps: RespondRouteDeps)
       c.html(respondPage(link, token, html`<p class="error">${message}</p>`, copier), status);
 
     let answered = false;
+    // What this POST recorded, for its receipt (rc42): one receipt per answering POST.
+    const lines: ReceiptLine[] = [];
     if (action === "vote" && access.participation.responseKind === "accept") {
       const decision =
         form.decision === "accept" || form.decision === "decline" ? form.decision : null;
@@ -511,6 +522,7 @@ export function registerRespondRoutes(app: Hono<AppEnv>, deps: RespondRouteDeps)
           arrival,
         });
         if (result.kind !== "recorded") return problem("This has already been settled.", 409);
+        lines.push(decision);
       }
     } else {
       const attendance = attendanceSchema.safeParse(form.attendance);
@@ -523,12 +535,14 @@ export function registerRespondRoutes(app: Hono<AppEnv>, deps: RespondRouteDeps)
         });
         if (result.kind !== "recorded")
           return problem("This event can't take answers any more.", 409);
+        lines.push(attendance.data);
       }
       if (form.ack === "on" && needsAcknowledgment(access)) {
         answered = true;
         const result = await acknowledge(deps.storage, access, { now, arrival });
         if (result.kind !== "recorded")
           return problem("This event can't take answers any more.", 409);
+        lines.push("acknowledge");
       }
     }
     const note = typeof form.note === "string" ? form.note : "";
@@ -537,7 +551,9 @@ export function registerRespondRoutes(app: Hono<AppEnv>, deps: RespondRouteDeps)
       const result = await addFeedback(deps.storage, access, { body: note, now, arrival });
       if (result.kind === "invalid") return problem(result.reason, 400);
       if (result.kind !== "recorded") return problem("This event can't take notes any more.", 409);
+      lines.push("note");
     }
+    await sendEventReceipt(deps, access, { answered: lines, arrival, now });
     // Post/redirect/get, so a refresh can't re-send a note. The Location carries the
     // same link the person was emailed; it is never logged (§13).
     const back = new URL(RESPOND_PATH, "http://placeholder");
@@ -660,6 +676,83 @@ export function registerRespondRoutes(app: Hono<AppEnv>, deps: RespondRouteDeps)
 }
 
 // --- The email ---------------------------------------------------------------------------
+
+/** What an answering POST did, in the receipt's words (rc42). */
+export const RECEIPT_LINE = {
+  going: "You're going",
+  maybe: "Maybe",
+  not_going: "You can't make it",
+  accept: "You agree",
+  decline: "You don't agree",
+  acknowledge: "You've seen it",
+  note: "You added a note",
+} as const;
+export type ReceiptLine = keyof typeof RECEIPT_LINE;
+
+/**
+ * A receipt for an answer on a verified event (DESIGN §10 rc42): mailed to the person the
+ * answer belongs to, however it arrived — signed in included — so someone who didn't give
+ * it finds out. Titles and names only, as all mail (§16): a note says it was added, not
+ * what it says; a BUSY inbox gets no title. It honours their opt-outs and their share of
+ * the mail cap; the answer stands either way, and a receipt that didn't go out is recorded
+ * for the event's history. Never throws: an answer must not fail for its receipt.
+ */
+export async function sendEventReceipt(
+  deps: Pick<RespondRouteDeps, "storage" | "mail" | "publicBaseUrl">,
+  access: EventAccess,
+  input: {
+    readonly answered: readonly ReceiptLine[];
+    readonly arrival: Arrival | null;
+    readonly now: string;
+  },
+): Promise<void> {
+  const { event, participation } = access;
+  if (event.verifiedAt === null || input.answered.length === 0) return;
+  const person = await findPersonById(deps.storage, participation.personId);
+  if (person === null) return;
+  const from = { senderId: person.id, groupId: event.groupId };
+  const unsent = (reason: ReceiptUnsent) =>
+    recordUnsentReceipt(deps.storage, {
+      eventId: event.id,
+      personId: person.id,
+      reason,
+      now: input.now,
+    });
+  if (await isSuppressed(deps.storage, person.email, from)) return unsent("suppressed");
+  const titled = canSee(participation.visibility, "title");
+  const when = formatWhen(event);
+  const what = titled ? `"${event.title}" (${when})` : `an event on ${when}`;
+  const how =
+    input.arrival?.via === "session" ? "signed in as you" : "with the link emailed to you";
+  try {
+    await deps.mail.send({
+      to: person.email,
+      subject: titled ? `Your answer to "${event.title}"` : `Your answer (${when})`,
+      cause: {
+        kind: "from",
+        senderId: person.id,
+        groupId: event.groupId,
+        why: "an answer was given for you on an event whose answers are verified",
+      },
+      text: [
+        `An answer was given for you to ${what}:`,
+        "",
+        ...input.answered.map((line) => `- ${RECEIPT_LINE[line]}`),
+        "",
+        `When: ${input.now.slice(0, 16).replace("T", " ")} UTC`,
+        `How: ${how}`,
+        "",
+        `See it: ${new URL(`${EVENTS_PATH}/${event.id}`, deps.publicBaseUrl).toString()}`,
+        "",
+        "If this wasn't you, someone who can read your email, or a device still signed in as you, answered for you. Sign in, change the answer, and sign out everywhere from your account page.",
+        "",
+        "Answers on this event are verified, so every answer sends a receipt like this one.",
+      ].join("\n"),
+    });
+  } catch (error) {
+    await unsent(error instanceof MailCapReachedError ? "capped" : "failed");
+  }
+}
 
 /**
  * One response-link email, written for the RECIPIENT's tier: a BUSY member's inbox gets

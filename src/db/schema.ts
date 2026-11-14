@@ -867,3 +867,32 @@ export const feedToken = sqliteTable(
     index("feed_token_shared_idx").on(t.groupId).where(sql`${t.kind} = 'shared'`),
   ],
 );
+
+// rc42 (§10 *Who really answered*): a receipt for an answer on a verified event or thread
+// that did NOT go out — the address opted out, its share of the mail cap was used, or the
+// provider refused — so the history can say so. Sent receipts leave no row: the mailbox is
+// the record. Exactly one of the two containers is set.
+export const receiptUnsent = sqliteTable(
+  "receipt_unsent",
+  {
+    id: text("id").primaryKey(),
+    canonicalEventId: text("canonical_event_id").references(() => canonicalEvent.id, {
+      onDelete: "cascade",
+    }),
+    threadId: text("thread_id").references(() => planThread.id, { onDelete: "cascade" }),
+    personId: text("person_id")
+      .notNull()
+      .references(() => person.id, { onDelete: "cascade" }),
+    reason: text("reason").notNull(),
+    createdAt: text("created_at").notNull(),
+  },
+  (t) => [
+    index("receipt_unsent_event_idx").on(t.canonicalEventId),
+    index("receipt_unsent_thread_idx").on(t.threadId),
+    check(
+      "receipt_unsent_one_chk",
+      sql`(${t.canonicalEventId} IS NULL) <> (${t.threadId} IS NULL)`,
+    ),
+    check("receipt_unsent_reason_chk", sql`${t.reason} IN ('suppressed', 'capped', 'failed')`),
+  ],
+);

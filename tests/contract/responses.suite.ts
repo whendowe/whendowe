@@ -28,8 +28,10 @@ import {
   issueResponseLinks,
   listRequests,
   listResponses,
+  listUnsentReceipts,
   RESPONSE_RESEND_INTERVAL_MS,
   RESPONSE_TOKEN_TTL_MS,
+  recordUnsentReceipt,
   resolveResponseLink,
   revokeUndeliveredLink,
   SIGNED_IN,
@@ -44,6 +46,8 @@ import {
 } from "../../src/people/group.js";
 import { acceptInvite, createInvite } from "../../src/people/invite.js";
 import { findOrCreatePerson } from "../../src/people/person.js";
+import { eraseAccount } from "../../src/privacy/erasure.js";
+import { purgeEventStatements } from "../../src/privacy/purge.js";
 
 // Responses and account-less links on BOTH drivers: the upsert-with-guarded-update
 // that rotates and throttles links, and the count-guarded feedback insert, are the
@@ -747,6 +751,51 @@ export function runResponsesContract(makePort: () => Promise<StoragePort>): void
         "removed",
       );
       expect((await deleteEvent(port, await asDm(), later(1))).kind).toBe("deleted");
+    });
+
+    it("receipts that didn't go out (rc42): listed for the event, gone with the person or the event", async () => {
+      const port = await makePort();
+      const { dm, membership, ann, bob, ghost } = await table(port, "unsent");
+      const event = await createEvent(port, {
+        creatorId: dm.id,
+        group: membership,
+        fields: { ...SESSION, startLocal: "2101-01-01T19:00", endLocal: "2101-01-01T23:00" },
+        now: T0,
+        verified: true,
+      });
+      await recordUnsentReceipt(port, {
+        eventId: event.id,
+        personId: ann,
+        reason: "capped",
+        now: T0,
+      });
+      await recordUnsentReceipt(port, {
+        eventId: event.id,
+        personId: bob,
+        reason: "suppressed",
+        now: later(1),
+      });
+      const listed = await listUnsentReceipts(port, await access(port, event.id, dm.id));
+      expect(listed.map((u) => [u.personId, u.reason, u.at, u.shown.email])).toEqual([
+        [ann, "capped", T0, "resp-ann-unsent@example.org"],
+        [bob, "suppressed", later(1), "resp-bob-unsent@example.org"],
+      ]);
+      // Someone who can't see the event sees none.
+      expect(await listUnsentReceipts(port, await access(port, event.id, ghost))).toEqual([]);
+      // Erasing Ann takes hers; the event going takes the rest.
+      await eraseAccount(port, ann, { now: later(2) });
+      expect(
+        (await listUnsentReceipts(port, await access(port, event.id, dm.id))).map(
+          (u) => u.personId,
+        ),
+      ).toEqual([bob]);
+      await port.batch(purgeEventStatements(event.id, later(3)));
+      expect(
+        await port.query({
+          sql: "SELECT 1 AS n FROM receipt_unsent WHERE canonical_event_id = ?",
+          params: [event.id],
+        }),
+      ).toEqual([]);
     });
 
     it("a group's organizers make its new events verified; members can't (rc42)", async () => {
