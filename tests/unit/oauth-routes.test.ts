@@ -757,7 +757,9 @@ it("without calendar_sync, connect shows disabled with its line and its POST is 
   expect(home).not.toContain(`action="${CONNECT_PATH}"`);
   const res = await h.app.request(CONNECT_PATH, form({ csrf: h.session.csrf }, h.session.cookie));
   expect(res.status).toBe(403);
-  expect(await res.text()).toContain(OFF);
+  const refusal = await res.text();
+  expect(refusal).toContain("<h1>Not connected</h1>");
+  expect(refusal).toContain(OFF);
   expect(res.headers.get("set-cookie") ?? "").not.toContain(FLOW_COOKIE_NAME);
   // Granted, the same account connects as anyone does where everyone has everything.
   await grant(h);
@@ -776,7 +778,9 @@ it("a flow begun before a revoke can't finish: the code is never exchanged", asy
   await revoke(h);
   const res = await callback(h, `code=c&state=${encodeURIComponent(state)}`, cookie);
   expect(res.status).toBe(403);
-  expect(await res.text()).toContain(OFF);
+  const refusal = await res.text();
+  expect(refusal).toContain("<h1>Not connected</h1>");
+  expect(refusal).toContain(OFF);
   expect(log).toEqual([]);
   expect(await connections(h)).toEqual([]);
 });
@@ -791,7 +795,9 @@ it("revoked while choosing a calendar, the waiting grant is given back and nothi
   await revoke(h);
   const res = await choose(h, pendingCookie(chooser), "new");
   expect(res.status).toBe(403);
-  expect(await res.text()).toContain(OFF);
+  const refusal = await res.text();
+  expect(refusal).toContain("<h1>Not connected</h1>");
+  expect(refusal).toContain(OFF);
   expect(revoked).toEqual([REFRESH_TOKEN]);
   expect(await connections(h)).toEqual([]);
 });
