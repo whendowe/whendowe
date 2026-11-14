@@ -23,7 +23,7 @@ import {
 import { exportPerson } from "../../src/privacy/export.js";
 import { createApp } from "../../src/web/app.js";
 import { CONFIRM_PATH, GOOGLE_SIGN_IN_PATH, SIGN_IN_PATH } from "../../src/web/routes/auth.js";
-import { CALLBACK_PATH, CHOOSE_PATH, CONNECT_PATH } from "../../src/web/routes/oauth.js";
+import { BUSY_PATH, CALLBACK_PATH, CHOOSE_PATH, CONNECT_PATH } from "../../src/web/routes/oauth.js";
 import { loadMigrationSql } from "../conftest.js";
 
 // Route-level tests against a real in-memory SQLite database and a fake fetch, so
@@ -873,6 +873,126 @@ it("ticking nothing counts no calendar; more than 50 ticks are refused before an
   expect(await connections(h2)).toHaveLength(1);
   expect(await busyRows(h2)).toEqual([]);
 });
+
+// --- changing whose busy times count later (rc41) -----------------------------------
+
+/** Save ticks on the busy page, as the signed-in owner. */
+async function saveBusy(h: Harness, busy: readonly string[], csrf = h.session.csrf) {
+  const body = new URLSearchParams({ csrf });
+  for (const id of busy) body.append("busy", id);
+  return h.app.request(BUSY_PATH, {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      cookie: h.session.cookie,
+    },
+    body: body.toString(),
+  });
+}
+
+const busyPage = async (h: Harness) =>
+  h.app.request(BUSY_PATH, { headers: { cookie: h.session.cookie } });
+
+it("home links to the busy page; it ticks what counts and never lists the calendar WhenDoWe made", async () => {
+  const h = await harness(
+    googleFake({
+      calendars: [...WITH_HOLIDAYS, { id: MADE_ID, summary: "WhenDoWe", accessRole: "owner" }],
+    }),
+  );
+  const { pending } = await chooser(h);
+  await chooseTicking(h, pending, "new", ["someone@example.com"]);
+  const home = await (await h.app.request("/", { headers: { cookie: h.session.cookie } })).text();
+  expect(home).toContain(`<a href="${BUSY_PATH}">Choose whose busy times count</a>`);
+  const res = await busyPage(h);
+  expect(res.status).toBe(200);
+  const page = await res.text();
+  expect(page).toContain(`action="${BUSY_PATH}"`);
+  expect(page).toContain(`name="csrf" value="${h.session.csrf}"`);
+  expect(page).toContain('name="busy" value="someone@example.com" checked');
+  // Ticked by what is stored, not by who owns it.
+  expect(page).toContain('name="busy" value="family@group.calendar.google.com" />');
+  expect(page).toContain('name="busy" value="holidays@group.v.calendar.google.com" />');
+  expect(page).not.toContain(`value="${MADE_ID}"`);
+});
+
+it("saving replaces the ticks with the ones Google lists; forged and made-by-us ids are dropped", async () => {
+  const h = await harness(
+    googleFake({ calendars: [...WITH_HOLIDAYS, { id: MADE_ID, accessRole: "owner" }] }),
+  );
+  const { pending } = await chooser(h);
+  await chooseTicking(h, pending, "new", ["someone@example.com"]);
+  const saved = await saveBusy(h, [
+    "holidays@group.v.calendar.google.com",
+    "forged@example.org",
+    MADE_ID,
+  ]);
+  expect(saved.status).toBe(303);
+  expect(saved.headers.get("location")).toBe("/");
+  expect(await busyRows(h)).toEqual(["holidays@group.v.calendar.google.com"]);
+  expect((await saveBusy(h, [])).status).toBe(303);
+  expect(await busyRows(h)).toEqual([]);
+  // CSRF on the POST; too many ticks refused; nothing changed by either.
+  await saveBusy(h, ["someone@example.com"]);
+  expect((await saveBusy(h, ["family@group.calendar.google.com"], "forged")).status).toBe(403);
+  const many = Array.from({ length: 51 }, (_, i) => `c${i}@group`);
+  const tooMany = await saveBusy(h, many);
+  expect(tooMany.status).toBe(400);
+  const why = await tooMany.text();
+  expect(why).toContain("<h1>Busy times</h1>");
+  expect(why).toContain("Tick at most 50 calendars.");
+  expect((await saveBusy(h, many.slice(0, 50))).status).toBe(303);
+  expect(await busyRows(h)).toEqual([]);
+});
+
+it("an expired access token is refreshed for the page only, and never saved", async () => {
+  const log: { url: string; method: string; body: string | undefined }[] = [];
+  const h = await harness(googleFake({ log }));
+  await connect(h);
+  const before = await connections(h);
+  // Fresh: no refresh is asked for.
+  log.length = 0;
+  expect((await busyPage(h)).status).toBe(200);
+  expect(log.some((r) => r.url === GOOGLE_TOKEN_ENDPOINT)).toBe(false);
+  // Within a minute of expiring: refreshed, used, not stored.
+  h.now.value = new Date(new Date(NOW).getTime() + 3600_000 - 30_000).toISOString();
+  log.length = 0;
+  expect((await busyPage(h)).status).toBe(200);
+  const asked = log.filter((r) => r.url === GOOGLE_TOKEN_ENDPOINT);
+  expect(asked).toHaveLength(1);
+  expect(new URLSearchParams(asked[0]?.body ?? "").get("grant_type")).toBe("refresh_token");
+  expect(await connections(h)).toEqual(before);
+});
+
+it("signed out, not connected, Google stopped accepting, or Google not answering", async () => {
+  const h = await harness();
+  expect((await h.app.request(BUSY_PATH)).status).toBe(303);
+  const none = await busyPage(h);
+  expect(none.status).toBe(404);
+  expect(await none.text()).toContain("Connect Google Calendar first");
+  expect((await saveBusy(h, [])).status).toBe(404);
+  await connect(h);
+  await h.storage.batch([
+    { sql: "UPDATE calendar_connection SET status = 'auth_error'", params: [] },
+  ]);
+  expect((await busyPage(h)).status).toBe(404);
+
+  const down = await harness((url, init) =>
+    url.startsWith(`${GOOGLE_CALENDAR_LIST_URL}?`) && init.method === "GET" && failing.on
+      ? Promise.resolve({ ok: false, status: 503, text: () => Promise.resolve("{}") })
+      : googleFake()(url, init),
+  );
+  await connect(down);
+  failing.on = true;
+  const page = await busyPage(down);
+  expect(page.status).toBe(502);
+  expect(await page.text()).toContain("Google didn't answer just now.");
+  const save = await saveBusy(down, ["someone@example.com"]);
+  expect(save.status).toBe(502);
+  expect(await busyRows(down)).toEqual([]);
+  failing.on = false;
+});
+
+const failing = { on: false };
 
 // --- calendar_sync (rc43) ---------------------------------------------------------
 

@@ -5,6 +5,7 @@ import {
   exchangeAuthorizationCode,
   exchangeForIdToken,
   GOOGLE_TOKEN_ENDPOINT,
+  refreshAccessToken,
 } from "../../src/oauth/token-exchange.js";
 
 const NOW = "2026-09-12T10:00:00.000Z";
@@ -246,4 +247,48 @@ it("redeems a sign-in code for its ID token, with no refresh token needed", asyn
 it("refuses a sign-in response with no ID token", async () => {
   const { impl } = fakeFetch(200, JSON.stringify({ access_token: "ya29.a", token_type: "Bearer" }));
   await expect(exchangeForSignIn(impl)).rejects.toThrow();
+});
+
+// --- refresh (§12; rc41 uses it for one request at a time) ---------------------------
+
+const refresh = (fetchImpl: FetchLike) =>
+  refreshAccessToken({
+    refreshToken: "1//refresh-token",
+    clientId: "cid",
+    clientSecret: CLIENT_SECRET,
+    now: NOW,
+    fetchImpl,
+  });
+
+it("refreshes with the refresh token in the POST body, and gives the new token's expiry", async () => {
+  const { impl, calls } = fakeFetch(
+    200,
+    JSON.stringify({ access_token: "ya29.new", expires_in: 3600, token_type: "Bearer" }),
+  );
+  expect(await refresh(impl)).toEqual({
+    accessToken: "ya29.new",
+    expiresAt: "2026-09-12T11:00:00.000Z",
+  });
+  expect(calls).toHaveLength(1);
+  expect(calls[0]?.url).toBe(GOOGLE_TOKEN_ENDPOINT);
+  expect(calls[0]?.init.method).toBe("POST");
+  expect(calls[0]?.init.headers["content-type"]).toBe("application/x-www-form-urlencoded");
+  const body = new URLSearchParams(calls[0]?.init.body ?? "");
+  expect(Object.fromEntries(body)).toEqual({
+    client_id: "cid",
+    client_secret: CLIENT_SECRET,
+    refresh_token: "1//refresh-token",
+    grant_type: "refresh_token",
+  });
+});
+
+it("refuses a refresh Google rejects, or a token that isn't a bearer token", async () => {
+  await expect(refresh(fakeFetch(400, '{"error":"invalid_grant"}').impl)).rejects.toThrow(
+    /token refresh failed: HTTP 400/,
+  );
+  await expect(
+    refresh(
+      fakeFetch(200, JSON.stringify({ access_token: "x", expires_in: 10, token_type: "mac" })).impl,
+    ),
+  ).rejects.toThrow("token refresh returned unsupported token_type: mac");
 });
