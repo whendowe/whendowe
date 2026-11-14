@@ -21,6 +21,13 @@ export interface CapabilityConfig {
   readonly operators: readonly string[];
 }
 
+/** The one line a gated control shows beside itself (rc43): no price, no plan name. */
+export const UNAVAILABLE: Record<Capability, string> = {
+  verify: "Turning verifying on isn't available to this account.",
+  calendar_sync: "Connecting Google Calendar isn't available to this account.",
+  long_history: "History older than 90 days isn't available to this account.",
+};
+
 /** Absent configuration means everything for everyone: a self-hosted instance meets no gate. */
 export const EVERYTHING: CapabilityConfig = { default: "all", operators: [] };
 

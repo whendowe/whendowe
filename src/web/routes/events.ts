@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+
 import type { Context, Hono } from "hono";
 import { Temporal } from "temporal-polyfill";
 import { ZodError } from "zod";
@@ -75,6 +76,12 @@ import {
 } from "../../events/response.js";
 import { MailCapReachedError } from "../../mail/capped.js";
 import type { MailPort } from "../../mail/port.js";
+import {
+  type CapabilityConfig,
+  EVERYTHING,
+  hasCapability,
+  UNAVAILABLE,
+} from "../../people/capability.js";
 import { findGroupForMember, type GroupMembership, listMembers } from "../../people/group.js";
 import {
   type EditTier,
@@ -144,6 +151,16 @@ export interface EventRouteDeps {
   readonly mail: MailPort;
   /** Links are built from this, never the Host header. */
   readonly publicBaseUrl: string;
+  /** rc43: who may turn verifying on; absent, everyone may. */
+  readonly capabilities?: CapabilityConfig;
+}
+
+/** rc43: whether this account may turn verifying on (anyone may take part in a verified one). */
+export function mayVerify(
+  deps: { readonly storage: StoragePort; readonly capabilities?: CapabilityConfig },
+  personId: string,
+): Promise<boolean> {
+  return hasCapability(deps.storage, deps.capabilities ?? EVERYTHING, personId, "verify");
 }
 
 export const BUSY_LABEL = "Busy";
@@ -1093,7 +1110,9 @@ function verifiedKeeps(eventId: string): Html {
 }
 
 /** rc42: making an event verified, for its editors. One way for now: off needs everyone. */
-function verifyForm(eventId: string, csrf: string): Html {
+function verifyForm(eventId: string, csrf: string, allowed: boolean): Html {
+  if (!allowed)
+    return html`<p class="wd-verify"><button type="button" disabled>Verify answers here</button> <span class="muted">${UNAVAILABLE.verify}</span></p>`;
   return html`<details class="wd-verify"><summary>Verify answers here</summary>
 <form method="post" action="${EVENTS_PATH}/${eventId}/verify">
   <input type="hidden" name="csrf" value="${csrf}" />
@@ -1111,11 +1130,16 @@ export function verifiedField(
   checked: boolean,
   groupDefault: boolean,
   what: "event" | "poll" | "plan" = "event",
+  /** rc43: whether this account may turn verifying on; if not, the box shows disabled. */
+  allowed = true,
 ): Html {
   const these = what === "event" ? "Events" : what === "poll" ? "Polls" : "Plans";
-  return groupDefault
-    ? html`<p class="muted">${these} from this group are verified: answers count only from each person's own email, or signed in.</p>`
-    : html`<p><label><input type="checkbox" name="verified"${checked ? html` checked` : ""} /> Verified: answers count only from each person's own email, or signed in</label><br />
+  if (groupDefault)
+    return html`<p class="muted">${these} from this group are verified: answers count only from each person's own email, or signed in.</p>`;
+  if (!allowed)
+    return html`<p><label><input type="checkbox" name="verified" disabled /> Verified: answers count only from each person's own email, or signed in</label><br />
+  <span class="muted">${UNAVAILABLE.verify}</span></p>`;
+  return html`<p><label><input type="checkbox" name="verified"${checked ? html` checked` : ""} /> Verified: answers count only from each person's own email, or signed in</label><br />
   <span class="muted">Everyone on it then sees each other's email addresses, and nobody can remove anyone else.${what === "event" ? "" : " It can't be shared by a link."}</span></p>`;
 }
 
@@ -1272,7 +1296,7 @@ ${await proposalsSection(deps, access, csrf)}
 ${people.length === 0 ? "" : peopleSection(access, people, csrf)}
 ${see("participants") ? await appearanceSection(deps.storage, { kind: "event", id: event.id }, { personId: participation.personId, csrfToken: csrf }, `${EVENTS_PATH}/${event.id}/me`, "event") : ""}
 ${event.verifiedAt === null ? ownAnswersForm({ action: `${EVENTS_PATH}/${event.id}/own-answers`, hidden: { csrf }, on: participation.ownAnswersOnly, where: "here" }) : ""}
-${event.verifiedAt === null && participation.editTier === "edit" ? verifyForm(event.id, csrf) : ""}
+${event.verifiedAt === null && participation.editTier === "edit" ? verifyForm(event.id, csrf, await mayVerify(deps, participation.personId)) : ""}
 ${requestSection(access, requests, await eventRetention(deps.storage, access), csrf)}
 ${await responsesSection(deps, access, csrf)}
 ${retentionSection({
@@ -1328,10 +1352,10 @@ export function registerEventRoutes(app: Hono<AppEnv>, deps: EventRouteDeps): vo
       membership === null
         ? html`<p><a href="/">← Your events</a></p>
 <h1>New event</h1>
-${eventForm(EVENTS_PATH, csrf, form.values, "", error, "Create event", "FULL", html`${peopleFieldset(form.rows, true, LEAD_ALONE)}${verifiedField(form.verified, false)}`)}`
+${eventForm(EVENTS_PATH, csrf, form.values, "", error, "Create event", "FULL", html`${peopleFieldset(form.rows, true, LEAD_ALONE)}${verifiedField(form.verified, false, "event", await mayVerify(deps, meId))}`)}`
         : html`<p><a href="/groups/${membership.group.id}">← ${membership.group.name}</a></p>
 <h1>New event for ${membership.group.name}</h1>
-${eventForm(`/groups/${membership.group.id}/events`, csrf, form.values, "", error, "Create event", "FULL", html`${await requestsFieldset(deps, membership, meId, form.asks)}${peopleFieldset(form.rows, true, leadFor(membership))}${verifiedField(form.verified, await groupDefaultVerified(deps.storage, membership.group.id))}`)}`,
+${eventForm(`/groups/${membership.group.id}/events`, csrf, form.values, "", error, "Create event", "FULL", html`${await requestsFieldset(deps, membership, meId, form.asks)}${peopleFieldset(form.rows, true, leadFor(membership))}${verifiedField(form.verified, await groupDefaultVerified(deps.storage, membership.group.id), "event", await mayVerify(deps, meId))}`)}`,
     );
 
   const createEventFrom = async (c: Context<AppEnv>, groupId: string | null) => {
@@ -1346,7 +1370,7 @@ ${eventForm(`/groups/${membership.group.id}/events`, csrf, form.values, "", erro
     const asks = readRequests(form);
     const { rows, bad } = readPeople(form);
     const verified = form.verified === "on";
-    const again = async (error: string) =>
+    const again = async (error: string, status: 400 | 403 = 400) =>
       c.html(
         await newEventPage(
           c,
@@ -1356,9 +1380,11 @@ ${eventForm(`/groups/${membership.group.id}/events`, csrf, form.values, "", erro
           { values, rows, asks, verified },
           error,
         ),
-        400,
+        status,
       );
     if (bad.length > 0) return again(badPeople(bad));
+    // rc43: a group's default verifies it whatever the creator holds; asking to needs `verify`.
+    if (verified && !(await mayVerify(deps, me.personId))) return again(UNAVAILABLE.verify, 403);
     try {
       const fields = toFields(values);
       // Fully valid BEFORE anyone is created for an address: a refused form creates no one.
@@ -1531,6 +1557,7 @@ ${eventForm(`${EVENTS_PATH}/${access.event.id}`, me.csrfToken, v, html`<input ty
   const newPollPage = async (
     c: Context<AppEnv>,
     csrf: string,
+    meId: string,
     membership: GroupMembership | null,
     values: PollFormValues,
     rows: readonly PersonRow[],
@@ -1542,10 +1569,10 @@ ${eventForm(`${EVENTS_PATH}/${access.event.id}`, me.csrfToken, v, html`<input ty
       membership === null
         ? html`<p><a href="/">← Your events</a></p>
 <h1>Find a time</h1>
-${pollForm(POLLS_PATH, csrf, values, error, html`${peopleFieldset(rows, false, POLL_ALONE, false)}${verifiedField(values.verified, false, "poll")}`)}`
+${pollForm(POLLS_PATH, csrf, values, error, html`${peopleFieldset(rows, false, POLL_ALONE, false)}${verifiedField(values.verified, false, "poll", await mayVerify(deps, meId))}`)}`
         : html`<p><a href="/groups/${membership.group.id}">← ${membership.group.name}</a></p>
 <h1>Find a time with ${membership.group.name}</h1>
-${pollForm(`/groups/${membership.group.id}/polls`, csrf, values, error, html`${peopleFieldset(rows, false, pollLeadFor(membership), false)}${verifiedField(values.verified, await groupDefaultVerified(deps.storage, membership.group.id), "poll")}`)}`,
+${pollForm(`/groups/${membership.group.id}/polls`, csrf, values, error, html`${peopleFieldset(rows, false, pollLeadFor(membership), false)}${verifiedField(values.verified, await groupDefaultVerified(deps.storage, membership.group.id), "poll", await mayVerify(deps, meId))}`)}`,
     );
 
   const createPollFrom = async (c: Context<AppEnv>, groupId: string | null) => {
@@ -1558,9 +1585,14 @@ ${pollForm(`/groups/${membership.group.id}/polls`, csrf, values, error, html`${p
     if (groupId !== null && membership === null) return c.html(notFound(c), 404);
     const values = readPollForm(form);
     const { rows, bad } = readPeople(form);
-    const again = async (error: string) =>
-      c.html(await newPollPage(c, me.csrfToken, membership, values, rows, error), 400);
+    const again = async (error: string, status: 400 | 403 = 400) =>
+      c.html(
+        await newPollPage(c, me.csrfToken, me.personId, membership, values, rows, error),
+        status,
+      );
     if (bad.length > 0) return again(badPeople(bad));
+    if (values.verified && !(await mayVerify(deps, me.personId)))
+      return again(UNAVAILABLE.verify, 403);
     try {
       const input = toPollInput(values);
       validateCandidates(input.fields, input.candidates); // as above: valid before anyone is created
@@ -1592,7 +1624,7 @@ ${pollForm(`/groups/${membership.group.id}/polls`, csrf, values, error, html`${p
   app.get(`${POLLS_PATH}/new`, async (c) => {
     const me = requireSignedIn(c);
     if (me instanceof Response) return me;
-    return c.html(await newPollPage(c, me.csrfToken, null, NO_POLL, [], null));
+    return c.html(await newPollPage(c, me.csrfToken, me.personId, null, NO_POLL, [], null));
   });
 
   app.post(POLLS_PATH, (c) => createPollFrom(c, null));
@@ -1602,7 +1634,7 @@ ${pollForm(`/groups/${membership.group.id}/polls`, csrf, values, error, html`${p
     if (me instanceof Response) return me;
     const membership = await findGroupForMember(deps.storage, c.req.param("groupId"), me.personId);
     if (membership === null) return groupNotVisible(c, deps, c.req.param("groupId"));
-    return c.html(await newPollPage(c, me.csrfToken, membership, NO_POLL, [], null));
+    return c.html(await newPollPage(c, me.csrfToken, me.personId, membership, NO_POLL, [], null));
   });
 
   app.post("/groups/:groupId/polls", (c) => createPollFrom(c, c.req.param("groupId")));
@@ -1879,6 +1911,8 @@ ${pollForm(`/groups/${membership.group.id}/polls`, csrf, values, error, html`${p
     const access = await findEventForParticipant(deps.storage, c.req.param("id"), me.personId);
     if (access === null || access.participation.visibility === "HIDDEN")
       return c.html(notFound(c), 404);
+    if (!(await mayVerify(deps, me.personId)))
+      return c.html(await eventPage(c, deps, access, me.csrfToken, UNAVAILABLE.verify), 403);
     if ((await setVerified(deps.storage, access, deps.now())) === "forbidden")
       return c.html(
         await eventPage(c, deps, access, me.csrfToken, "Only people who can edit it verify it."),
