@@ -34,6 +34,7 @@ const EVENT_CHILDREN: readonly string[] = [
   "DELETE FROM slot_response WHERE canonical_event_id = ?",
   "DELETE FROM event_candidate WHERE canonical_event_id = ?",
   "DELETE FROM event_feedback WHERE canonical_event_id = ?",
+  "DELETE FROM receipt_unsent WHERE canonical_event_id = ?",
   "DELETE FROM response_token WHERE canonical_event_id = ?",
   "DELETE FROM event_change_proposal WHERE canonical_event_id = ?",
   "DELETE FROM event_participant_change WHERE canonical_event_id = ?",
@@ -72,6 +73,7 @@ export function purgeGroupStatements(groupId: string, now: string): SqlStatement
 export function purgeThreadStatements(threadId: string, now: string): SqlStatement[] {
   return [
     { sql: "DELETE FROM plan_note WHERE thread_id = ?", params: [threadId] },
+    { sql: "DELETE FROM receipt_unsent WHERE thread_id = ?", params: [threadId] },
     {
       sql: "DELETE FROM plan_vote WHERE plan_id IN (SELECT id FROM plan WHERE thread_id = ?)",
       params: [threadId],

@@ -4,6 +4,7 @@ import { expect, it } from "vitest";
 import { sqliteStoragePort } from "../../src/db/sqlite.js";
 import { MailCapReachedError, SenderShareReachedError } from "../../src/mail/capped.js";
 import type { MailMessage } from "../../src/mail/port.js";
+import { suppress } from "../../src/privacy/suppression.js";
 import { createApp } from "../../src/web/app.js";
 import { ACCOUNT_PATH } from "../../src/web/layout.js";
 import { CONFIRM_PATH, SIGN_IN_PATH } from "../../src/web/routes/auth.js";
@@ -1910,6 +1911,166 @@ it("verified (rc42): addresses shown, nobody removed, not deleted or shortened; 
   expect(mail?.text).toContain(
     "Answers here are verified: they count only from your own email or signed in, and your address is shown to the others on it.",
   );
+});
+
+it("receipts (rc42): one per answering POST on a verified event, to whoever it belongs to", async () => {
+  const h = await harness();
+  const { dm, group } = await setup(h);
+  const ann = await join(h, dm, group, "ann@example.org", "view", "FULL");
+  const grandma = await join(h, dm, group, "grandma@example.org", "view", "BUSY");
+  const receipts = (to: string) =>
+    h.sent.filter((m) => m.to === to && m.subject.startsWith("Your answer"));
+
+  // Not verified: answers send nothing.
+  const plain = await createVia(h, dm, group);
+  await h.app.request(
+    `${plain}/attendance`,
+    post({ csrf: ann.csrf, attendance: "going" }, ann.cookie),
+  );
+  expect(receipts("ann@example.org")).toHaveLength(0);
+
+  const event = await createVia(h, dm, group, { ...NIGHT, verified: "on" });
+  // Signed in: one receipt, saying how.
+  await h.app.request(
+    `${event}/attendance`,
+    post({ csrf: ann.csrf, attendance: "maybe" }, ann.cookie),
+  );
+  const signedIn = receipts("ann@example.org");
+  expect(signedIn).toHaveLength(1);
+  expect(signedIn[0]?.subject).toBe('Your answer to "Session 12: the Sunken Keep"');
+  expect(signedIn[0]?.text).toContain("- Maybe");
+  expect(signedIn[0]?.text).toContain("How: signed in as you");
+  expect(signedIn[0]?.text).toMatch(/See it: https:\/\/whendowe\.example\/events\//);
+  // A note: one receipt, which says a note was added and never what it says.
+  await h.app.request(
+    `${event}/feedback`,
+    post({ csrf: ann.csrf, note: "SECRET-NOTE-42" }, ann.cookie),
+  );
+  expect(receipts("ann@example.org")).toHaveLength(2);
+  expect(receipts("ann@example.org")[1]?.text).toContain("- You added a note");
+  expect(receipts("ann@example.org")[1]?.text).not.toContain("SECRET-NOTE-42");
+
+  // By her mailed link: opening it (GET) sends nothing; answering and a note in one POST,
+  // one receipt with both.
+  await sendLinks(h, dm, event);
+  const link = linkFor(h, "ann@example.org");
+  await h.app.request(link);
+  expect(receipts("ann@example.org")).toHaveLength(2);
+  await h.app.request(link, post({ t: tokenOf(link), attendance: "going", note: "SECRET-2" }));
+  const byLink = receipts("ann@example.org");
+  expect(byLink).toHaveLength(3);
+  expect(byLink[2]?.text).toContain("- You're going\n- You added a note");
+  expect(byLink[2]?.text).toContain("How: with the link emailed to you");
+  expect(byLink[2]?.text).not.toContain("SECRET-2");
+  // Each carries the opt-out footer, as all mail someone else could cause does.
+  expect(byLink[2]?.text).toContain("You got this because an answer was given for you");
+
+  // Someone who sees only busy time gets no title.
+  await h.app.request(
+    `${event}/attendance`,
+    post({ csrf: grandma.csrf, attendance: "going" }, grandma.cookie),
+  );
+  const busy = receipts("grandma@example.org")[0];
+  expect(busy?.subject).toMatch(/^Your answer \(/);
+  expect(busy?.text).not.toContain("Sunken Keep");
+  expect(busy?.text).toContain("An answer was given for you to an event on ");
+  // Nothing went unsent, so the history says nothing about receipts.
+  expect(await text(h, event, dm)).not.toContain("No receipt went to");
+});
+
+it("receipts (rc42): agreeing and acknowledging signed in send one each, too", async () => {
+  const h = await harness();
+  const { mara, group, david, davidId } = await household(h);
+  const receipts = () =>
+    h.sent.filter((m) => m.to === "david@example.org" && m.subject.startsWith("Your answer"));
+  const asked = await createVia(h, mara, group, {
+    ...NIGHT,
+    verified: "on",
+    [`req_${davidId}`]: "accept",
+  });
+  expect((await act(h, asked, david, "answer", { answer: "decline" })).status).toBe(303);
+  expect(receipts().map((m) => m.text.includes("- You don't agree"))).toEqual([true]);
+  const acked = await createVia(h, mara, group, {
+    ...NIGHT,
+    verified: "on",
+    [`req_${davidId}`]: "ack",
+  });
+  expect((await act(h, acked, david, "acknowledge")).status).toBe(303);
+  expect(receipts()).toHaveLength(2);
+  expect(receipts()[1]?.text).toContain("- You've seen it");
+  // A refused answer sends nothing.
+  expect((await act(h, asked, david, "answer", { answer: "accept" })).status).toBe(409);
+  expect(receipts()).toHaveLength(2);
+
+  // By his mailed links, the same lines.
+  const askedAgain = await createVia(h, mara, group, {
+    ...NIGHT,
+    verified: "on",
+    [`req_${davidId}`]: "accept",
+  });
+  await sendLinks(h, mara, askedAgain);
+  const agreeLink = linkFor(h, "david@example.org");
+  await h.app.request(agreeLink, post({ t: tokenOf(agreeLink), decision: "accept" }));
+  expect(receipts()).toHaveLength(3);
+  expect(receipts()[2]?.text).toContain("- You agree\n");
+  const ackAgain = await createVia(h, mara, group, {
+    ...NIGHT,
+    verified: "on",
+    [`req_${davidId}`]: "ack",
+  });
+  await sendLinks(h, mara, ackAgain);
+  const ackLink = linkFor(h, "david@example.org");
+  await h.app.request(ackLink, post({ t: tokenOf(ackLink), ack: "on" }));
+  expect(receipts()).toHaveLength(4);
+  expect(receipts()[3]?.text).toContain("- You've seen it\n");
+});
+
+it("receipts (rc42): an opt-out, the cap or the provider stop one; the answer stands and the history says so", async () => {
+  const h = await harness();
+  const { dm, group } = await setup(h);
+  const ann = await join(h, dm, group, "ann@example.org", "view", "FULL");
+  const event = await createVia(h, dm, group, { ...NIGHT, verified: "on" });
+  const receipts = () =>
+    h.sent.filter((m) => m.to === "ann@example.org" && m.subject.startsWith("Your answer"));
+
+  await suppress(h.storage, "ann@example.org", { kind: "all" }, new Date().toISOString());
+  const opted = await h.app.request(
+    `${event}/attendance`,
+    post({ csrf: ann.csrf, attendance: "going" }, ann.cookie),
+  );
+  expect(opted.status).toBe(303);
+  expect(receipts()).toHaveLength(0);
+  await h.storage.batch([{ sql: "DELETE FROM mail_suppression", params: [] }]);
+
+  h.mailFailure.error = new MailCapReachedError({ daily: 1, monthly: 1 });
+  expect(
+    (
+      await h.app.request(
+        `${event}/attendance`,
+        post({ csrf: ann.csrf, attendance: "maybe" }, ann.cookie),
+      )
+    ).status,
+  ).toBe(303);
+  h.mailFailure.error = new Error("provider down");
+  expect(
+    (await h.app.request(`${event}/feedback`, post({ csrf: ann.csrf, note: "late" }, ann.cookie)))
+      .status,
+  ).toBe(303);
+  h.mailFailure.error = null;
+
+  // Every answer stands.
+  const page = await text(h, event, dm);
+  expect(page).toMatch(/ann <span class="muted">ann@example\.org<\/span>: Maybe/);
+  expect(page).toContain("late");
+  // And the history says which receipts didn't go, to whom and why, with the address (verified).
+  expect(page).toContain("their address takes no mail from here");
+  expect(page).toContain("the email limit was reached");
+  expect(page).toContain("the email could not be sent");
+  expect(
+    page.match(
+      /No receipt went to ann <span class="muted">ann@example\.org<\/span> for their answer/g,
+    ),
+  ).toHaveLength(3);
 });
 
 it("a group's organizers make its new events verified; a member sees that, and can't change it (rc42)", async () => {
