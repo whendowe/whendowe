@@ -1745,6 +1745,57 @@ say so where it matters.
   step up, for sign-in and as a third level; it comes with sealed groups' keyring (rc25), and it is
   why no native app is needed for this. Whether a link was *opened* is not recorded: a GET never
   mutates (§13).
+- **As built, slices 2–6** (#10–#20, owner-merged 2026-11-12…14). Where the text above leaves a
+  choice, this is what was chosen:
+  - *Invites (2).* "Never signed in" means no person with that address has `signed_in_at`; a
+    person added to an event by address who never signed in still counts as new. Accepting
+    while already signed in as that account on this browser joins at once. `session.via` is
+    written by every sign-in and read by nothing yet.
+  - *The personal switch (3).* Turning it on deletes the person's links not known to be mailed:
+    copied ones, and links from before rc42 recorded how they were made. They stay gone if it is
+    turned off again. The group default is copied onto an event made from the group, onto an
+    event you are added to later by address if it came from your group, onto a thread started
+    from the group, and onto a thread joined by its shared link signed in. An agreed plan's
+    events take each member's switch; a group member who sees only busy time (rc27) takes their
+    group default. A copied link's page never offers the switch, and the domain refuses it from
+    one.
+  - *Verified (4).*
+    - An event is verified by a checkbox when it is made, later by any editor, or from birth by
+      the group's organizers' default (`person_group.default_verified`, one switch for events
+      and threads). A thread is verified by whoever decides it (`deciders`).
+    - Verifying an event is a revision every tier sees, as a status is (`verified: 0 → 1`).
+      Verifying deletes the links not known to be mailed, and a thread's shared link, so turning
+      it off later can't revive them.
+    - On a verified event the personal switch isn't shown (it adds nothing), the remove buttons
+      and the delete link are gone, an editor removing themselves is leaving, and retention may
+      be set longer or to the same period, never shorter — checked in the statement too.
+    - Addresses are shown wherever a name is: people, answers, notes, requests, history,
+      proposals and who added whom (`shownEmailSql`). A group's HIDDEN members are participants,
+      so theirs are shown too: one rule for everyone on it. A thread's member line shows
+      addresses wherever they are shown, which it never did before.
+    - "Nobody lowers another's tiers" needs no code yet: nothing changes a tier after someone is
+      added.
+    - In a verified thread a guest stays listed under "Not confirmed", can't answer, and isn't
+      removed. What a verified thread agrees is a verified event.
+  - *Receipts (5).* One per answering POST, listing each thing it recorded (an attendance and a
+    note in one form are one receipt with two lines; a thread's lists each plan and the answer).
+    Nothing on a GET or a refused answer. Sent as mail the answerer caused, so their share of the
+    cap and their opt-outs apply: someone who opted out of everything gets none. A receipt that
+    didn't go out is a `receipt_unsent` row — `suppressed`, `capped` or `failed` — shown in the
+    history to everyone who sees its people; sent ones leave no row.
+  - *Everyone agrees (6).*
+    - Asking is the asker's own yes. Everyone who sees it must say yes — on a thread every
+      member with an address, since a guest can't answer — including someone added meanwhile;
+      someone who left is not waited for. Alone, asking decides it.
+    - A yes may become a no while it is open, which ends it; for the asker, that is withdrawing.
+    - A request past its 14 days reads as lapsed and is closed as such the next time anyone asks.
+    - Its mailed links have their own table, `verified_request_token`: `response_token`'s action
+      check can't widen without a rebuild (§16).
+    - Agreed, stopping verifying is a revision attributed to the asker, beside "Everyone agreed
+      to …" in the history; removing for good is the ordinary purge, which waits for calendar
+      copies (rc21); keeping it less long is offered only shorter periods.
+    - A thread is only ever asked to stop verifying: it has no retention of its own and isn't
+      removed for good.
 - **Slices, one PR each:** (1) link origin and the answer labels; (2) the invite rule and the
   session's `via`; (3) the personal switch; (4) verified: the switch, its rules for links, guests,
   removal and tiers, and the header; (5) receipts; (6) the everyone-agrees request.
@@ -1782,6 +1833,8 @@ ALTER TABLE plan_thread         ADD verified_at text;
 ALTER TABLE person_group        ADD default_verified integer NOT NULL DEFAULT 0;
 ALTER TABLE session             ADD via text;                              -- magic | google | invite
 CREATE TABLE verified_request (             -- "stop verifying" / "remove for good": everyone agrees
+    -- As built (0036): also retain_days (the period a `shorten` asks for); asked_by is
+    -- ON DELETE SET NULL; partial unique indexes allow one open request per event and per thread.
     id                 text PRIMARY KEY,
     canonical_event_id text REFERENCES canonical_event(id) ON DELETE CASCADE,
     thread_id          text REFERENCES plan_thread(id) ON DELETE CASCADE,   -- exactly one of the two
@@ -1799,6 +1852,22 @@ CREATE TABLE verified_request_answer (
     answered_at text NOT NULL,
     answered_via text NOT NULL,             -- session | mailed
     PRIMARY KEY (request_id, person_id)
+);
+-- As built: the request's mailed links (0036), and receipts that didn't go out (0035).
+CREATE TABLE verified_request_token (
+    token_hash  text PRIMARY KEY,           -- only the hash
+    request_id  text NOT NULL REFERENCES verified_request(id) ON DELETE CASCADE,
+    person_id   text NOT NULL REFERENCES person(id) ON DELETE CASCADE,
+    expires_at  text NOT NULL,              -- the request's own expiry
+    UNIQUE (request_id, person_id)
+);
+CREATE TABLE receipt_unsent (
+    id                 text PRIMARY KEY,
+    canonical_event_id text REFERENCES canonical_event(id) ON DELETE CASCADE,
+    thread_id          text REFERENCES plan_thread(id) ON DELETE CASCADE,   -- exactly one
+    person_id          text NOT NULL REFERENCES person(id) ON DELETE CASCADE,
+    reason             text NOT NULL,       -- suppressed | capped | failed
+    created_at         text NOT NULL
 );
 ```
 
