@@ -581,7 +581,9 @@ it("lists only calendars that can take events", async () => {
     await callback(h, `code=c&state=${encodeURIComponent(state)}`, cookie)
   ).text();
   expect(page).toContain("Family");
-  expect(page).not.toContain("ro@example.com");
+  // Not a place events can go; its busy times may still count (rc41).
+  expect(page).not.toContain('name="calendar" value="ro@example.com"');
+  expect(page).toContain('name="busy" value="ro@example.com"');
 });
 
 it("refuses a choice without the pending grant, from someone else, or without CSRF", async () => {

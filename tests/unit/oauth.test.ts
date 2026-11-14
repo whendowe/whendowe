@@ -128,13 +128,14 @@ it("forces consent so reconnects re-issue a refresh token", () => {
   expect(authorizeParams().get("prompt")).toBe("consent");
 });
 
-it("requests exactly the three narrow calendar scopes, space-delimited (rc40)", () => {
+it("requests exactly the four narrow calendar scopes, space-delimited (rc40, rc41)", () => {
   const scope = authorizeParams().get("scope");
   expect(scope).toBe(GOOGLE_CALENDAR_SCOPES.join(" "));
   expect(scope?.split(" ")).toEqual([
     "https://www.googleapis.com/auth/calendar.events",
     "https://www.googleapis.com/auth/calendar.calendarlist.readonly",
     "https://www.googleapis.com/auth/calendar.app.created",
+    "https://www.googleapis.com/auth/calendar.freebusy",
   ]);
   // Never full calendar access, which could share and delete every calendar.
   expect(scope?.split(" ")).not.toContain("https://www.googleapis.com/auth/calendar");
