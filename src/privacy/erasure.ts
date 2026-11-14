@@ -347,6 +347,11 @@ export async function eraseAccount(
       sql: "DELETE FROM projection WHERE calendar_connection_id IN (SELECT id FROM calendar_connection WHERE owner_id = ?)",
       params: [p],
     },
+    // rc41: which calendars' busy times count. The cascade would; said here, as projection is.
+    {
+      sql: "DELETE FROM busy_calendar WHERE connection_id IN (SELECT id FROM calendar_connection WHERE owner_id = ?)",
+      params: [p],
+    },
     { sql: "DELETE FROM calendar_connection WHERE owner_id = ?", params: [p] },
     // Opt-outs from this person: nobody is left for them to stop (rc24).
     { sql: "DELETE FROM mail_suppression WHERE scope = 'person' AND scope_id = ?", params: [p] },

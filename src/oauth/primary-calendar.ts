@@ -117,16 +117,17 @@ function bearer(accessToken: string) {
   return { authorization: `Bearer ${accessToken}`, accept: "application/json" };
 }
 
-/** The calendars this account may add events to, its main calendar first. */
-export async function listWritableCalendars(
+/** Every entry of the account's calendar list with at least this role, page by page. */
+async function listEntries(
   accessToken: string,
-  fetchImpl: FetchLike = defaultFetch,
-): Promise<CalendarChoice[]> {
-  const found: CalendarChoice[] = [];
+  minAccessRole: "writer" | "freeBusyReader",
+  fetchImpl: FetchLike,
+): Promise<z.infer<typeof listEntrySchema>[]> {
+  const found: z.infer<typeof listEntrySchema>[] = [];
   let pageToken: string | null = null;
   for (let page = 0; page < MAX_PAGES; page++) {
     const url = new URL(GOOGLE_CALENDAR_LIST_URL);
-    url.searchParams.set("minAccessRole", "writer");
+    url.searchParams.set("minAccessRole", minAccessRole);
     url.searchParams.set("maxResults", "250");
     if (pageToken !== null) url.searchParams.set("pageToken", pageToken);
     const body = await requestJson(
@@ -136,14 +137,42 @@ export async function listWritableCalendars(
       listPageSchema,
       "calendar list",
     );
-    for (const entry of body.items ?? []) {
-      // minAccessRole already filters; checked again, since the list is Google's word.
-      if (WRITABLE.has(entry.accessRole ?? "")) found.push(choiceOf(entry));
-    }
+    found.push(...(body.items ?? []));
     pageToken = body.nextPageToken ?? null;
     if (pageToken === null) break;
   }
-  return [...found.filter((c) => c.primary), ...found.filter((c) => !c.primary)];
+  return found;
+}
+
+function mainFirst<T extends { readonly primary: boolean }>(list: readonly T[]): T[] {
+  return [...list.filter((c) => c.primary), ...list.filter((c) => !c.primary)];
+}
+
+/** The calendars this account may add events to, its main calendar first. */
+export async function listWritableCalendars(
+  accessToken: string,
+  fetchImpl: FetchLike = defaultFetch,
+): Promise<CalendarChoice[]> {
+  const entries = await listEntries(accessToken, "writer", fetchImpl);
+  // minAccessRole already filters; checked again, since the list is Google's word.
+  return mainFirst(entries.filter((e) => WRITABLE.has(e.accessRole ?? "")).map(choiceOf));
+}
+
+/** A calendar whose busy times may count (rc41); `owned` is ticked by default. */
+export interface BusyChoice extends CalendarChoice {
+  readonly owned: boolean;
+}
+
+/**
+ * Every calendar in the account's list whose busy times can be read, its main calendar
+ * first (rc41): the ones it owns, and the ones it only subscribes to (holidays, a team's).
+ */
+export async function listBusyCalendars(
+  accessToken: string,
+  fetchImpl: FetchLike = defaultFetch,
+): Promise<BusyChoice[]> {
+  const entries = await listEntries(accessToken, "freeBusyReader", fetchImpl);
+  return mainFirst(entries.map((e) => ({ ...choiceOf(e), owned: e.accessRole === "owner" })));
 }
 
 /**

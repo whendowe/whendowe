@@ -8,6 +8,7 @@ import {
   GOOGLE_CALENDAR_LIST_URL,
   GOOGLE_CALENDARS_URL,
   GOOGLE_PRIMARY_CALENDAR_URL,
+  listBusyCalendars,
   listWritableCalendars,
 } from "../../src/oauth/primary-calendar.js";
 
@@ -243,4 +244,26 @@ it("says which call failed", async () => {
   await expect(
     createCalendar(ACCESS_TOKEN, { summary: "WhenDoWe", timeZone: null }, fail),
   ).rejects.toThrow(/^calendar create failed/);
+});
+
+it("lists every calendar whose busy times can be read, owned ones marked, main first (rc41)", async () => {
+  const { impl, calls } = pagedFetch([
+    {
+      items: [
+        { id: "hol@group", summary: "Holidays", accessRole: "reader" },
+        { id: "team@group", summary: "Team", accessRole: "freeBusyReader" },
+        { id: "me@example.com", summary: "Me", primary: true, accessRole: "owner" },
+        { id: "fam@group", summary: "Family", accessRole: "writer" },
+      ],
+    },
+  ]);
+  expect(await listBusyCalendars(ACCESS_TOKEN, impl)).toEqual([
+    { id: "me@example.com", name: "Me", primary: true, owned: true },
+    { id: "hol@group", name: "Holidays", primary: false, owned: false },
+    { id: "team@group", name: "Team", primary: false, owned: false },
+    { id: "fam@group", name: "Family", primary: false, owned: false },
+  ]);
+  expect(new URL(calls[0]?.url ?? "").searchParams.get("minAccessRole")).toBe("freeBusyReader");
+  // A page with no items is no calendars.
+  expect(await listBusyCalendars(ACCESS_TOKEN, pagedFetch([{}]).impl)).toEqual([]);
 });

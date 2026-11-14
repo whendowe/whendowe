@@ -146,8 +146,17 @@ export async function exportPerson(storage: StoragePort, personId: string, now: 
   );
   const connections = await all(
     storage,
-    { account_email: z.string(), calendar_id: z.string(), status: z.string() },
-    "SELECT account_email, calendar_id, status FROM calendar_connection WHERE owner_id = ?",
+    { id: z.string(), account_email: z.string(), calendar_id: z.string(), status: z.string() },
+    "SELECT id, account_email, calendar_id, status FROM calendar_connection WHERE owner_id = ?",
+    [personId],
+  );
+  // rc41: the calendars whose busy times count; the busy times themselves are never kept.
+  const busyCalendars = await all(
+    storage,
+    { connection_id: z.string(), calendar_id: z.string() },
+    `SELECT b.connection_id, b.calendar_id FROM busy_calendar b
+       JOIN calendar_connection c ON c.id = b.connection_id
+      WHERE c.owner_id = ? ORDER BY b.calendar_id`,
     [personId],
   );
 
@@ -217,7 +226,14 @@ export async function exportPerson(storage: StoragePort, personId: string, now: 
           private: n.private === 1,
         })),
     })),
-    calendar_connections: connections,
+    calendar_connections: connections.map((c) => ({
+      account_email: c.account_email,
+      calendar_id: c.calendar_id,
+      status: c.status,
+      busy_times_from: busyCalendars
+        .filter((b) => b.connection_id === c.id)
+        .map((b) => b.calendar_id),
+    })),
     // Which calendar feeds you have (rc34), never their secret links.
     calendar_feeds: (await listFeeds(storage, personId)).map((f) => ({
       feed: f.group === null ? "your events" : `events from ${f.group}`,

@@ -1008,3 +1008,16 @@ export const capabilityChange = sqliteTable(
   },
   (t) => [check("capability_change_action_chk", sql`${t.action} IN ('granted', 'revoked')`)],
 );
+
+// rc41 (DESIGN §10 *Busy times while you pick*): the Google calendars whose busy times shade
+// this person's picker. Only the ids; the busy times themselves are never stored.
+export const busyCalendar = sqliteTable(
+  "busy_calendar",
+  {
+    connectionId: text("connection_id")
+      .notNull()
+      .references(() => calendarConnection.id, { onDelete: "cascade" }),
+    calendarId: text("calendar_id").notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.connectionId, t.calendarId] })],
+);

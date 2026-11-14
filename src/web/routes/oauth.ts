@@ -32,6 +32,7 @@ import {
   createCalendar,
   fetchPrimaryCalendar,
   findWritableCalendar,
+  listBusyCalendars,
   listWritableCalendars,
 } from "../../oauth/primary-calendar.js";
 import {
@@ -84,6 +85,13 @@ const NEW_CALENDAR = "new";
 export const NEW_CALENDAR_NAME = "WhenDoWe";
 
 const choiceSchema = z.string().min(1).max(1024);
+
+/** The calendars whose busy times count (rc41): none, one or several ticks of `busy`. */
+const MAX_BUSY = 50;
+const busySchema = z
+  .union([choiceSchema, z.array(choiceSchema)])
+  .optional()
+  .transform((v) => [...new Set(v === undefined ? [] : typeof v === "string" ? [v] : v)]);
 
 export { GOOGLE_SIGN_IN_PATH };
 
@@ -375,6 +383,7 @@ ${EMAIL_LINK}`,
     // A first connection: the person chooses the calendar (rc40). The grant waits,
     // sealed, in this browser until they do; nothing is stored yet.
     const calendars = await listWritableCalendars(tokens.accessToken, deps.fetchImpl);
+    const busy = await listBusyCalendars(tokens.accessToken, deps.fetchImpl);
     const sealed = await sealPending(deps.cipher, {
       personId: flow.personId,
       accountEmail: primary.id,
@@ -399,6 +408,13 @@ ${EMAIL_LINK}`,
   <input type="hidden" name="csrf" value="${me.csrfToken}" />
   <p><label><input type="radio" name="calendar" value="${NEW_CALENDAR}" checked /> A new calendar called <strong>${NEW_CALENDAR_NAME}</strong></label><br /><span class="muted">Its own colour in Google, and easy to hide or remove.</span></p>
   ${calendars.map(option)}
+  <fieldset><legend>Whose busy times should show while you pick a time?</legend>
+  <p class="muted">Only you see them, and only when, never what. The calendars you own are ticked; ones you only follow, like holidays, aren't.</p>
+  ${busy.map(
+    (cal) =>
+      html`<p><label><input type="checkbox" name="busy" value="${cal.id}"${cal.owned ? html` checked` : ""} /> ${cal.name}</label></p>`,
+  )}
+  </fieldset>
   <p><button type="submit">Use this calendar</button></p>
 </form>`,
       ),
@@ -410,7 +426,7 @@ ${EMAIL_LINK}`,
     c.header("Set-Cookie", buildPendingClearCookie(cookieOptions));
     const me = requireSignedIn(c);
     if (me instanceof Response) return me;
-    const body = await c.req.parseBody();
+    const body = await c.req.parseBody({ all: true });
     if (!(await verifyFormCsrf(me, body))) {
       return c.html(result(c, "Request rejected", html`<p>Please try again.</p>`), 403);
     }
@@ -443,6 +459,13 @@ ${EMAIL_LINK}`,
     if (!choice.success) {
       return c.html(result(c, "Choose a calendar", html`<p>Please choose one.</p>`), 400);
     }
+    const ticked = busySchema.safeParse(body.busy);
+    if (!ticked.success || ticked.data.length > MAX_BUSY) {
+      return c.html(
+        result(c, "Choose a calendar", html`<p>Tick at most ${MAX_BUSY} calendars.</p>`),
+        400,
+      );
+    }
     if ((await googleConnectionOf(deps.storage, me.personId)) !== null) {
       return c.html(
         result(c, "Already connected", html`<p>This account already has a calendar connected.</p>`),
@@ -454,6 +477,11 @@ ${EMAIL_LINK}`,
       refreshToken: pending.refreshToken,
       expiresAt: pending.expiresAt,
     };
+    // The ticks came back from a form: only calendars in the account's list are kept.
+    // Asked before anything is made, so a failure here leaves nothing behind in Google.
+    const known = new Set(
+      (await listBusyCalendars(tokens.accessToken, deps.fetchImpl)).map((cal) => cal.id),
+    );
     let calendar: { id: string; name: string };
     const madeByUs = choice.data === NEW_CALENDAR;
     if (madeByUs) {
@@ -478,7 +506,9 @@ ${EMAIL_LINK}`,
       }
       calendar = found;
     }
-    await store(me.personId, pending.accountEmail, calendar.id, tokens, madeByUs);
+    await store(me.personId, pending.accountEmail, calendar.id, tokens, madeByUs, {
+      busy: ticked.data.filter((id) => known.has(id) && !(madeByUs && id === calendar.id)),
+    });
     return c.html(
       result(c, "Calendar connected", html`<p>Connected <strong>${calendar.name}</strong>.</p>`),
     );
@@ -490,6 +520,8 @@ ${EMAIL_LINK}`,
     calendarId: string,
     tokens: { accessToken: string; refreshToken: string; expiresAt: string },
     madeByUs: boolean,
+    /** A first connection's busy calendars (rc41); a reconnect keeps the ones it had. */
+    first?: { readonly busy: readonly string[] },
   ): Promise<void> {
     const [accessTokenEnc, refreshTokenEnc] = await Promise.all([
       deps.cipher.encrypt(tokens.accessToken),
@@ -525,6 +557,16 @@ ${EMAIL_LINK}`,
         madeByUs ? 1 : 0,
         timestamp,
         timestamp,
+      ),
+      ...(first?.busy ?? []).map((id) =>
+        stmt(
+          `INSERT INTO busy_calendar (connection_id, calendar_id)
+           SELECT id, ? FROM calendar_connection
+            WHERE owner_id = ? AND provider = 'google' AND calendar_id = ?`,
+          id,
+          personId,
+          calendarId,
+        ),
       ),
     ]);
   }

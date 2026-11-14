@@ -20,6 +20,7 @@ import {
   grantCapability,
   revokeCapability,
 } from "../../src/people/capability.js";
+import { exportPerson } from "../../src/privacy/export.js";
 import { createApp } from "../../src/web/app.js";
 import { CONFIRM_PATH, GOOGLE_SIGN_IN_PATH, SIGN_IN_PATH } from "../../src/web/routes/auth.js";
 import { CALLBACK_PATH, CHOOSE_PATH, CONNECT_PATH } from "../../src/web/routes/oauth.js";
@@ -258,6 +259,35 @@ async function choose(
     CHOOSE_PATH,
     form({ csrf: as.csrf, calendar }, [as.cookie, pending].filter((c) => c !== "").join("; ")),
   );
+}
+
+/** Choose a calendar and tick busy calendars, each `busy` its own field (rc41). */
+async function chooseTicking(
+  h: Harness,
+  pending: string,
+  calendar: string,
+  busy: readonly string[],
+  as: Session = h.session,
+): Promise<Response> {
+  const body = new URLSearchParams({ csrf: as.csrf, calendar });
+  for (const id of busy) body.append("busy", id);
+  return h.app.request(CHOOSE_PATH, {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      cookie: [as.cookie, pending].filter((c) => c !== "").join("; "),
+    },
+    body: body.toString(),
+  });
+}
+
+async function busyRows(h: Harness): Promise<string[]> {
+  return (
+    await h.storage.query({
+      sql: "SELECT calendar_id FROM busy_calendar ORDER BY calendar_id",
+      params: [],
+    })
+  ).map((r) => String(r.calendar_id));
 }
 
 /** Connect all the way: Google's consent, then the calendar choice. */
@@ -581,7 +611,9 @@ it("lists only calendars that can take events", async () => {
     await callback(h, `code=c&state=${encodeURIComponent(state)}`, cookie)
   ).text();
   expect(page).toContain("Family");
-  expect(page).not.toContain("ro@example.com");
+  // Not a place events can go; its busy times may still count (rc41).
+  expect(page).not.toContain('name="calendar" value="ro@example.com"');
+  expect(page).toContain('name="busy" value="ro@example.com"');
 });
 
 it("refuses a choice without the pending grant, from someone else, or without CSRF", async () => {
@@ -713,6 +745,133 @@ it("a connection of another provider is not this account's Google connection", a
   ]);
   const home = await (await h.app.request("/", { headers: { cookie: h.session.cookie } })).text();
   expect(home).toContain("Connect Google Calendar");
+});
+
+// --- which calendars' busy times count (rc41) ----------------------------------------
+
+const WITH_HOLIDAYS: readonly Record<string, unknown>[] = [
+  ...CALENDARS,
+  { id: "holidays@group.v.calendar.google.com", summary: "Holidays", accessRole: "reader" },
+];
+
+async function chooser(
+  h: Harness,
+  as: Session = h.session,
+): Promise<{ page: string; pending: string }> {
+  const { cookie, state } = await startFlow(h, as);
+  const res = await callback(h, `code=c&state=${encodeURIComponent(state)}`, cookie, as);
+  expect(res.status).toBe(200);
+  return { page: await res.text(), pending: pendingCookie(res) };
+}
+
+it("asks whose busy times count: the calendars you own ticked, ones you follow not", async () => {
+  const h = await harness(googleFake({ calendars: WITH_HOLIDAYS }));
+  const { page } = await chooser(h);
+  expect(page).toContain("Whose busy times should show while you pick a time?");
+  expect(page).toContain('name="busy" value="someone@example.com" checked');
+  expect(page).toContain('name="busy" value="family@group.calendar.google.com" />');
+  expect(page).toContain('name="busy" value="holidays@group.v.calendar.google.com" />');
+  expect(await busyRows(h)).toEqual([]);
+});
+
+it("keeps the ticked calendars Google lists, drops a forged one, and never the one it made", async () => {
+  const h = await harness(googleFake({ calendars: [...WITH_HOLIDAYS, { id: MADE_ID }] }));
+  const { pending } = await chooser(h);
+  const res = await chooseTicking(h, pending, "new", [
+    "someone@example.com",
+    "holidays@group.v.calendar.google.com",
+    "someone@example.com",
+    "forged@example.org",
+    MADE_ID,
+  ]);
+  expect(res.status).toBe(200);
+  expect(await busyRows(h)).toEqual([
+    "holidays@group.v.calendar.google.com",
+    "someone@example.com",
+  ]);
+  // The export says which calendars count; a reconnect keeps them.
+  const exported = await exportPerson(h.storage, h.personId, NOW);
+  expect(exported.calendar_connections).toEqual([
+    {
+      account_email: "someone@example.com",
+      calendar_id: MADE_ID,
+      status: "active",
+      busy_times_from: ["holidays@group.v.calendar.google.com", "someone@example.com"],
+    },
+  ]);
+  const again = await startFlow(h);
+  expect(
+    (await callback(h, `code=c&state=${encodeURIComponent(again.state)}`, again.cookie)).status,
+  ).toBe(200);
+  expect(await busyRows(h)).toEqual([
+    "holidays@group.v.calendar.google.com",
+    "someone@example.com",
+  ]);
+});
+
+it("each account's busy calendars are its own connection's, in its own export", async () => {
+  let account = "someone@example.com";
+  const h = await harness((url, init) => googleFake({ calendarId: account })(url, init));
+  const mine = await chooser(h);
+  await chooseTicking(h, mine.pending, "new", ["someone@example.com"]);
+  account = "other@example.com";
+  const other = await signIn(h, "second@example.org");
+  const theirs = await chooser(h, other);
+  await chooseTicking(
+    h,
+    theirs.pending,
+    "family@group.calendar.google.com",
+    ["family@group.calendar.google.com"],
+    other,
+  );
+  const rows = await h.storage.query({
+    sql: `SELECT c.owner_id, b.calendar_id FROM busy_calendar b
+            JOIN calendar_connection c ON c.id = b.connection_id ORDER BY b.calendar_id`,
+    params: [],
+  });
+  const secondId = String(
+    (
+      await h.storage.query({
+        sql: "SELECT id FROM person WHERE email = ?",
+        params: ["second@example.org"],
+      })
+    )[0]?.id,
+  );
+  expect(rows.map((r) => [String(r.owner_id), String(r.calendar_id)])).toEqual([
+    [secondId, "family@group.calendar.google.com"],
+    [h.personId, "someone@example.com"],
+  ]);
+  const exported = await exportPerson(h.storage, h.personId, NOW);
+  expect(exported.calendar_connections.map((c) => c.busy_times_from)).toEqual([
+    ["someone@example.com"],
+  ]);
+});
+
+it("ticking nothing counts no calendar; more than 50 ticks are refused before anything is made", async () => {
+  const log: { url: string; method: string; body: string | undefined }[] = [];
+  const h = await harness(googleFake({ log }));
+  const { pending } = await chooser(h);
+  const many = Array.from({ length: 51 }, (_, i) => `c${i}@group`);
+  const refused = await chooseTicking(h, pending, "new", many);
+  expect(refused.status).toBe(400);
+  const why = await refused.text();
+  expect(why).toContain("<h1>Choose a calendar</h1>");
+  expect(why).toContain("Tick at most 50 calendars.");
+  expect(log.some((r) => r.method === "POST" && r.url === GOOGLE_CALENDARS_URL)).toBe(false);
+  expect(await connections(h)).toEqual([]);
+
+  // Exactly 50 is allowed.
+  const h50 = await harness();
+  const fifty = await chooser(h50);
+  expect((await chooseTicking(h50, fifty.pending, "new", many.slice(0, 50))).status).toBe(200);
+
+  const h2 = await harness();
+  const second = await chooser(h2);
+  expect(
+    (await chooseTicking(h2, second.pending, "family@group.calendar.google.com", [])).status,
+  ).toBe(200);
+  expect(await connections(h2)).toHaveLength(1);
+  expect(await busyRows(h2)).toEqual([]);
 });
 
 // --- calendar_sync (rc43) ---------------------------------------------------------
@@ -1165,7 +1324,9 @@ it("deleting an account revokes its calendar grant at Google, then deletes the t
     }
     return base(url, init);
   });
-  await connect(h);
+  const { pending } = await chooser(h);
+  await chooseTicking(h, pending, "new", ["someone@example.com"]);
+  expect(await busyRows(h)).toEqual(["someone@example.com"]);
   expect(await connections(h)).toHaveLength(1);
 
   const asked = await h.app.request(
@@ -1185,4 +1346,5 @@ it("deleting an account revokes its calendar grant at Google, then deletes the t
   expect(done.status).toBe(200);
   expect(revoked).toEqual([REFRESH_TOKEN]);
   expect(await connections(h)).toHaveLength(0);
+  expect(await busyRows(h)).toEqual([]);
 });
