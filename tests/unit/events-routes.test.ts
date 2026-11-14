@@ -2361,6 +2361,62 @@ it("without `verify`: every way to turn verifying on is disabled with its line, 
   ).toBe(403);
 });
 
+// --- Capabilities (DESIGN §10 rc43): `long_history` ------------------------------------
+
+const OLDER = "History older than 90 days isn&#39;t available to this account.";
+const DAY_MS = 86_400_000;
+
+it("without `long_history` an event's history shows 90 days; older entries are hidden, not gone", async () => {
+  const h = await harness(GRANTED);
+  const { dm, group } = await setup(h);
+  const event = await createVia(h, dm, group);
+  const id = event.split("/").at(-1) ?? "";
+  // Created 91 days ago, as far as the history knows.
+  const backdate = (days: number) =>
+    h.storage.batch([
+      {
+        sql: "UPDATE change_log SET created_at = ? WHERE canonical_event_id = ? AND revision = 1",
+        params: [new Date(Date.now() - days * DAY_MS).toISOString(), id],
+      },
+    ]);
+  expect(await text(h, event, dm)).toContain("created it");
+  expect(await text(h, event, dm)).not.toContain(OLDER);
+  await backdate(91);
+  const old = await text(h, event, dm);
+  expect(old).not.toContain("created it");
+  expect(old).toContain(OLDER);
+  await backdate(89);
+  expect(await text(h, event, dm)).toContain("created it");
+
+  // Granted, all of it shows again: hiding never removed anything.
+  await backdate(91);
+  const dmId = (await findPersonByEmail(h.storage, "dm@example.org"))?.id ?? "";
+  await grantCapability(h.storage, {
+    email: "dm@example.org",
+    capability: "long_history",
+    actorId: dmId,
+    now: new Date().toISOString(),
+  });
+  const all = await text(h, event, dm);
+  expect(all).toContain("created it");
+  expect(all).not.toContain(OLDER);
+});
+
+it("with the default `all` an event's history is never cut", async () => {
+  const h = await harness();
+  const { dm, group } = await setup(h);
+  const event = await createVia(h, dm, group);
+  await h.storage.batch([
+    {
+      sql: "UPDATE change_log SET created_at = ? WHERE canonical_event_id = ?",
+      params: [new Date(Date.now() - 400 * DAY_MS).toISOString(), event.split("/").at(-1) ?? ""],
+    },
+  ]);
+  const page = await text(h, event, dm);
+  expect(page).toContain("created it");
+  expect(page).not.toContain(OLDER);
+});
+
 it("with `verify`: the controls work; taking part in a verified event needs nothing", async () => {
   const h = await harness(GRANTED);
   const { dm, group } = await setup(h);

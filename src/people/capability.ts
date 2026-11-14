@@ -45,6 +45,25 @@ export async function hasCapability(
   return rows.length > 0;
 }
 
+/** How far back history shows without `long_history` (rc43). */
+export const HISTORY_DAYS = 90;
+const DAY_MS = 86_400_000;
+
+/**
+ * The history entries a viewer sees: without `long_history`, those older than 90 days are
+ * hidden, never removed (retention decides what goes). An entry exactly 90 days old shows.
+ */
+export function recentHistory<T extends { readonly at: string }>(
+  entries: readonly T[],
+  now: string,
+  long: boolean,
+): { readonly shown: readonly T[]; readonly hidden: number } {
+  if (long) return { shown: entries, hidden: 0 };
+  const cutoff = new Date(new Date(now).getTime() - HISTORY_DAYS * DAY_MS).toISOString();
+  const shown = entries.filter((e) => e.at >= cutoff);
+  return { shown, hidden: entries.length - shown.length };
+}
+
 /** Whether this address is one of the instance's operators. */
 export function isOperator(config: CapabilityConfig, email: string): boolean {
   return config.operators.includes(normalizeEmail(email));

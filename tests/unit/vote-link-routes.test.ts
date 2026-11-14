@@ -983,6 +983,41 @@ it("the section is there while anything is on the table, and only with someone t
   );
 });
 
+// --- Capabilities (DESIGN §10 rc43): `long_history` on threads ------------------------
+
+it("without `long_history` a thread's history shows 90 days to the millisecond; older is hidden", async () => {
+  const b = await browser({ now: () => NOW, capabilities: { default: "granted", operators: [] } });
+  const f = await signedInPoll(b, ["david"]);
+  const OLDER = "History older than 90 days isn&#39;t available to this account.";
+  const sentAgo = (ms: number) =>
+    b.storage.batch([
+      {
+        sql: "UPDATE plan SET sent_at = ? WHERE thread_id = ?",
+        params: [new Date(new Date(NOW).getTime() - ms).toISOString(), f.threadId],
+      },
+    ]);
+  const page = async () => (await b.request(f.thread)).text();
+  const DAYS_90 = 90 * 86_400_000;
+  await sentAgo(DAYS_90);
+  const edge = await page();
+  expect(edge).toContain("on the table");
+  expect(edge).not.toContain(OLDER);
+  await sentAgo(DAYS_90 + 1);
+  const past = await page();
+  expect(past).not.toContain("on the table");
+  expect(past).toContain(OLDER);
+  // Granted, the same entries show again: nothing was removed.
+  await grantCapability(b.storage, {
+    email: "mara@example.org",
+    capability: "long_history",
+    actorId: f.mara.id,
+    now: NOW,
+  });
+  const all = await page();
+  expect(all).toContain("on the table");
+  expect(all).not.toContain(OLDER);
+});
+
 // --- Capabilities (DESIGN §10 rc43): `verify` on threads -------------------------------
 
 it("without `verify`: a thread's decider and the new-plan form show it disabled, and are refused", async () => {

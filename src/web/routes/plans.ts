@@ -118,7 +118,14 @@ import {
   verifyFormCsrf,
 } from "../session.js";
 import { appearanceSection, saveAppearance } from "./account.js";
-import { arrivalNote, EVENTS_PATH, mayVerify, verifiedField } from "./events.js";
+import {
+  arrivalNote,
+  EVENTS_PATH,
+  mayLongHistory,
+  mayVerify,
+  verifiedField,
+  visibleHistory,
+} from "./events.js";
 import {
   noteList,
   oneTime,
@@ -177,6 +184,9 @@ interface View {
   readonly requests: readonly ThreadRequest[];
   /** rc43: whether the viewer may turn verifying on. */
   readonly mayVerify: boolean;
+  /** rc43: whether the viewer sees history older than 90 days, and the moment it's counted from. */
+  readonly longHistory: boolean;
+  readonly now: string;
 }
 
 async function load(deps: PlanRouteDeps, access: ThreadAccess, me: SignedIn): Promise<View> {
@@ -199,6 +209,8 @@ async function load(deps: PlanRouteDeps, access: ThreadAccess, me: SignedIn): Pr
     unsent: await listUnsentThreadReceipts(deps.storage, access),
     requests: await listThreadRequests(deps.storage, access, deps.now()),
     mayVerify: await mayVerify(deps, access.personId),
+    longHistory: await mayLongHistory(deps, access.personId),
+    now: deps.now(),
     shareUntil:
       access.thread.organizerId === access.personId
         ? await shareLinkExpiry(deps.storage, access, deps.now())
@@ -456,9 +468,10 @@ function history(v: View): Html {
   }
   entries.sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
   if (entries.length === 0) return html``;
-  return html`<h3 class="group-h">History</h3><ul class="list">${entries.map(
+  const { shown, note } = visibleHistory(entries, v.now, v.longHistory);
+  return html`<h3 class="group-h">History</h3><ul class="list">${shown.map(
     (e) => html`<li><span class="muted small">${instant(v, e.at)}</span> ${e.text}</li>`,
-  )}</ul>`;
+  )}</ul>${note}`;
 }
 
 function startForm(
