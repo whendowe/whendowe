@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+
 import type { Context, Hono } from "hono";
 import { z } from "zod";
 import type { TokenCipher } from "../../crypto/tokens.js";
@@ -6,6 +7,7 @@ import type { StoragePort } from "../../db/port.js";
 import { MailCapReachedError } from "../../mail/capped.js";
 import type { MailPort } from "../../mail/port.js";
 import { signOutActive, switchTo } from "../../people/accounts.js";
+import type { CapabilityConfig } from "../../people/capability.js";
 import {
   consumeLoginLink,
   issueLoginToken,
@@ -76,6 +78,8 @@ export interface AuthDeps {
    * which then offers no feeds.
    */
   readonly feedCipher?: TokenCipher;
+  /** Capabilities (rc43): absent means everyone has everything, and no operators. */
+  readonly capabilities?: CapabilityConfig;
 }
 
 const tokenSchema = z.string().min(1).max(256);
