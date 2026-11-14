@@ -41,7 +41,15 @@ import {
   type PlanEvent,
   PlanInputError,
 } from "../../plans/plan.js";
-import { memberName, recordUnsentThreadReceipt, type ThreadAccess } from "../../plans/thread.js";
+import {
+  answerThreadRequest,
+  listThreadRequests,
+  memberName,
+  recordUnsentThreadReceipt,
+  resolveThreadRequestLink,
+  type ThreadAccess,
+  type ThreadRequestLink,
+} from "../../plans/thread.js";
 import {
   type IssuedVoteLink,
   type ResolvedVoteLink,
@@ -748,6 +756,11 @@ export function registerRespondRoutes(app: Hono<AppEnv>, deps: RespondRouteDeps)
     const token = readToken(c.req.query("t"));
     const now = deps.now();
     const link = token === null ? null : await resolveRequestLink(deps.storage, token, now);
+    if (token !== null && link === null) {
+      const thread = await resolveThreadRequestLink(deps.storage, token, now);
+      if (thread !== null)
+        return c.html(await threadAgreePage(deps.storage, thread, token, "", now));
+    }
     if (token === null || link === null) return c.html(deadLink(), 404);
     const requests = await listVerifiedRequests(deps.storage, link.access, now);
     return c.html(
@@ -766,8 +779,35 @@ export function registerRespondRoutes(app: Hono<AppEnv>, deps: RespondRouteDeps)
     const token = readToken(form.t);
     const now = deps.now();
     const link = token === null ? null : await resolveRequestLink(deps.storage, token, now);
-    if (token === null || link === null) return c.html(deadLink(), 404);
     const answer = form.answer === "yes" || form.answer === "no" ? form.answer : null;
+    if (token !== null && link === null) {
+      const thread = await resolveThreadRequestLink(deps.storage, token, now);
+      if (thread !== null) {
+        const page = async (message: string, status: 400 | 409) =>
+          c.html(
+            await threadAgreePage(
+              deps.storage,
+              thread,
+              token,
+              html`<p class="error">${message}</p>`,
+              now,
+            ),
+            status,
+          );
+        if (answer === null) return page("Pick yes or no.", 400);
+        const result = await answerThreadRequest(deps.storage, thread.access, {
+          requestId: thread.requestId,
+          answer,
+          via: "mailed",
+          now,
+        });
+        if (result.kind !== "recorded") return page("This was decided meanwhile.", 409);
+        const back = new URL(AGREE_PATH, "http://placeholder");
+        back.searchParams.set("t", token);
+        return c.redirect(`${back.pathname}${back.search}`, 303);
+      }
+    }
+    if (token === null || link === null) return c.html(deadLink(), 404);
     const again = async (message: string, status: 400 | 409) => {
       const requests = await listVerifiedRequests(deps.storage, link.access, now);
       return c.html(
@@ -895,6 +935,80 @@ ${mine === undefined ? "" : html`<p class="muted">You said ${mine.answer}. You c
 ${body}
 <p class="muted">This link is just for you — please don't forward it. No account needed.</p>`,
   );
+}
+
+/** A thread's request, answered by the link mailed to you (rc42). */
+async function threadAgreePage(
+  storage: StoragePort,
+  link: { readonly access: ThreadAccess; readonly requestId: string },
+  token: string,
+  notice: Html | string,
+  now: string,
+): Promise<string> {
+  const { access } = link;
+  const request = (await listThreadRequests(storage, access, now)).find(
+    (r) => r.id === link.requestId,
+  );
+  const name = (id: string | null) => {
+    const m = access.members.find((x) => x.personId === id);
+    return m === undefined ? "Someone" : memberName(m);
+  };
+  const mine = request?.answers.find((a) => a.personId === access.personId);
+  const body =
+    request === undefined || request.outcome !== null
+      ? html`<p><strong>This has been decided, or it lapsed.</strong> ${
+          request?.outcome === "agreed"
+            ? "Everyone agreed: answers here are no longer verified."
+            : request?.outcome === "refused"
+              ? "Someone said no, so it stays as it is."
+              : "Not everyone answered in time, so it stays as it is."
+        }</p>`
+      : html`<p><strong>${name(request.askedById)}</strong> asks everyone in it to agree to <strong>stop verifying answers here</strong>. It happens only if everyone says yes; one "no" keeps it as it is.</p>
+${mine === undefined ? "" : html`<p class="muted">You said ${mine.answer}. You can change it until it's decided.</p>`}
+<form method="post" action="${AGREE_PATH}">
+  <input type="hidden" name="t" value="${token}" />
+  <p><button type="submit" name="answer" value="yes">Yes, I agree</button> <button type="submit" name="answer" value="no">No</button></p>
+</form>
+<p class="muted">Until ${request.expiresAt.slice(0, 10)}. Still waiting for: ${request.waitingFor.map(name).join(", ") || "nobody"}.</p>`;
+  return linkPage(
+    "Everyone agrees",
+    html`${notice}<h1>${access.thread.name}</h1>${threadVerifiedLine(access.thread)}
+${body}
+<p class="muted">This link is just for you — please don't forward it. No account needed.</p>`,
+  );
+}
+
+/** The email asking a thread's members to agree (rc42). Everyone in it sees its name. */
+export async function sendThreadRequestLink(
+  mail: MailPort,
+  input: {
+    readonly link: ThreadRequestLink;
+    readonly access: ThreadAccess;
+    readonly from: string;
+    readonly publicBaseUrl: string;
+  },
+): Promise<void> {
+  const url = new URL(AGREE_PATH, input.publicBaseUrl);
+  url.searchParams.set("t", input.link.token);
+  const name = input.access.thread.name;
+  await mail.send({
+    to: input.link.email,
+    subject: `Do you agree? "${name}"`,
+    cause: {
+      kind: "from",
+      senderId: input.access.personId,
+      groupId: input.access.thread.groupId,
+      why: `${input.from} asked everyone in a plan you're in to agree`,
+    },
+    text: [
+      `${input.from} asks everyone in "${name}" to agree to stop verifying answers there.`,
+      "",
+      'This happens only if everyone says yes. One "no" keeps it as it is, and so does not answering within 14 days.',
+      "",
+      "Answer here — no account needed:",
+      url.toString(),
+    ].join("\n"),
+  });
 }
 
 /**
