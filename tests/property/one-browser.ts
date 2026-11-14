@@ -5,6 +5,7 @@ import type { TokenCipher } from "../../src/crypto/tokens.js";
 import type { SqlStatement, StoragePort } from "../../src/db/port.js";
 import { sqliteStoragePort } from "../../src/db/sqlite.js";
 import type { MailMessage } from "../../src/mail/port.js";
+import type { CapabilityConfig } from "../../src/people/capability.js";
 import { createApp } from "../../src/web/app.js";
 import { CONFIRM_PATH, SIGN_IN_PATH } from "../../src/web/routes/auth.js";
 import { SESSION_COOKIE } from "../../src/web/session.js";
@@ -38,6 +39,8 @@ export async function browser(
     mailFails?: (m: MailMessage) => Error | null;
     /** The instance's token cipher, for calendar feed links (rc34); none by default. */
     feedCipher?: TokenCipher;
+    /** The instance's capabilities (rc43); everything for everyone by default. */
+    capabilities?: CapabilityConfig;
   } = {},
 ): Promise<Browser> {
   const client = createClient({ url: ":memory:" });
@@ -70,6 +73,7 @@ export async function browser(
       secureCookies: true,
       now: options.now ?? (() => new Date().toISOString()),
       ...(options.feedCipher === undefined ? {} : { feedCipher: options.feedCipher }),
+      ...(options.capabilities === undefined ? {} : { capabilities: options.capabilities }),
     },
   });
   const open = (): Browser => {

@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+
 import type { Context, Hono } from "hono";
 import type { StoragePort } from "../../db/port.js";
 import { groupDefaultVerified, listGroupEvents } from "../../events/event.js";
 import { MailCapReachedError } from "../../mail/capped.js";
 import type { MailPort } from "../../mail/port.js";
+import { type CapabilityConfig, UNAVAILABLE } from "../../people/capability.js";
 import {
   createGroup,
   defaultOwnAnswersOnly,
@@ -47,7 +49,7 @@ import {
 } from "../session.js";
 import { appearanceSection, saveAppearance } from "./account.js";
 import { SIGN_IN_PATH } from "./auth.js";
-import { eventSummary } from "./events.js";
+import { eventSummary, mayVerify } from "./events.js";
 import { feedSection, sharedLinksSection } from "./feeds.js";
 
 // Groups (MVP-1 slice D1). Every route needs a signed-in person; every group page
@@ -65,6 +67,8 @@ export interface GroupDeps {
   /** Links are built from this, never the Host header (see routes/auth.ts). */
   readonly publicBaseUrl: string;
   readonly secureCookies: boolean;
+  /** rc43: who may turn verifying on; absent, everyone may. */
+  readonly capabilities?: CapabilityConfig;
   readonly now: () => string;
 }
 
@@ -113,12 +117,17 @@ async function verifiedDefault(
   storage: StoragePort,
   membership: GroupMembership,
   csrf: string,
+  /** rc43: whether this organizer may turn it on; turning it off is always theirs. */
+  allowed: boolean,
 ): Promise<Html | string> {
   const on = await groupDefaultVerified(storage, membership.group.id);
   const said = on
     ? html`New events in this group are verified: answers count only from each person's own email, or signed in.`
     : html`New events in this group aren't verified unless whoever makes one says so.`;
   if (membership.role !== "organizer") return html`<p class="muted">${said}</p>`;
+  if (!on && !allowed)
+    return html`<p><label><input type="checkbox" name="on" disabled /> Verify answers on new events from this group</label><br />
+  <span class="muted">${UNAVAILABLE.verify}</span></p>`;
   return html`<form method="post" action="${GROUPS_PATH}/${membership.group.id}/verified">
   <input type="hidden" name="csrf" value="${csrf}" />
   <p><label><input type="checkbox" name="on" value="1"${on ? html` checked` : ""} /> Verify answers on new events from this group</label> <button type="submit">Save</button><br />
@@ -246,7 +255,7 @@ ${retentionSection({
         }
       : null,
 })}
-${await verifiedDefault(deps.storage, membership, me.csrfToken)}
+${await verifiedDefault(deps.storage, membership, me.csrfToken, await mayVerify(deps, me.personId))}
 <p class="muted"><a href="${GROUPS_PATH}/${membership.group.id}/leave">Leave this group</a></p>`,
       ),
     );
@@ -311,6 +320,8 @@ ${
     if (!(await verifyFormCsrf(me, form))) return rejectedPage(c, form);
     const membership = await findGroupForMember(deps.storage, c.req.param("id"), me.personId);
     if (membership === null) return c.notFound();
+    if (form.on === "1" && !(await mayVerify(deps, me.personId)))
+      return c.html(page(c, "Not allowed", html`<h1>${UNAVAILABLE.verify}</h1>`), 403);
     if (!(await setGroupDefaultVerified(deps.storage, membership, form.on === "1")))
       return c.html(page(c, "Not allowed", html`<h1>Only organizers change that</h1>`), 403);
     return c.redirect(`${GROUPS_PATH}/${membership.group.id}`, 303);

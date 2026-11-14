@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+
 import type { Context, Hono } from "hono";
 import { Temporal } from "temporal-polyfill";
 import { ZodError } from "zod";
@@ -12,6 +13,7 @@ import { type Answer, answerSchema } from "../../events/poll.js";
 import { SIGNED_IN } from "../../events/response.js";
 import { MailCapReachedError } from "../../mail/capped.js";
 import type { MailPort } from "../../mail/port.js";
+import { type CapabilityConfig, UNAVAILABLE } from "../../people/capability.js";
 import { findGroupForMember, listGroupsFor, listMembers } from "../../people/group.js";
 import { normalizeEmail } from "../../people/person.js";
 import type { PlanEventLike } from "../../plans/diff.js";
@@ -116,7 +118,7 @@ import {
   verifyFormCsrf,
 } from "../session.js";
 import { appearanceSection, saveAppearance } from "./account.js";
-import { arrivalNote, EVENTS_PATH, verifiedField } from "./events.js";
+import { arrivalNote, EVENTS_PATH, mayVerify, verifiedField } from "./events.js";
 import {
   noteList,
   oneTime,
@@ -144,6 +146,8 @@ export interface PlanRouteDeps {
   readonly publicBaseUrl: string;
   /** Vote links (rc26): sent only when the organizer asks. */
   readonly mail: MailPort;
+  /** rc43: who may turn verifying on; absent, everyone may. */
+  readonly capabilities?: CapabilityConfig;
 }
 
 const threadPath = (t: string) => `${PLANS_PATH}/${t}`;
@@ -171,6 +175,8 @@ interface View {
   readonly unsent: readonly UnsentThreadReceipt[];
   /** rc42: what everyone has been asked to agree to. */
   readonly requests: readonly ThreadRequest[];
+  /** rc43: whether the viewer may turn verifying on. */
+  readonly mayVerify: boolean;
 }
 
 async function load(deps: PlanRouteDeps, access: ThreadAccess, me: SignedIn): Promise<View> {
@@ -192,6 +198,7 @@ async function load(deps: PlanRouteDeps, access: ThreadAccess, me: SignedIn): Pr
     notes: await listNotes(deps.storage, access),
     unsent: await listUnsentThreadReceipts(deps.storage, access),
     requests: await listThreadRequests(deps.storage, access, deps.now()),
+    mayVerify: await mayVerify(deps, access.personId),
     shareUntil:
       access.thread.organizerId === access.personId
         ? await shareLinkExpiry(deps.storage, access, deps.now())
@@ -508,7 +515,9 @@ ${shareBox("Message to paste", pasteMessage(v, v.sharedUrl))}${SHARE_BUTTONS}
  * can be removed, and the name is then free again.
  */
 /** rc42: making a thread verified, for whoever decides it. One way for now. */
-function verifyThreadForm(v: View): Html {
+function verifyThreadForm(v: View, allowed: boolean): Html {
+  if (!allowed)
+    return html`<p class="wd-verify"><button type="button" disabled>Verify answers here</button> <span class="muted">${UNAVAILABLE.verify}</span></p>`;
   return html`<details class="wd-verify"><summary>Verify answers here</summary>
 <form method="post" action="${threadPath(v.access.thread.id)}/verify">
   <input type="hidden" name="csrf" value="${v.csrf}" />
@@ -646,7 +655,7 @@ ${threadVerifiedLine(t)}
 ${t.verifiedAt === null && onTable.length > 0 && t.organizerId === v.access.personId ? shareSection(v) : ""}
 ${guestsSection(v)}
 ${t.verifiedAt === null ? ownLinksSection(v) : ""}
-${t.verifiedAt === null && deciders(v.access).includes(v.access.personId) ? verifyThreadForm(v) : ""}
+${t.verifiedAt === null && deciders(v.access).includes(v.access.personId) ? verifyThreadForm(v, v.mayVerify) : ""}
 ${threadRequestSection(v)}
 ${groups.map(([title, ps]) =>
   ps.length === 0 ? "" : html`<h3 class="group-h">${title}</h3>${ps.map((p) => planRow(v, p))}`,
@@ -1138,7 +1147,7 @@ ${
       )}</select></label>`
 }
 </fieldset>
-${verifiedField(values.verified === true, false, "plan")}
+${verifiedField(values.verified === true, false, "plan", await mayVerify(deps, me.personId))}
 <div class="row"><button class="primary" type="submit">Start</button><a class="btn" href="${PLANS_PATH}">Cancel</a></div>
 </form>
 ${ZONE_GUESS}</div>`;
@@ -1268,8 +1277,10 @@ export function registerPlanRoutes(app: Hono<AppEnv>, deps: PlanRouteDeps): void
         .filter((e) => e !== ""),
       verified: form.verified === "on",
     };
-    const again = async (error: string) =>
-      c.html(page(c, "Start planning", await newThreadForm(deps, me, values, error)), 400);
+    const again = async (error: string, status: 400 | 403 = 400) =>
+      c.html(page(c, "Start planning", await newThreadForm(deps, me, values, error)), status);
+    if (values.verified && !(await mayVerify(deps, me.personId)))
+      return again(UNAVAILABLE.verify, 403);
     const bad = values.emails.filter((e) => {
       try {
         normalizeEmail(e);
@@ -1662,6 +1673,8 @@ ${
   app.post(`${PLANS_PATH}/:thread/verify`, async (c) => {
     const r = await posting(c);
     if (r instanceof Response) return r;
+    if (!(await mayVerify(deps, r.me.personId)))
+      return renderThread(c, r.access, r.me, UNAVAILABLE.verify, 403);
     if ((await setThreadVerified(deps.storage, r.access, deps.now())) === "forbidden")
       return renderThread(c, r.access, r.me, "Only whoever decides it verifies it.", 403);
     return c.redirect(threadPath(r.access.thread.id), 303);

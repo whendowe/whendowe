@@ -4,6 +4,8 @@ import { expect, it } from "vitest";
 import { sqliteStoragePort } from "../../src/db/sqlite.js";
 import { MailCapReachedError, SenderShareReachedError } from "../../src/mail/capped.js";
 import type { MailMessage } from "../../src/mail/port.js";
+import { type CapabilityConfig, grantCapability } from "../../src/people/capability.js";
+import { findPersonByEmail } from "../../src/people/person.js";
 import { suppress } from "../../src/privacy/suppression.js";
 import { createApp } from "../../src/web/app.js";
 import { ACCOUNT_PATH } from "../../src/web/layout.js";
@@ -15,7 +17,7 @@ import { loadMigrationSql } from "../conftest.js";
 // DESIGN §9 visibility integrity: each tier is checked on the event page, the group
 // list AND the change history — where a diff of a hidden field would leak it.
 
-async function harness() {
+async function harness(capabilities?: CapabilityConfig) {
   const client = createClient({ url: ":memory:" });
   for (const sql of await loadMigrationSql()) await client.executeMultiple(sql);
   const storage = sqliteStoragePort(client);
@@ -35,6 +37,7 @@ async function harness() {
       publicBaseUrl: "https://whendowe.example",
       secureCookies: false,
       now: () => new Date().toISOString(),
+      ...(capabilities === undefined ? {} : { capabilities }),
     },
   });
   return { app, sent, mailFailure, storage };
@@ -2293,4 +2296,112 @@ it("a cancelled event offers no link to copy; someone not on it gets none; HIDDE
       )
     ).status,
   ).toBe(409);
+});
+
+// --- Capabilities (DESIGN §10 rc43): `verify` ------------------------------------------
+
+const GRANTED: CapabilityConfig = { default: "granted", operators: [] };
+// As the page has it: the line is escaped like any text.
+const OFF = "Turning verifying on isn&#39;t available to this account.";
+
+it("without `verify`: every way to turn verifying on is disabled with its line, and refused", async () => {
+  const h = await harness(GRANTED);
+  const { dm, group } = await setup(h);
+  const ann = await join(h, dm, group, "ann@example.org", "edit", "FULL");
+  const form = await (
+    await h.app.request(`${group}/events/new`, { headers: { cookie: dm.cookie } })
+  ).text();
+  expect(form).toContain('<input type="checkbox" name="verified" disabled />');
+  expect(form).toContain(OFF);
+  const ask = await h.app.request(
+    `${group}/events`,
+    post({ csrf: dm.csrf, ...NIGHT, verified: "on" }, dm.cookie),
+  );
+  expect(ask.status).toBe(403);
+  expect(await ask.text()).toContain(OFF);
+  const poll = await h.app.request(
+    `${group}/polls`,
+    post(
+      {
+        csrf: dm.csrf,
+        title: "Q",
+        tzid: "UTC",
+        start_0: "2101-11-21T10:00",
+        end_0: "2101-11-21T11:00",
+        verified: "on",
+      },
+      dm.cookie,
+    ),
+  );
+  expect(poll.status).toBe(403);
+  expect(
+    await (await h.app.request("/polls/new", { headers: { cookie: dm.cookie } })).text(),
+  ).toContain(OFF);
+
+  // An event made without it: its editor sees the button disabled; a POST is refused.
+  const event = await createVia(h, dm, group);
+  const page = await text(h, event, dm);
+  expect(page).toContain('<button type="button" disabled>Verify answers here</button>');
+  expect(page).toContain(OFF);
+  const verify = await h.app.request(`${event}/verify`, post({ csrf: dm.csrf }, dm.cookie));
+  expect(verify.status).toBe(403);
+  expect(await text(h, event, dm)).not.toContain("Answers here are verified:");
+
+  // The group default: disabled for an organizer without it, refused when posted.
+  const groupPage = await (await h.app.request(group, { headers: { cookie: dm.cookie } })).text();
+  expect(groupPage).toContain(
+    '<input type="checkbox" name="on" disabled /> Verify answers on new events',
+  );
+  expect(
+    (await h.app.request(`${group}/verified`, post({ csrf: dm.csrf, on: "1" }, dm.cookie))).status,
+  ).toBe(403);
+  // Ann can't either.
+  expect(
+    (await h.app.request(`${event}/verify`, post({ csrf: ann.csrf }, ann.cookie))).status,
+  ).toBe(403);
+});
+
+it("with `verify`: the controls work; taking part in a verified event needs nothing", async () => {
+  const h = await harness(GRANTED);
+  const { dm, group } = await setup(h);
+  const ann = await join(h, dm, group, "ann@example.org", "view", "FULL");
+  const dmId = (await findPersonByEmail(h.storage, "dm@example.org"))?.id ?? "";
+  await grantCapability(h.storage, {
+    email: "dm@example.org",
+    capability: "verify",
+    actorId: dmId,
+    now: new Date().toISOString(),
+  });
+  const form = await (
+    await h.app.request(`${group}/events/new`, { headers: { cookie: dm.cookie } })
+  ).text();
+  expect(form).toContain('<input type="checkbox" name="verified" />');
+  expect(form).not.toContain(OFF);
+  const event = await createVia(h, dm, group, { ...NIGHT, verified: "on" });
+  expect(await text(h, event, dm)).toContain("Answers here are verified:");
+  // Ann, without it, answers, and asks everyone to agree: participating is never gated.
+  expect(
+    (
+      await h.app.request(
+        `${event}/attendance`,
+        post({ csrf: ann.csrf, attendance: "going" }, ann.cookie),
+      )
+    ).status,
+  ).toBe(303);
+  expect(
+    (await h.app.request(`${event}/ask`, post({ csrf: ann.csrf, kind: "unverify" }, ann.cookie)))
+      .status,
+  ).toBe(303);
+
+  // The group default set by the DM verifies an event Ann makes, though she can't herself.
+  await h.app.request(`${group}/verified`, post({ csrf: dm.csrf, on: "1" }, dm.cookie));
+  const annGroup = await join(h, dm, group, "bea@example.org", "edit", "FULL");
+  const fromDefault = await createVia(h, annGroup, group);
+  expect(await text(h, fromDefault, annGroup)).toContain("Answers here are verified:");
+  // Revoked, what is verified stays verified; turning the default off is still the organizer's.
+  await h.storage.batch([{ sql: "DELETE FROM account_capability", params: [] }]);
+  expect(await text(h, event, dm)).toContain("Answers here are verified:");
+  expect(
+    (await h.app.request(`${group}/verified`, post({ csrf: dm.csrf }, dm.cookie))).status,
+  ).toBe(303);
 });

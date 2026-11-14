@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { expect, it } from "vitest";
 import { MailCapReachedError, SenderShareReachedError } from "../../src/mail/capped.js";
+import { grantCapability } from "../../src/people/capability.js";
 import { findOrCreatePerson, guestName } from "../../src/people/person.js";
 import {
   acceptPlan,
@@ -980,4 +981,44 @@ it("the section is there while anything is on the table, and only with someone t
   expect(await (await b.request(`${PLANS_PATH}/${alone.threadId}`)).text()).not.toContain(
     "Their own links",
   );
+});
+
+// --- Capabilities (DESIGN §10 rc43): `verify` on threads -------------------------------
+
+it("without `verify`: a thread's decider and the new-plan form show it disabled, and are refused", async () => {
+  const b = await browser({ now: () => NOW, capabilities: { default: "granted", operators: [] } });
+  const f = await signedInPoll(b, ["david"]);
+  const OFF = "Turning verifying on isn&#39;t available to this account.";
+  const page = await (await b.request(f.thread)).text();
+  expect(page).toContain('<button type="button" disabled>Verify answers here</button>');
+  expect(page).toContain(OFF);
+  const refused = await b.request(`${f.thread}/verify`, post({ csrf: (await home(b)).csrf }));
+  expect(refused.status).toBe(403);
+  expect(await refused.text()).toContain(OFF);
+  const form = await (await b.request(`${PLANS_PATH}/new`)).text();
+  expect(form).toContain('<input type="checkbox" name="verified" disabled />');
+  const made = await b.request(
+    PLANS_PATH,
+    post({
+      csrf: (await home(b)).csrf,
+      name: "Board",
+      tzid: "UTC",
+      email: "ana@example.org",
+      verified: "on",
+    }),
+  );
+  expect(made.status).toBe(403);
+
+  // Granted, both work.
+  const mara = f.mara.id;
+  await grantCapability(b.storage, {
+    email: "mara@example.org",
+    capability: "verify",
+    actorId: mara,
+    now: NOW,
+  });
+  expect((await b.request(`${f.thread}/verify`, post({ csrf: (await home(b)).csrf }))).status).toBe(
+    303,
+  );
+  expect(await (await b.request(f.thread)).text()).toContain("Answers here are verified:");
 });
