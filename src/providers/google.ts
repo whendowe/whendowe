@@ -6,17 +6,18 @@ import {
   type ChangeBatch,
   type EventFields,
   type ProviderEvent,
+  ProviderEventGoneError,
   type ProviderMetadata,
   SyncTokenExpiredError,
   type UpsertResult,
 } from "./base.js";
-import { googleEventSchema, toProviderEvent } from "./google-event.js";
+import { googleEventSchema, toGoogleEvent, toProviderEvent } from "./google-event.js";
 
 // Google Calendar via plain REST fetch — no SDK (DESIGN.md §6). Identity and
 // write-nonces live in extendedProperties.private (§12).
 //
-// M1 implements the READ side: listChanges. The write side (upsert/delete/
-// findByMetadata) is M2's PUSH path and still rejects.
+// The read side, listChanges, is M1's; the write side, MVP-4 G2's PUSH (§11). Only the
+// copy's own fields are sent, and nothing Google answers is logged (§13, §14).
 
 const CALENDAR_API_BASE = "https://www.googleapis.com/calendar/v3/calendars";
 
@@ -142,21 +143,81 @@ export class GoogleCalendarProvider implements CalendarProvider {
     return { changes, nextSyncToken };
   }
 
-  upsert(
-    _providerEventId: string | null,
-    _fields: EventFields,
-    _metadata: ProviderMetadata,
+  async upsert(
+    providerEventId: string | null,
+    fields: EventFields,
+    metadata: ProviderMetadata,
   ): Promise<UpsertResult> {
-    return Promise.reject(new Error("GoogleCalendarProvider.upsert lands in M2 (DESIGN.md §15)"));
+    const body = JSON.stringify(toGoogleEvent(fields, metadata));
+    const url = providerEventId === null ? this.eventsUrl() : this.eventsUrl(providerEventId);
+    let written: z.infer<typeof googleEventSchema>;
+    try {
+      written = await requestJson(
+        this.fetchImpl(),
+        url,
+        {
+          method: providerEventId === null ? "POST" : "PATCH",
+          headers: await this.headers({ "content-type": "application/json" }),
+          body,
+        },
+        googleEventSchema,
+        providerEventId === null ? "calendar event insert" : "calendar event update",
+      );
+    } catch (error) {
+      if (providerEventId !== null && error instanceof HttpError && isGone(error.status)) {
+        throw new ProviderEventGoneError();
+      }
+      throw error;
+    }
+    // A PATCH leaves a deleted event deleted and says so: it is not put back (§10 rc40).
+    if (written.status === "cancelled") throw new ProviderEventGoneError();
+    return { id: written.id, etag: written.etag };
   }
 
-  delete(_providerEventId: string): Promise<void> {
-    return Promise.reject(new Error("GoogleCalendarProvider.delete lands in M2 (DESIGN.md §15)"));
+  /** Already gone (404, 410) is success (§11). */
+  async delete(providerEventId: string): Promise<void> {
+    const response = await this.fetchImpl()(this.eventsUrl(providerEventId), {
+      method: "DELETE",
+      headers: await this.headers({}),
+    });
+    if (response.ok || isGone(response.status)) return;
+    throw new HttpError(response.status, "calendar event delete", "not deleted");
   }
 
-  findByMetadata(_canonicalUid: string): Promise<ProviderEvent | null> {
-    return Promise.reject(
-      new Error("GoogleCalendarProvider.findByMetadata lands in M2 (DESIGN.md §15)"),
+  /**
+   * The copy carrying this canonical id, if Google still has one (§11 crash-window
+   * recovery, and reconnecting, §10 rc40). Lookup by explicit identity, never by likeness.
+   */
+  async findByMetadata(canonicalUid: string): Promise<ProviderEvent | null> {
+    const url = new URL(this.eventsUrl());
+    url.searchParams.set("privateExtendedProperty", `canonical_uid=${canonicalUid}`);
+    url.searchParams.set("singleEvents", "false");
+    url.searchParams.set("maxResults", "1");
+    const found = await requestJson(
+      this.fetchImpl(),
+      url.toString(),
+      { method: "GET", headers: await this.headers({ accept: "application/json" }) },
+      eventsListSchema,
+      "calendar event lookup",
     );
+    const first = found.items?.[0];
+    return first === undefined ? null : toProviderEvent(first);
   }
+
+  private eventsUrl(eventId?: string): string {
+    const base = `${CALENDAR_API_BASE}/${encodeURIComponent(this.options.calendarId)}/events`;
+    return eventId === undefined ? base : `${base}/${encodeURIComponent(eventId)}`;
+  }
+
+  private fetchImpl(): FetchLike {
+    return this.options.fetchImpl ?? defaultFetch;
+  }
+
+  private async headers(extra: Record<string, string>): Promise<Record<string, string>> {
+    return { authorization: `Bearer ${await this.options.getAccessToken()}`, ...extra };
+  }
+}
+
+function isGone(status: number): boolean {
+  return status === 404 || status === 410;
 }

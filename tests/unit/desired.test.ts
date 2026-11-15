@@ -1,8 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, expect, it } from "vitest";
 import type { CanonicalEventRow, ProjectionRow } from "../../src/db/schema.js";
+import type { FeedEntry } from "../../src/feeds/ics.js";
 import { desired } from "../../src/reconcile/desired.js";
-import { project } from "../../src/reconcile/project.js";
+import {
+  fieldsHash,
+  fromWhenDoWeLine,
+  project,
+  projectEntry,
+} from "../../src/reconcile/project.js";
 
 const NOW = "2026-07-07T00:00:00Z";
 
@@ -92,6 +98,114 @@ describe("project() — FULL is identity on the provider fieldset (§5 seam)", (
       tzid: "Europe/Prague",
       allDay: false,
       rrule: null,
+      sourceUrl: null,
     });
+  });
+});
+
+describe("projectEntry() — a copy in a calendar shows what the feed shows (§10 rc40)", () => {
+  const LINK = "https://when.example/events/evt-1";
+  const entry = (overrides: Partial<FeedEntry> = {}): FeedEntry => ({
+    id: "evt-1",
+    revision: 3,
+    updatedAt: NOW,
+    status: "scheduled",
+    visibility: "DETAILS",
+    title: "School pickup",
+    description: "Bring the bike",
+    location: "Main gate",
+    allDay: false,
+    startLocal: "2026-07-07T15:00:00",
+    endLocal: "2026-07-07T15:30:00",
+    tzid: "Europe/Prague",
+    rrule: "FREQ=WEEKLY;BYDAY=TU",
+    url: LINK,
+    ...overrides,
+  });
+  const times = {
+    startLocal: "2026-07-07T15:00:00",
+    endLocal: "2026-07-07T15:30:00",
+    tzid: "Europe/Prague",
+    allDay: false,
+    rrule: "FREQ=WEEKLY;BYDAY=TU",
+  };
+
+  it("begins the description with where to change it, then the event's own notes", () => {
+    expect(projectEntry(entry())).toEqual({
+      title: "School pickup",
+      description: `From WhenDoWe — change it there: ${LINK}. Edits made here in Google aren't kept yet.\n\nBring the bike`,
+      location: "Main gate",
+      ...times,
+      sourceUrl: LINK,
+    });
+  });
+
+  it("is only the line when the event has no notes", () => {
+    expect(projectEntry(entry({ description: null })).description).toBe(fromWhenDoWeLine(LINK));
+  });
+
+  it("is Busy at BUSY: no place, notes or link, and the same times", () => {
+    expect(projectEntry(entry({ visibility: "BUSY", url: null }))).toEqual({
+      title: "Busy",
+      description: null,
+      location: null,
+      ...times,
+      sourceUrl: null,
+    });
+  });
+
+  it("never names a BUSY event, whatever the entry carries", () => {
+    const copy = projectEntry(entry({ visibility: "BUSY" }));
+    expect(JSON.stringify(copy)).not.toContain("School pickup");
+    expect(JSON.stringify(copy)).not.toContain(LINK);
+  });
+
+  it("is Busy when there is no link to give", () => {
+    expect(projectEntry(entry({ url: null })).title).toBe("Busy");
+  });
+});
+
+describe("fieldsHash() — the push hash is over the fields sent (§11)", () => {
+  const base = projectEntry({
+    id: "evt-1",
+    revision: 1,
+    updatedAt: NOW,
+    status: "scheduled",
+    visibility: "DETAILS",
+    title: "Pickup",
+    description: null,
+    location: null,
+    allDay: false,
+    startLocal: "2026-07-07T15:00:00",
+    endLocal: "2026-07-07T15:30:00",
+    tzid: "Europe/Prague",
+    rrule: null,
+    url: "https://when.example/events/evt-1",
+  });
+
+  it("is the same for the same fields", async () => {
+    expect(await fieldsHash(base)).toBe(await fieldsHash({ ...base }));
+  });
+
+  it("changes when any one field changes", async () => {
+    const changed = [
+      { ...base, title: "Pickup!" },
+      { ...base, description: "x" },
+      { ...base, location: "x" },
+      { ...base, startLocal: "2026-07-07T15:05:00" },
+      { ...base, endLocal: "2026-07-07T15:35:00" },
+      { ...base, tzid: "UTC" },
+      { ...base, allDay: true },
+      { ...base, rrule: "FREQ=DAILY" },
+      { ...base, sourceUrl: null },
+    ];
+    const hashes = new Set(await Promise.all([base, ...changed].map(fieldsHash)));
+    expect(hashes.size).toBe(changed.length + 1);
+  });
+
+  it("tells a null from the text null", async () => {
+    expect(await fieldsHash({ ...base, location: null })).not.toBe(
+      await fieldsHash({ ...base, location: "null" }),
+    );
   });
 });

@@ -14,6 +14,8 @@ export interface EventFields {
   readonly tzid: string | null;
   readonly allDay: boolean;
   readonly rrule: string | null;
+  /** The event's page, shown by the provider as where it came from (§10 rc40); null for BUSY. */
+  readonly sourceUrl: string | null;
 }
 
 /** Identity metadata stamped into provider-side hidden storage (§3.4, §12). */
@@ -50,10 +52,24 @@ export class SyncTokenExpiredError extends Error {
   }
 }
 
+/**
+ * Thrown by upsert when the copy being updated was deleted in the provider (§10 rc40): it is
+ * not put back. Distinct from a failure, which is retried.
+ */
+export class ProviderEventGoneError extends Error {
+  constructor() {
+    super("the provider event was deleted there");
+    this.name = "ProviderEventGoneError";
+  }
+}
+
 export interface CalendarProvider {
   /** Incremental changes since syncToken; null cursor means full sync. */
   listChanges(syncToken: string | null): Promise<ChangeBatch>;
-  /** Create (id null) or update a provider event. Metadata rides along on every write. */
+  /**
+   * Create (id null) or update a provider event. Metadata rides along on every write.
+   * Updating a copy deleted in the provider throws ProviderEventGoneError, never revives it.
+   */
   upsert(
     providerEventId: string | null,
     fields: EventFields,

@@ -7,6 +7,7 @@ import type {
   ProviderMetadata,
   UpsertResult,
 } from "./base.js";
+import { ProviderEventGoneError } from "./base.js";
 
 // In-memory fake provider (DESIGN.md §9): all reconcile/property tests run against
 // this, never the real Google API. Change notifications go into an explicit outbox
@@ -39,6 +40,9 @@ export class FakeCalendarProvider implements CalendarProvider {
     fields: EventFields,
     metadata: ProviderMetadata,
   ): Promise<UpsertResult> {
+    if (providerEventId !== null && this.events.get(providerEventId)?.deleted !== false) {
+      return Promise.reject(new ProviderEventGoneError()); // never revived (§10 rc40)
+    }
     const id = providerEventId ?? `fake-${++this.idCounter}`;
     const etag = `etag-${++this.etagCounter}`;
     const event: ProviderEvent = {
