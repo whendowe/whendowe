@@ -2,8 +2,10 @@
 import { createClient } from "@libsql/client";
 import { expect, it } from "vitest";
 import { sqliteStoragePort } from "../../src/db/sqlite.js";
+import { runDueHeld } from "../../src/held.js";
 import type { MailMessage } from "../../src/mail/port.js";
-import { createApp } from "../../src/web/app.js";
+import { createApp, heldRunners } from "../../src/web/app.js";
+import type { AuthDeps } from "../../src/web/routes/auth.js";
 import { loadMigrationSql } from "../conftest.js";
 
 // MVP-2's acceptance test (DESIGN §15): "when do we play?" is answered without anyone
@@ -25,20 +27,22 @@ it("US-14: the D&D table finds a date and says who's coming — players never si
   const client = createClient({ url: ":memory:" });
   for (const sql of await loadMigrationSql()) await client.executeMultiple(sql);
   const sent: MailMessage[] = [];
-  const app = createApp({
-    auth: {
-      storage: sqliteStoragePort(client),
-      mail: {
-        send: (m) => {
-          sent.push(m);
-          return Promise.resolve();
-        },
+  const auth: AuthDeps = {
+    storage: sqliteStoragePort(client),
+    mail: {
+      send: (m) => {
+        sent.push(m);
+        return Promise.resolve();
       },
-      publicBaseUrl: BASE,
-      secureCookies: false,
-      now: () => new Date().toISOString(),
     },
-  });
+    publicBaseUrl: BASE,
+    secureCookies: false,
+    now: () => new Date().toISOString(),
+  };
+  const app = createApp({ auth });
+  /** The cron's pass, a minute on (rc46): what was held runs. */
+  const minuteLater = () =>
+    runDueHeld(auth.storage, heldRunners(auth), new Date(Date.now() + 61_000).toISOString());
 
   const form = (fields: Record<string, string>, cookie?: string): RequestInit => ({
     method: "POST",
@@ -107,7 +111,10 @@ it("US-14: the D&D table finds a date and says who's coming — players never si
         end_2: "2101-11-09T18:00",
       })
     ).headers.get("location") ?? "";
-  expect(await (await dm(`${thread}/links`)).text()).toContain("Sent to 5 people.");
+  expect((await dm(`${thread}/links`)).status).toBe(303); // held a minute, with Undo (rc46)
+  expect(await dmGet(thread)).toContain("Emailing vote links</strong> — in about a minute");
+  expect(await minuteLater()).toBe(1);
+  expect(await dmGet(thread)).toContain("Emailing vote links:</strong> Sent to 5 people.");
 
   // Times in order: 0 = Thu 6th, 1 = Sat 8th, 2 = Sun 9th. Everyone can do Saturday.
   const ballots: Record<string, readonly string[]> = {
