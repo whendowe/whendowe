@@ -240,6 +240,7 @@ whendowe/
         operator.ts            # the operator page (rc43): who has which capability; grant and revoke by address
         feeds.ts               # GET /feed/<token>.ics (ETag, 304); POST make / replace a feed link (rc34); (rc36) GET /c/<token> and /c/<token>.ics, a group calendar link's page and feed; (rc41) GET /busy, the picker's busy times
     changelog.ts               # append + diff
+    held.ts                    # (rc46) a minute to take it back: hold an action, Undo it, the pass that runs what is due
     mail/
       port.ts                  # HTTPS mail port (invites, token links — MVP-1)
       console.ts               # development adapter: prints the message, never sends
@@ -2081,7 +2082,7 @@ are.
 **A minute to take it back** (owner, 2026-11-15: "let's do the email-hold right away"). An
 action that sends mail to other people waits a minute before it happens. That covers asking
 people, choosing an option, a yes that agrees it, and reminders. Its button says it sends mail,
-and once pressed the page shows "Choosing A — in 0:58 · Undo".
+and once pressed the page shows "Choosing A — in about a minute · Undo".
 - **The whole action waits, not only its mail.** Undoing a choice after its events were written,
   the other options replaced and calendars updated would be a second, riskier action. A held
   action changes nothing anyone else sees until it happens, so Undo just deletes it.
@@ -2092,8 +2093,22 @@ and once pressed the page shows "Choosing A — in 0:58 · Undo".
   Running it is the same domain call the button makes today, with that button's checks made
   again when it runs. If something changed meanwhile, the checks refuse it and the person sees
   why, as for a stale form.
+- **Undo is there exactly as long as undoing is possible** (owner, 2026-11-15). The pass takes
+  an action by claiming it in one statement; from then on Undo is gone, and the page says
+  "Sending…". The pass runs each minute, so the page says "in about a minute", never a
+  countdown it can't keep. Undo pressed in the same moment the pass claimed it finds nothing to
+  delete, and says "Too late — it was already sent", with what happened.
+- **At most once.** Claiming deletes nothing but marks the row taken, in one guarded
+  statement, so overlapping passes can't both run it. A crash after the claim loses the action
+  rather than sending it twice.
+- **What happened is shown to the person who pressed it**, on the page it was pressed from,
+  for a day ("Emailed 4 vote links; 1 not sent: the daily mail limit was reached"). Then the
+  purge pass removes the row (§10 *Privacy basics*: purge is the one delete path).
 - **A pass with nothing held reads and writes nothing more** (§6 economics): one indexed read
   of what is due.
+- **The first held action is "Email vote links"** (A0). The others — asking from the *Ask when*
+  page, choosing, a yes that agrees it, reminders, asking everyone to agree — are held as their
+  slices reach them.
 - **Mail not caused by a person** (sign-in links, the deletion email, receipts) is not held.
 
 **Colour: one channel per kind of information.** Colour can carry one thing per screen, so
@@ -2148,8 +2163,24 @@ outline. Those who haven't answered are listed, not hidden.
   (`plan_one_draft`), and a poll has no draft step: the form is the draft. Saving as you go
   needs a thread with draft options, sent together. The first slice settles the shape, as an
   additive migration first (§16).
-- **Held actions** need a table of their own: who pressed it, what it does, its arguments as
-  checked data, and when it is due. It is the first slice (A0), with its migration first.
+- **Held actions** need a table of their own. It is the first slice (A0), with its migration
+  first:
+```sql
+CREATE TABLE held_action (                  -- rc46: an action that mails people, waiting a minute
+    id         text PRIMARY KEY,            -- UUIDv7
+    actor_id   text NOT NULL REFERENCES person(id),  -- who pressed it; only they see or undo it
+    thread_id  text REFERENCES plan_thread(id),      -- what it acts on, where it is shown
+    kind       text NOT NULL,               -- vote_links (CHECK; more kinds as slices add them)
+    args       text NOT NULL DEFAULT '{}',  -- JSON, parsed per kind with zod when it runs
+    due_at     text NOT NULL,               -- pressed + 60 s
+    taken_at   text,                        -- claimed by a pass: Undo is gone from here on
+    outcome    text,                        -- what happened, shown to the actor for a day
+    created_at text NOT NULL
+);
+CREATE INDEX held_action_due ON held_action (due_at) WHERE taken_at IS NULL;
+```
+  Leaving a thread and deleting an account remove their own held actions with the rest of
+  their rows (§10 *Privacy basics*).
 - **Taking an answer back** is deleting your own `plan_vote` row, by the same rules as
   answering. In a verified question it is mailed a receipt like any answer (rc42).
 - **Nothing else changes in the schema:** mixed options, several events in an option and the
@@ -2369,7 +2400,7 @@ The new milestones are labelled **MVP-1…MVP-5**, deliberately *not* reusing M2
 - **Sealed groups and events (to be designed; its rc is numbered when its docs PR lands) — after rc21.** Three privacy levels: public, normal, and *sealed* — "this is on the DL, we're sending private links". What is sealed is encrypted in the browser and the server stores ciphertext; stage 1 carries the key in a private link (`#key`), stage 2 keeps it in a keyring unlocked by a passkey (WebAuthn PRF), with recovery by another member. Plus explicit consent on joining a sealed group (§13 rc21). Its own docs PR first.
 - **MVP-3 — Feeds & sharing.** Read-only ICS feed per person and per group (rc34: specified in §10 *Calendar feeds* — a secret link per person and per group, agreed events at your tier, rendered on request rather than through the §5 artifact store; Google polls subscribed feeds slowly — hours — which is stated to users, not hidden); unlisted and invite-only views (rc36: §10 *Group calendar links and copyable answer links* — invite-only is adding people, whose links can be copied; unlisted is a group calendar link, page and feed, capped by its keeper); `project()` tiers enforced in every output (§9 visibility integrity becomes load-bearing). *Accept: a player subscribes from an iPhone.*
 - **MVP-4 — Google one-way.** "Sign in with Google" on its own Production client if not moved already (built in rc20, §13; basic scopes only — must not consume the sensitive-scope user cap, §12), calendar connection as a *separate*, opt-in grant, token refresh, the reconcile loop and PUSH (§11). rc40 specifies it: §10 *Google Calendar, one way* — three narrow scopes, a calendar you choose, your feed's events, edits in Google overwritten until MVP-5 and said so, deletes there an unsubscribe, an explicit choice on disconnect. rc41 adds §10 *Busy times while you pick*. Slices, one PR at a time: G1 connect, choose the calendar, the narrow scopes · B1 (rc41) your WhenDoWe events in the picker · B2 the fourth scope, `busy_calendar` and choosing what counts (migration first) · B3 Google's busy times in the picker, for accounts with `calendar_sync` (rc44), and the busy-times page disabled without it · G2 the push tick on both targets, which pushes nothing for an account without `calendar_sync` (rc43) · G3 disconnect, account deletion's choice, the reconnect banner and email, Don't put this in my calendar. *Accept: the owner's household lives on it.*
-- **Asking when (rc46) — before the rest of MVP-4** (owner, 2026-11-15: A1 and its follow-ups first, then G2 part 4 and G3). §10 *Asking when*. Slices, one PR at a time: A0 the held minute — held actions, their pass on both targets, Undo (migration first) · A1 answering saved per tap, taken back by tapping again, and the answers grid where it stands · A2 the draft question (migration first) and the Ask page in the Days view — lettered options, the sheet, Undo, "+ and", the read-back and the status line · A3 the Hours view and dragging · A4 the people picker · A5 options of several events on the Ask page, with their changes drawn (P4's editor and diff) · A6 the colour channels and the status line on the remaining pages. *Accept: the owner asks a group when to meet here rather than in Rallly.*
+- **Asking when (rc46) — before the rest of MVP-4** (owner, 2026-11-15: A1 and its follow-ups first, then G2 part 4 and G3). §10 *Asking when*. Slices, one PR at a time: A0 the held minute — `held_action`, its pass on both targets, Undo, and "Email vote links" held (migration first) · A1 answering saved per tap, taken back by tapping again, and the answers grid where it stands · A2 the draft question (migration first) and the Ask page in the Days view — lettered options, the sheet, Undo, "+ and", the read-back and the status line · A3 the Hours view and dragging · A4 the people picker · A5 options of several events on the Ask page, with their changes drawn (P4's editor and diff) · A6 the colour channels and the status line on the remaining pages. *Accept: the owner asks a group when to meet here rather than in Rallly.*
 - **MVP-5 — Google two-way.** PULL classification, echo detection, tier-gated inbound edits (§11), inbound deletes as unsubscribe, conflict policy, 410 full resync with the reverse diff. *Accept: a member moves an event in Google and the group follows or receives a proposal (US-15).*
 - **→ Public MVP: the first ~100.**
 - **Later:** Microsoft Graph and CalDAV two-way; Google OAuth verification (required before user 101 — start it before it is needed); hardening of whole-series recurrence end to end.
