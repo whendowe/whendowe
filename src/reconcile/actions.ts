@@ -30,6 +30,8 @@ export type LogReason =
   | "inbound_delete_unsubscribed"
   | "skipped_instance_edit"
   | "adopted_orphan"
+  | "removed"
+  | "gone_in_provider"
   | "retry_scheduled"
   | "error";
 
@@ -46,7 +48,7 @@ export function actionReason(action: Action): LogReason {
     case "apply_inbound":
       return "inbound_applied";
     case "delete_mirror":
-      return "inbound_delete_unsubscribed";
+      return "removed"; // our own removal (§11 PUSH); an inbound delete never deletes a mirror
     case "noop":
       return "skipped_unchanged";
     default:

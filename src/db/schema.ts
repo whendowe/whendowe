@@ -131,6 +131,9 @@ export const projection = sqliteTable(
     state: text("state").notNull().default("pending_create"),
     lastError: text("last_error"),
     retryAt: text("retry_at"), // next retry for 'error' rows (capped backoff, §12)
+    // rc40: when the copy was found deleted in the provider. From then on it is not put back
+    // for this connection (the §10 deletion model's unsubscribe); null for a copy we removed.
+    unsubscribedAt: text("unsubscribed_at"),
     createdAt: text("created_at").notNull(),
     updatedAt: text("updated_at").notNull(),
   },
