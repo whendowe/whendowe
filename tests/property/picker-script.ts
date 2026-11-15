@@ -65,6 +65,7 @@ export function loadPicker() {
       clash: fn,
       busyText: fn,
       busyDays: fn,
+      googleNote: fn,
     })
     .parse(sandbox.WhenDoWePicker);
   // Results cross from the sandbox's realm; parse them back into this one.
@@ -78,6 +79,7 @@ export function loadPicker() {
     pollFromRows: (allDay: boolean, rows: Row[]) =>
       pollSchema.parse(api.pollFromRows(allDay, rows)),
     spreadBusy: (items: unknown) => spreadSchema.parse(api.spreadBusy(items)),
+    googleNote: (state: unknown) => z.string().parse(api.googleNote(state)),
     clash: (days: Spread, date: string, start: number, length: number) =>
       z.boolean().parse(api.clash(days, date, start, length)),
     busyText: (spans: Spread[string]) => z.string().parse(api.busyText(spans)),

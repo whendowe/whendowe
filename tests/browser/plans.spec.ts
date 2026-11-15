@@ -213,6 +213,15 @@ test.describe("busy times while you choose (rc41)", () => {
     expect(errors).toEqual([]);
   });
 
+  test("a plan says, above its rows, when Google's busy times are missing", async ({ page }) => {
+    await answerBusy(page, { status: 200, busy: BUSY, google: "unavailable" });
+    const errors = await open(page, "plan-answer");
+    await expect(cell(page, "2026-11-26")).toHaveClass(/busy/);
+    const line = page.locator(".pl .busynote");
+    await expect(line).toHaveText("Showing Google busy times isn't available to this account.");
+    expect(errors).toEqual([]);
+  });
+
   test("voting signed in: each option says whether it clashes", async ({ page }) => {
     await answerBusy(page, { status: 200, busy: BUSY });
     const errors = await open(page, "share-over-claim");
@@ -240,6 +249,7 @@ test.describe("busy times while you choose (rc41)", () => {
       await expect.poll(async () => (await asked(page)).length).toBe(1);
       await expect(page.locator(".dh.busy")).toHaveCount(0);
       await expect(page.locator(".sheet .clash")).toBeHidden();
+      await expect(page.locator(".pl .busynote")).toHaveCount(0);
       expect(errors).toEqual([]);
     });
   }
