@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { z } from "zod";
-import type { ProviderEvent } from "./base.js";
+import type { EventFields, ProviderEvent, ProviderMetadata } from "./base.js";
 
 // Google Calendar event resource → ProviderEvent (DESIGN.md §12).
 //
@@ -46,6 +46,8 @@ export const googleEventSchema = z.object({
   recurrence: z.array(z.string()).nullish(),
   /** Set on an INSTANCE of a series, pointing at the master event. */
   recurringEventId: z.string().nullish(),
+  /** Where the event came from, shown by Google as a link. */
+  source: z.object({ url: z.string(), title: z.string().optional() }).nullish(),
   extendedProperties: z
     .object({
       private: z.record(z.string(), z.string()).nullish(),
@@ -157,6 +159,7 @@ export function toProviderEvent(event: GoogleEvent): ProviderEvent {
         tzid: null,
         allDay: false,
         rrule: null,
+        sourceUrl: null,
       },
       metadata: {
         ...(canonicalUid === undefined ? {} : { canonicalUid }),
@@ -191,6 +194,7 @@ export function toProviderEvent(event: GoogleEvent): ProviderEvent {
       tzid: start.tzid,
       allDay: start.allDay,
       rrule: extractRrule(event.recurrence),
+      sourceUrl: event.source?.url ?? null,
     },
     metadata: {
       ...(canonicalUid === undefined ? {} : { canonicalUid }),
@@ -198,5 +202,39 @@ export function toProviderEvent(event: GoogleEvent): ProviderEvent {
     },
     isDeleted: false,
     recurringEventId: event.recurringEventId ?? null,
+  };
+}
+
+/** What Google shows as the name of a copy's source link. */
+export const SOURCE_TITLE = "WhenDoWe";
+
+/**
+ * The other direction: our fields as the body of a Google write (§12). Every field is
+ * named, null included, so an update clears what the event no longer has; the body is
+ * sent as a PATCH, which leaves `status` alone, so updating a copy deleted in Google
+ * doesn't bring it back (§10 rc40).
+ *
+ * A timed event always has a zone here (the forms require one); "UTC" is only the
+ * fallback Google needs, since a wall clock with neither an offset nor a zone is refused.
+ */
+export function toGoogleEvent(
+  fields: EventFields,
+  metadata: ProviderMetadata,
+): Record<string, unknown> {
+  const when = (local: string) =>
+    fields.allDay
+      ? { date: local, dateTime: null, timeZone: null }
+      : { date: null, dateTime: local, timeZone: fields.tzid ?? "UTC" };
+  const identity: Record<string, string> = { canonical_uid: metadata.canonicalUid };
+  if (metadata.writeNonce !== undefined) identity.write_nonce = metadata.writeNonce;
+  return {
+    summary: fields.title,
+    description: fields.description,
+    location: fields.location,
+    start: when(fields.startLocal),
+    end: when(fields.endLocal),
+    recurrence: fields.rrule === null ? null : [`RRULE:${fields.rrule}`],
+    source: fields.sourceUrl === null ? null : { title: SOURCE_TITLE, url: fields.sourceUrl },
+    extendedProperties: { private: identity },
   };
 }
