@@ -51,6 +51,7 @@ function projectionRow(overrides: Partial<ProjectionRow> = {}): ProjectionRow {
     state: "pending_create",
     lastError: null,
     retryAt: null,
+    unsubscribedAt: null,
     createdAt: NOW,
     updatedAt: NOW,
     ...overrides,

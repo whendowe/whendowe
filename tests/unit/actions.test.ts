@@ -30,7 +30,7 @@ describe("actionReason — the Action↔§14-log-vocabulary mapping", () => {
     [{ kind: "adopt_orphan", providerEventId: "p1", etag: "e1" }, "adopted_orphan"],
     [{ kind: "suppress_echo", incoming: INCOMING }, "echo_suppressed"],
     [{ kind: "apply_inbound", incoming: INCOMING }, "inbound_applied"],
-    [{ kind: "delete_mirror", providerEventId: "p1" }, "inbound_delete_unsubscribed"],
+    [{ kind: "delete_mirror", providerEventId: "p1" }, "removed"],
     [{ kind: "noop" }, "skipped_unchanged"],
   ])("maps %o", (action, reason) => {
     expect(actionReason(action)).toBe(reason);
