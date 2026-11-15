@@ -171,15 +171,10 @@ export function runHeldContract(makePort: () => Promise<StoragePort>): void {
       expect(await t.count()).toBe(0);
     });
 
-    it("leaving the thread, deleting the account, or the thread going takes them along", async () => {
+    it("deleting the account, leaving the thread, or the thread going takes them along", async () => {
       const t = await setUp(makePort, "gone");
       await t.hold(t.bob);
       await t.hold(t.ann);
-      const bobs = await findThreadForMember(t.port, t.thread, t.bob);
-      if (bobs === null) throw new Error("member");
-      await leaveThread(t.port, bobs, at(1));
-      expect(await t.count()).toBe(1); // only Ann's is left
-
       const exported = await exportPerson(t.port, t.ann, at(1));
       expect(exported.held_actions).toEqual([
         {
@@ -190,6 +185,14 @@ export function runHeldContract(makePort: () => Promise<StoragePort>): void {
           what_happened: null,
         },
       ]);
+      // Ann stays, so the thread stays: only Bob's own goes when he leaves.
+      const bobs = await findThreadForMember(t.port, t.thread, t.bob);
+      if (bobs === null) throw new Error("member");
+      await leaveThread(t.port, bobs, at(1));
+      expect(await t.count()).toBe(1);
+      expect(await heldOn(t.port, { actorId: t.ann, threadId: t.thread, now: at(1) })).toHaveLength(
+        1,
+      );
       await eraseAccount(t.port, t.ann, { now: at(2) });
       expect(await t.count()).toBe(0);
 

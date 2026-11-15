@@ -77,7 +77,6 @@ async function containersOf(storage: StoragePort, p: string) {
     ["SELECT thread_id AS id FROM plan_vote_token WHERE person_id = ?", [p]],
     ["SELECT thread_id AS id FROM guest_claim WHERE person_id = ?", [p]],
     ["SELECT thread_id AS id FROM share_link WHERE created_by = ?", [p]],
-    ["SELECT DISTINCT thread_id AS id FROM held_action WHERE actor_id = ?", [p]],
     [
       "SELECT DISTINCT pl.thread_id AS id FROM plan_vote v JOIN plan pl ON pl.id = v.plan_id WHERE v.person_id = ?",
       [p],
@@ -219,7 +218,6 @@ function threadStatements(th: string, p: string, t: string, now: string): SqlSta
     { sql: "DELETE FROM plan_vote_token WHERE thread_id = ? AND person_id = ?", params: [th, p] },
     { sql: "DELETE FROM guest_claim WHERE thread_id = ? AND person_id = ?", params: [th, p] },
     { sql: "DELETE FROM share_link WHERE thread_id = ? AND created_by = ?", params: [th, p] },
-    { sql: "DELETE FROM held_action WHERE thread_id = ? AND actor_id = ?", params: [th, p] },
     {
       sql: `UPDATE plan_thread SET organizer_id =
               (SELECT person_id FROM plan_thread_member WHERE thread_id = ? AND person_id <> ?
@@ -342,7 +340,7 @@ export async function eraseAccount(
 
   await storage.batch([
     { sql: "DELETE FROM session WHERE person_id = ?", params: [p] },
-    // rc46: held actions on no thread (none yet; the thread ones go with their thread above).
+    // rc46: everything they pressed that is waiting or ran in the last day, on any thread.
     { sql: "DELETE FROM held_action WHERE actor_id = ?", params: [p] },
     { sql: "DELETE FROM feed_token WHERE person_id = ?", params: [p] },
     { sql: "DELETE FROM login_token WHERE email = ?", params: [email] },
