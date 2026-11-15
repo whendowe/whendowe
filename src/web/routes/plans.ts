@@ -11,6 +11,7 @@ import {
 } from "../../events/participation.js";
 import { type Answer, answerSchema } from "../../events/poll.js";
 import { SIGNED_IN } from "../../events/response.js";
+import { type HeldAction, type HeldRunner, heldOn, holdAction, undoHeld } from "../../held.js";
 import { MailCapReachedError } from "../../mail/capped.js";
 import type { MailPort } from "../../mail/port.js";
 import { type CapabilityConfig, UNAVAILABLE } from "../../people/capability.js";
@@ -187,6 +188,8 @@ interface View {
   /** rc43: whether the viewer sees history older than 90 days, and the moment it's counted from. */
   readonly longHistory: boolean;
   readonly now: string;
+  /** rc46: what the viewer pressed here that is waiting its minute, or ran in the last day. */
+  readonly held: readonly HeldAction[];
 }
 
 async function load(deps: PlanRouteDeps, access: ThreadAccess, me: SignedIn): Promise<View> {
@@ -211,6 +214,11 @@ async function load(deps: PlanRouteDeps, access: ThreadAccess, me: SignedIn): Pr
     mayVerify: await mayVerify(deps, access.personId),
     longHistory: await mayLongHistory(deps, access.personId),
     now: deps.now(),
+    held: await heldOn(deps.storage, {
+      actorId: access.personId,
+      threadId: access.thread.id,
+      now: deps.now(),
+    }),
     shareUntil:
       access.thread.organizerId === access.personId
         ? await shareLinkExpiry(deps.storage, access, deps.now())
@@ -602,6 +610,27 @@ ${others.map((m) =>
 )}</section>`;
 }
 
+/** What each held kind is called on the page, as "<what> — in about a minute". */
+const HELD_WHAT: Readonly<Record<HeldAction["kind"], string>> = {
+  vote_links: "Emailing vote links",
+};
+
+/**
+ * rc46: the viewer's held actions here. Undo is offered exactly while undoing is possible:
+ * once a pass has taken one it says "Sending…", then what happened, for a day.
+ */
+function heldSection(v: View): Html | "" {
+  if (v.held.length === 0) return "";
+  const t = v.access.thread;
+  return html`<ul class="rows held">${v.held.map((h) =>
+    h.takenAt === null
+      ? html`<li><span><strong>${HELD_WHAT[h.kind]}</strong> — in about a minute</span><form method="post" action="${threadPath(t.id)}/held/${h.id}/undo"><input type="hidden" name="csrf" value="${v.csrf}" /><button type="submit">Undo</button></form></li>`
+      : h.outcome === null
+        ? html`<li><span><strong>${HELD_WHAT[h.kind]}</strong> — sending…</span></li>`
+        : html`<li><span><strong>${HELD_WHAT[h.kind]}:</strong> ${h.outcome}</span></li>`,
+  )}</ul>`;
+}
+
 function threadPage(v: View, day: string | null, notice: string | null = null): Html {
   const t = v.access.thread;
   const waiting = v.plans.filter(
@@ -659,11 +688,15 @@ ${
         ? startForm(v, "Propose a plan", { primary: true })
         : html`<a class="btn primary" href="${draftPath(t.id)}">Back to your draft</a>`
     }${
-      onTable.length > 0 && t.organizerId === v.access.personId && v.access.members.length > 1
+      onTable.length > 0 &&
+      t.organizerId === v.access.personId &&
+      v.access.members.length > 1 &&
+      !v.held.some((h) => h.kind === "vote_links" && h.takenAt === null)
         ? html`<form method="post" action="${threadPath(t.id)}/links"><input type="hidden" name="csrf" value="${v.csrf}" /><button type="submit">Email vote links</button></form>`
         : ""
     }</div>
 ${notice === null ? "" : html`<p class="notice">${notice}</p>`}
+${heldSection(v)}
 ${threadVerifiedLine(t)}
 ${t.verifiedAt === null && onTable.length > 0 && t.organizerId === v.access.personId ? shareSection(v) : ""}
 ${guestsSection(v)}
@@ -1413,53 +1446,46 @@ export function registerPlanRoutes(app: Hono<AppEnv>, deps: PlanRouteDeps): void
     return c.redirect(here, 303);
   });
 
-  // Vote links by email (rc26): the organizer asks; each member gets their own.
+  // Vote links by email (rc26): the organizer asks; each member gets their own. rc46: held
+  // for a minute with Undo; the scheduled pass sends them (voteLinksRunner below).
   app.post(`${PLANS_PATH}/:thread/links`, async (c) => {
     const r = await posting(c);
     if (r instanceof Response) return r;
-    const issued = await issueVoteLinks(deps.storage, r.access, { now: deps.now() });
-    if (issued.kind === "forbidden")
+    if (r.access.thread.organizerId !== r.access.personId)
       return renderThread(c, r.access, r.me, "Only the organizer sends vote links.", 403);
-    if (issued.kind === "closed")
-      return renderThread(c, r.access, r.me, "Nothing is on the table to vote on.", 409);
-    const me = r.access.members.find((m) => m.personId === r.access.personId);
-    const from = me === undefined ? "Someone" : memberName(me);
     const onTable = (await listPlans(deps.storage, r.access)).filter(
       (p) => p.status === "on_table",
     );
-    let sent = 0;
-    let failed = 0;
-    let capped: MailCapReachedError | null = null;
-    for (const link of issued.links) {
-      if (capped === null) {
-        try {
-          await sendVoteLink(deps.mail, {
-            link,
-            access: r.access,
-            from,
-            publicBaseUrl: deps.publicBaseUrl,
-            onTable,
-          });
-          sent += 1;
-          continue;
-        } catch (error) {
-          if (error instanceof MailCapReachedError) capped = error;
-        }
-      }
-      // Not delivered: withdraw it, so a retry isn't throttled for someone who never got it.
-      await revokeUndeliveredVoteLink(deps.storage, link);
-      failed += 1;
-    }
-    const parts = [
-      `Sent to ${sent} ${sent === 1 ? "person" : "people"}.`,
-      issued.throttled > 0 ? `${issued.throttled} already got a link in the last hour.` : "",
-      failed === 0
-        ? ""
-        : capped === null
-          ? `Couldn't send to ${failed} — please try again later.`
-          : `Couldn't send to ${failed}. ${cappedText(capped, deps.now(), true)}`,
-    ].filter((p) => p !== "");
-    return renderThread(c, r.access, r.me, parts.join(" "), failed > 0 ? 503 : 200);
+    if (onTable.length === 0)
+      return renderThread(c, r.access, r.me, "Nothing is on the table to vote on.", 409);
+    await holdAction(deps.storage, {
+      actorId: r.access.personId,
+      threadId: r.access.thread.id,
+      kind: "vote_links",
+      now: deps.now(),
+    });
+    return c.redirect(threadPath(r.access.thread.id), 303);
+  });
+
+  // rc46: Undo, while no pass has taken it. Too late, the page says so beside what happened.
+  app.post(`${PLANS_PATH}/:thread/held/:id/undo`, async (c) => {
+    const r = await posting(c);
+    if (r instanceof Response) return r;
+    const undone = await undoHeld(deps.storage, {
+      id: c.req.param("id"),
+      actorId: r.access.personId,
+    });
+    return renderThread(
+      c,
+      r.access,
+      r.me,
+      undone === "undone"
+        ? "Undone. Nobody was emailed."
+        : undone === "too_late"
+          ? "Too late — it was already sent."
+          : null,
+      undone === "too_late" ? 409 : 200,
+    );
   });
 
   // The shared link (rc25): the organizer makes it, replaces it, or turns it off.
@@ -1993,4 +2019,58 @@ ${
     await discardDraft(deps.storage, r.access);
     return c.redirect(threadPath(r.access.thread.id), 303);
   });
+}
+
+/**
+ * rc46: emailing vote links, as the scheduled pass runs it a minute after the press. The
+ * button's checks are made again — the person may have left, the plans may be decided — and
+ * the line it returns is what the organizer reads on the thread.
+ */
+export function voteLinksRunner(deps: PlanRouteDeps): HeldRunner {
+  return async ({ actorId, threadId, now }) => {
+    const access =
+      threadId === null ? null : await findThreadForMember(deps.storage, threadId, actorId);
+    if (access === null) return "You're no longer in this plan, so nobody was emailed.";
+    const issued = await issueVoteLinks(deps.storage, access, { now });
+    if (issued.kind === "forbidden")
+      return "You're no longer the organizer here, so nobody was emailed.";
+    if (issued.kind === "closed") return "Nothing is on the table any more, so nobody was emailed.";
+    const me = access.members.find((m) => m.personId === access.personId);
+    const from = me === undefined ? "Someone" : memberName(me);
+    const onTable = (await listPlans(deps.storage, access)).filter((p) => p.status === "on_table");
+    let sent = 0;
+    let failed = 0;
+    let capped: MailCapReachedError | null = null;
+    for (const link of issued.links) {
+      if (capped === null) {
+        try {
+          await sendVoteLink(deps.mail, {
+            link,
+            access,
+            from,
+            publicBaseUrl: deps.publicBaseUrl,
+            onTable,
+          });
+          sent += 1;
+          continue;
+        } catch (error) {
+          if (error instanceof MailCapReachedError) capped = error;
+        }
+      }
+      // Not delivered: withdraw it, so a retry isn't throttled for someone who never got it.
+      await revokeUndeliveredVoteLink(deps.storage, link);
+      failed += 1;
+    }
+    return [
+      `Sent to ${sent} ${sent === 1 ? "person" : "people"}.`,
+      issued.throttled > 0 ? `${issued.throttled} already got a link in the last hour.` : "",
+      failed === 0
+        ? ""
+        : capped === null
+          ? `Couldn't send to ${failed} — please try again later.`
+          : `Couldn't send to ${failed}. ${cappedText(capped, now, true)}`,
+    ]
+      .filter((p) => p !== "")
+      .join(" ");
+  };
 }

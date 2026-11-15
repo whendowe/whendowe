@@ -77,6 +77,7 @@ export function purgeThreadStatements(threadId: string, now: string): SqlStateme
   return [
     { sql: "DELETE FROM plan_note WHERE thread_id = ?", params: [threadId] },
     { sql: "DELETE FROM receipt_unsent WHERE thread_id = ?", params: [threadId] },
+    { sql: "DELETE FROM held_action WHERE thread_id = ?", params: [threadId] },
     {
       sql: "DELETE FROM verified_request_token WHERE request_id IN (SELECT id FROM verified_request WHERE thread_id = ?)",
       params: [threadId],
@@ -334,7 +335,8 @@ async function pastPlans(storage: StoragePort, now: string): Promise<string[]> {
  * the day keeps the per-address and per-group rate windows whole — mail_send rows from
  * before this month (the cap counts this month only), opt-out links once they expire
  * (they hold the address; rc24), notes on days past their
- * retention, and the erasure ledger after the backup window. One read says which have
+ * retention, held actions a day after they ran (rc46), and the erasure ledger after the
+ * backup window. One read says which have
  * anything to delete; only those statements run.
  */
 async function expired(storage: StoragePort, now: string): Promise<number> {
@@ -382,6 +384,10 @@ async function expired(storage: StoragePort, now: string): Promise<number> {
       },
     },
     {
+      flag: "held",
+      stmt: { sql: "DELETE FROM held_action WHERE taken_at < ?", params: [dayAgo] },
+    },
+    {
       flag: "ledger",
       stmt: { sql: "DELETE FROM erasure_ledger WHERE erased_at < ?", params: [ledgerBefore] },
     },
@@ -397,6 +403,7 @@ async function expired(storage: StoragePort, now: string): Promise<number> {
             EXISTS (SELECT 1 FROM mail_send WHERE month < ?) AS mail,
             EXISTS (SELECT 1 FROM opt_out_token WHERE expires_at < ?) AS optout,
             EXISTS (SELECT 1 FROM plan_note WHERE last_day < date(?, ?)) AS note,
+            EXISTS (SELECT 1 FROM held_action WHERE taken_at < ?) AS held,
             EXISTS (SELECT 1 FROM erasure_ledger WHERE erased_at < ?) AS ledger`,
     params: [
       dayAgo,
@@ -410,6 +417,7 @@ async function expired(storage: StoragePort, now: string): Promise<number> {
       now,
       now,
       `-${DEFAULT_RETAIN_DAYS + 1} days`,
+      dayAgo,
       ledgerBefore,
     ],
   });
