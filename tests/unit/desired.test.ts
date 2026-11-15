@@ -92,6 +92,7 @@ describe("project() — FULL is identity on the provider fieldset (§5 seam)", (
       tzid: "Europe/Prague",
       allDay: false,
       rrule: null,
+      sourceUrl: null,
     });
   });
 });

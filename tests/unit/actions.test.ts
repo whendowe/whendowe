@@ -11,6 +11,7 @@ const FIELDS = {
   tzid: null,
   allDay: false,
   rrule: null,
+  sourceUrl: null,
 };
 
 const INCOMING = {

@@ -213,16 +213,6 @@ it("never puts the access token into an error message", async () => {
   expect(message).not.toContain(ACCESS_TOKEN);
 });
 
-// --- the write side is still M2 ---
-
-it("rejects write operations until M2", async () => {
-  const { impl } = fakeFetch([{ body: "{}" }]);
-  const p = provider(impl);
-  await expect(p.upsert(null, { ...eventFields() }, { canonicalUid: "u" })).rejects.toThrow(/M2/);
-  await expect(p.delete("id")).rejects.toThrow(/M2/);
-  await expect(p.findByMetadata("uid")).rejects.toThrow(/M2/);
-});
-
 function eventFields() {
   return {
     title: "t",
@@ -233,5 +223,6 @@ function eventFields() {
     tzid: "Europe/Prague",
     allDay: false,
     rrule: null,
+    sourceUrl: null,
   };
 }
