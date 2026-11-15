@@ -297,9 +297,13 @@ it("gives a timed event with no zone UTC, which Google needs", async () => {
 
 it.each([404, 410])("says an updated copy is gone when Google answers %i", async (status) => {
   const { impl } = fakeFetch([{ status, body: JSON.stringify({ error: { message: "x" } }) }]);
-  await expect(provider(impl).upsert("g1", eventFields(), { canonicalUid: "u" })).rejects.toThrow(
-    ProviderEventGoneError,
-  );
+  const update = provider(impl).upsert("g1", eventFields(), { canonicalUid: "u" });
+  await expect(update).rejects.toThrow(ProviderEventGoneError);
+  // Its own name and message, so a log line tells it from a failure (§14).
+  await expect(update).rejects.toMatchObject({
+    name: "ProviderEventGoneError",
+    message: "the provider event was deleted there",
+  });
 });
 
 it("says an updated copy is gone when Google answers that it is cancelled, not revived", async () => {
@@ -315,7 +319,7 @@ it("treats a 404 on a create, and any other failure, as a failure to retry", asy
   const notFound = fakeFetch([{ status: 404, body: "{}" }]);
   const create = provider(notFound.impl).upsert(null, eventFields(), { canonicalUid: "u" });
   await expect(create).rejects.not.toThrow(ProviderEventGoneError);
-  await expect(create).rejects.toThrow(/HTTP 404/);
+  await expect(create).rejects.toThrow(/calendar event insert failed: HTTP 404/);
 
   const broken = fakeFetch([{ status: 500, body: JSON.stringify({ error: { message: "boom" } }) }]);
   const update = provider(broken.impl).upsert("g1", eventFields(), { canonicalUid: "u" });
@@ -333,7 +337,7 @@ it("deletes with a DELETE, and a copy already gone counts as deleted", async () 
   }
   const { impl } = fakeFetch([{ status: 500, body: "" }]);
   await expect(provider(impl).delete("g1")).rejects.toThrow(
-    /calendar event delete failed: HTTP 500/,
+    "calendar event delete failed: HTTP 500 (not deleted)",
   );
 });
 
@@ -351,10 +355,19 @@ it("finds a copy by its canonical id, and only by that", async () => {
   expect(`${url.origin}${url.pathname}`).toBe(EVENTS_URL);
   expect(url.searchParams.get("privateExtendedProperty")).toBe("canonical_uid=evt-1");
   expect(url.searchParams.get("singleEvents")).toBe("false");
+  expect(url.searchParams.get("maxResults")).toBe("1");
+  expect(calls[0]?.init.headers.accept).toBe("application/json");
   // Deleted copies stay out (Google's default), so a copy deleted there is never adopted.
   expect(url.searchParams.has("showDeleted")).toBe(false);
   expect(calls[0]?.init.method).toBe("GET");
   expect(calls[0]?.init.headers.authorization).toBe(`Bearer ${ACCESS_TOKEN}`);
+});
+
+it("names the lookup when it fails", async () => {
+  const { impl } = fakeFetch([{ status: 500, body: "{}" }]);
+  await expect(provider(impl).findByMetadata("evt-1")).rejects.toThrow(
+    /calendar event lookup failed: HTTP 500/,
+  );
 });
 
 it("finds nothing when Google has no copy", async () => {
