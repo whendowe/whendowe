@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, expect, it } from "vitest";
+import { GOOGLE_BUSY_UNAVAILABLE } from "../../src/people/capability.js";
 import { pickerAssets } from "../../src/web/picker.js";
 import { loadPicker, type Pick, type Poll } from "../property/picker-script.js";
 
@@ -296,5 +297,15 @@ describe("busy times: what meets what", () => {
     expect(picker.busyDays(days, "2026-11-12", "2026-11-12")).toBe(1);
     expect(picker.busyDays(days, "2026-11-13", "2026-11-13")).toBe(0);
     expect(picker.busyDays(days, "2026-11-14", "2026-11-12")).toBe(0);
+  });
+});
+
+describe("Google's line under the calendar (rc41, rc44)", () => {
+  it("names a failure and a missing capability, and nothing else", () => {
+    expect(picker.googleNote("failed")).toBe("Couldn't load your Google busy times.");
+    expect(picker.googleNote("unavailable")).toBe(GOOGLE_BUSY_UNAVAILABLE);
+    for (const other of ["shown", "none", undefined, null, "toString", "constructor"]) {
+      expect(picker.googleNote(other)).toBe("");
+    }
   });
 });

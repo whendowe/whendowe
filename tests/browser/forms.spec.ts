@@ -148,6 +148,7 @@ test.describe("busy times while you pick (rc41)", () => {
     await expect(friday).toHaveClass(/wd-busy/);
     await expect(day(page, "Thu 29 Oct")).not.toHaveClass(/wd-busy/);
     await expect(busyLine(page)).toBeHidden(); // today has nothing on
+    await expect(page.locator(".wd-busynote")).toBeHidden(); // nothing said about Google
     // The weeks on screen, in the form's zone: October 2026 runs Mon 28 Sep to Sun 1 Nov.
     expect(await asked(page)).toEqual([
       expect.stringMatching(/^\/busy\?from=2026-09-28&to=2026-11-01&tz=[^&]+$/),
@@ -196,6 +197,29 @@ test.describe("busy times while you pick (rc41)", () => {
     expect(errors).toEqual([]);
   });
 
+  test("when Google's busy times couldn't load, the calendar says so and shows the rest", async ({
+    page,
+  }) => {
+    await answerBusy(page, { status: 200, busy: BUSY, google: "failed" });
+    const errors = await open(page, "event-new");
+    await expect(page.locator(".wd-busynote")).toHaveText("Couldn't load your Google busy times.");
+    await expect(day(page, "Fri 30 Oct, busy 18:00–20:00")).toHaveClass(/wd-busy/);
+    await shot(page, "event-busy-google-failed.png");
+    expect(errors).toEqual([]);
+  });
+
+  test("without calendar_sync, the poll form says Google's busy times aren't available", async ({
+    page,
+  }) => {
+    await answerBusy(page, { status: 200, busy: [], google: "unavailable" });
+    const errors = await open(page, "poll-new");
+    await expect(page.locator(".wd-busynote")).toHaveText(
+      "Showing Google busy times isn't available to this account.",
+    );
+    await expect(page.locator(".wd-busy")).toHaveCount(0);
+    expect(errors).toEqual([]);
+  });
+
   for (const [what, status] of [
     ["a refused answer", 500],
     ["no answer at all", 0],
@@ -208,6 +232,7 @@ test.describe("busy times while you pick (rc41)", () => {
       expect(await value(page, "start")).toBe("2026-10-30T19:00");
       await expect(page.locator(".wd-busy")).toHaveCount(0);
       await expect(busyLine(page)).toBeHidden();
+      await expect(page.locator(".wd-busynote")).toBeHidden();
       expect(await asked(page)).toHaveLength(1);
       expect(errors).toEqual([]);
     });

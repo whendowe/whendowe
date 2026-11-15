@@ -2,6 +2,7 @@
 import { runInNewContext } from "node:vm";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
+import { GOOGLE_BUSY_UNAVAILABLE } from "../../src/people/capability.js";
 import { busyAssets, busySpans } from "../../src/web/plan-editor.js";
 
 // The busy script of the plan pages and voting (DESIGN §10 rc41, B1b): extracted from the
@@ -14,7 +15,7 @@ const sandbox: { WhenDoWePlanBusy?: unknown } = {};
 runInNewContext(source, sandbox);
 const fn = z.custom<(...args: unknown[]) => unknown>((v) => typeof v === "function");
 const api = z
-  .object({ spans: fn, dayText: fn, clashText: fn, asks: fn })
+  .object({ spans: fn, dayText: fn, clashText: fn, asks: fn, googleNote: fn })
   .parse(sandbox.WhenDoWePlanBusy);
 const spanList = z.array(z.object({ a: z.string(), z: z.string() }));
 const plain = (v: unknown) => JSON.parse(JSON.stringify(v));
@@ -141,5 +142,18 @@ describe("asks", () => {
     const year = asks(["2101-01-01", "2102-12-31"]);
     expect(year).toHaveLength(6);
     expect(year[5]).toEqual({ from: "2101-11-07", to: "2102-01-07" });
+  });
+});
+
+describe("Google's line (rc41, rc44)", () => {
+  const note = (states: unknown[]) => z.string().parse(api.googleNote(states));
+  it("says nothing when Google was shown, wasn't asked, or said something unknown", () => {
+    expect(note([])).toBe("");
+    expect(note([undefined, "shown", "none", "later"])).toBe("");
+  });
+  it("says why Google's busy times are missing; a failure outweighs unavailable", () => {
+    expect(note(["shown", "unavailable"])).toBe(GOOGLE_BUSY_UNAVAILABLE);
+    expect(note(["failed", "shown"])).toBe("Couldn't load your Google busy times.");
+    expect(note(["unavailable", "failed"])).toBe("Couldn't load your Google busy times.");
   });
 });

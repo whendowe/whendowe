@@ -515,7 +515,16 @@ const BUSY_SCRIPT = html`<script>
     return out;
   }
 
-  globalThis.WhenDoWePlanBusy = { spans: spans, dayText: dayText, clashText: clashText, asks: asks };
+  /** Google's part of the answers (rc41, rc44): the line saying why it is missing, or "". */
+  function googleNote(states) {
+    if (states.indexOf("failed") !== -1) return "Couldn't load your Google busy times.";
+    if (states.indexOf("unavailable") !== -1) return "Showing Google busy times isn't available to this account.";
+    return "";
+  }
+
+  globalThis.WhenDoWePlanBusy = {
+    spans: spans, dayText: dayText, clashText: clashText, asks: asks, googleNote: googleNote,
+  };
   if (typeof document === "undefined") return;
 
   var box = document.querySelector("[data-busy][data-busy-tz]");
@@ -537,10 +546,20 @@ const BUSY_SCRIPT = html`<script>
     var q = "?from=" + r.from + "&to=" + r.to + "&tz=" + encodeURIComponent(tz);
     return fetch(url + q, { credentials: "same-origin", headers: { Accept: "application/json" } })
       .then(function (res) { return res.ok ? res.json() : null; })
-      .then(function (data) { return data && Array.isArray(data.busy) ? data.busy : []; })
-      .catch(function () { return []; });
+      .then(function (data) {
+        return data && Array.isArray(data.busy) ? data : { busy: [] };
+      })
+      .catch(function () { return { busy: [] }; });
   })).then(function (answers) {
-    var list = spans([].concat.apply([], answers));
+    var note = googleNote(answers.map(function (a) { return a.google; }));
+    if (note !== "") {
+      var line = document.createElement("p");
+      line.className = "small muted busynote";
+      line.textContent = note;
+      var h1 = box.querySelector("h1");
+      if (h1) h1.after(line); else box.prepend(line);
+    }
+    var list = spans([].concat.apply([], answers.map(function (a) { return a.busy; })));
     if (list.length === 0) return;
     for (var c = 0; c < cells.length; c++) {
       var text = dayText(list, cells[c].getAttribute("data-k"));

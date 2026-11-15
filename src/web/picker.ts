@@ -78,6 +78,7 @@ const PICKER_STYLE = html`<style>
   .wd-busy::after { content: ""; position: absolute; top: 4px; right: 4px; width: 7px; height: 7px; border-radius: 50%;
     background: light-dark(#17201f, #e6eeec); box-shadow: 0 0 0 2px light-dark(#fff, #111716); }
   .wd-busyline { margin: 0; font-size: .9rem; }
+  .wd-busynote { margin: 0; font-size: .9rem; }
   .wd-opts .wd-clash { font-weight: 700; opacity: 1; }
 </style>`;
 
@@ -278,6 +279,17 @@ const PICKER_SCRIPT = html`<script>
       return s.from === 0 && s.to === 1440 ? "all day" : fromMin(s.from) + "–" + (s.to === 1440 ? "24:00" : fromMin(s.to));
     }).join(", ");
   }
+  /**
+   * The one line for Google's part of an answer (rc41, rc44): "" when it was shown or there
+   * was nothing to ask, else why it isn't. Anything else the server says is nothing.
+   */
+  var GOOGLE_NOTES = {
+    failed: "Couldn't load your Google busy times.",
+    unavailable: "Showing Google busy times isn't available to this account.",
+  };
+  function googleNote(state) {
+    return state === "failed" || state === "unavailable" ? GOOGLE_NOTES[state] : "";
+  }
   /** How many days from "from" to "to" (both included) have something on. */
   function busyDays(days, from, to) {
     var n = 0;
@@ -290,6 +302,7 @@ const PICKER_SCRIPT = html`<script>
     summary: summary, dayLabel: dayLabel, lengthLabel: lengthLabel,
     pollRows: pollRows, pollFromRows: pollFromRows,
     spreadBusy: spreadBusy, clash: clash, busyText: busyText, busyDays: busyDays,
+    googleNote: googleNote,
   };
   if (typeof document === "undefined") return;
 
@@ -309,11 +322,12 @@ const PICKER_SCRIPT = html`<script>
    * Where a form's busy times come from: its data-busy URL, asked once per range and
    * zone, for the weeks on screen. Until an answer comes, or if none does, nothing is
    * busy and the picker works as it would without it; redraw() runs when one arrives.
+   * note() is the latest answer's line about Google, "" until one says otherwise.
    */
   function busySource(form, redraw) {
     var url = form.getAttribute("data-busy");
     var except = form.getAttribute("data-busy-except");
-    var items = {}, spread = {}, asked = {};
+    var items = {}, spread = {}, asked = {}, note = "";
     function zone() {
       var tz = form.querySelector("#tzid");
       return (tz && tz.value) || Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -326,14 +340,24 @@ const PICKER_SCRIPT = html`<script>
       fetch(url + q, { credentials: "same-origin", headers: { Accept: "application/json" } })
         .then(function (r) { return r.ok ? r.json() : null; })
         .then(function (data) {
-          if (!data || !Array.isArray(data.busy) || data.busy.length === 0) return;
-          items[tz] = (items[tz] || []).concat(data.busy);
-          spread[tz] = spreadBusy(items[tz]);
-          redraw();
+          if (!data || !Array.isArray(data.busy)) return;
+          var said = "google" in data ? googleNote(data.google) : note;
+          var changed = said !== note;
+          note = said;
+          if (data.busy.length > 0) {
+            items[tz] = (items[tz] || []).concat(data.busy);
+            spread[tz] = spreadBusy(items[tz]);
+            changed = true;
+          }
+          if (changed) redraw();
         })
         .catch(function () {});
     }
-    return { load: load, days: function () { return spread[zone()] || {}; } };
+    return {
+      load: load,
+      days: function () { return spread[zone()] || {}; },
+      note: function () { return note; },
+    };
   }
 
   /** The month calendar: paint(key, button) marks a day, onPick(key) handles a tap. */
@@ -348,7 +372,10 @@ const PICKER_SCRIPT = html`<script>
     next.setAttribute("aria-label", "Next month");
     head.append(prev, title, next);
     var grid = el("div", "wd-cal");
-    box.append(head, grid);
+    var note = el("p", "wd-busynote muted");
+    note.setAttribute("aria-live", "polite");
+    note.hidden = true;
+    box.append(head, grid, note);
     function shift(n) {
       view.month += n;
       if (view.month < 0) { view.month = 11; view.year -= 1; }
@@ -364,6 +391,8 @@ const PICKER_SCRIPT = html`<script>
       var weeks = monthGrid(view.year, view.month);
       busy.load(weeks[0].days[0].key, weeks[weeks.length - 1].days[6].key);
       var busyOn = busy.days();
+      note.textContent = busy.note();
+      note.hidden = note.textContent === "";
       grid.append(el("span", "wd-wk"));
       ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"].forEach(function (d) { grid.append(el("span", "wd-dow", d)); });
       weeks.forEach(function (w) {
