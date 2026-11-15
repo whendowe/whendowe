@@ -184,6 +184,7 @@ whendowe/
       thread.ts                # threads and their members; the access gate (findThreadForMember)
       plan.ts                  # drafts, sending, votes, deciding, accept (writes canonical events), withdraw
       share.ts                 # shared links, guests and claim links (§10 rc25)
+      vote-link.ts             # (rc26) voting by emailed link without an account: one per person per thread, only the hash stored
       diff.ts                  # pure: match plan events by sid -> same / changed / only in one
       weeks.ts                 # pure view-model: week rows, events as per-week pieces, folding, colours
       note.ts                  # notes on days: attributed, public or private (P5)
@@ -196,13 +197,14 @@ whendowe/
     feeds/                     # MVP-3 (§10 rc34): calendar feeds, read-only, by secret link
       ics.ts                   # pure: events at a tier -> RFC 5545 text; TEXT escaping, folding, VTIMEZONE
       feed.ts                  # feed links (hashed for lookup, encrypted to show again), and which events a feed holds; (rc36) group calendar links, capped by their keeper
+      busy.ts                  # (rc41) busy times while you pick: the range asked for, your agreed events as times only, Google's spans as wall clock; nothing stored
     oauth/
       pkce.ts                  # RFC 7636 verifier/challenge (S256 only) + state nonce (§13)
       authorize.ts             # Google authorization request URL (§12)
       flow-cookie.ts           # in-flight flow: an ENCRYPTED COOKIE, not an oauth_state table; names its purpose, connect or sign-in (§13)
       http.ts                  # minimal fetch surface + zod-validated JSON — no SDK (§6)
       token-exchange.ts        # authorization code -> tokens (connect) or an ID token (sign-in); revoking a grant (rc21 R3)
-      primary-calendar.ts      # account/calendar identity for a new connection (§10)
+      primary-calendar.ts      # account/calendar identity for a new connection (§10); (rc41) the calendars that can count as busy, and Google's free/busy lookup
       identity.ts              # sign-in: the ID token's claims -> an address Google is authoritative for (§13 rc20)
     providers/
       base.ts                  # CalendarProvider port
@@ -220,12 +222,13 @@ whendowe/
     web/
       app.ts                   # Hono app (shared by both deployments)
       escape.ts                # HTML escaping — provider/event text is untrusted input (§13)
+      csp.ts                   # (rc21) security headers on every response; inline scripts allowed by hash, never 'unsafe-inline'
       layout.ts                # the shared page shell every route renders into (escapes its inputs)
       picker.ts                # the date/time picker: a script over the plain form fields (rc15)
       plan-editor.ts           # the week-row editor: tap to pick up / put down, drag; writes the plain fields (rc19)
       session.ts               # session middleware: cookie -> this browser's accounts, the active one on the request context; CSRF check (rc18)
       routes/                  # OAuth, events UI (HTMX)
-        oauth.ts               # POST connect + POST sign-in (GET never mutates); one GET callback for both: state, PKCE, purpose
+        oauth.ts               # POST connect + POST sign-in (GET never mutates); one GET callback for both: state, PKCE, purpose; (rc41) choosing whose busy times count, and Google's busy times for GET /busy
         oauth-deps.ts          # config + storage port -> route dependencies
         auth.ts                # magic-link request + confirm (GET renders, POST acts — §13), sign-out
         groups.ts              # create group, invite, accept invite
@@ -235,7 +238,7 @@ whendowe/
         share.ts               # the shared-link page: vote signed in, or claim a name; Open Graph tags (rc25)
         account.ts             # your handle, export, delete your account; the opt-out page for email recipients (rc21)
         operator.ts            # the operator page (rc43): who has which capability; grant and revoke by address
-        feeds.ts               # GET /feed/<token>.ics (ETag, 304); POST make / replace a feed link (rc34); (rc36) GET /c/<token> and /c/<token>.ics, a group calendar link's page and feed
+        feeds.ts               # GET /feed/<token>.ics (ETag, 304); POST make / replace a feed link (rc34); (rc36) GET /c/<token> and /c/<token>.ics, a group calendar link's page and feed; (rc41) GET /busy, the picker's busy times
     changelog.ts               # append + diff
     mail/
       port.ts                  # HTTPS mail port (invites, token links — MVP-1)
@@ -1636,6 +1639,25 @@ seeing *what* those things are is useful but optional, and comes later.
 - **Later, opt-in: seeing what they are.** Titles next to the busy times, for you only, behind its
   own switch, fetched and dropped the same way. It needs no new permission (`calendar.events`
   can read them), which is why it is off unless you turn it on.
+- **As built, B1–B3.** Where the text above leaves a choice, this
+  is what was chosen:
+  - *The request (B1).* `GET /busy` takes the days on screen and the asker's zone, at most 62
+    days. It answers `{busy}`, each entry either whole days or a wall-clock span in that zone, to
+    the minute. An event being edited is left out of its own form's busy times.
+  - *Choosing (B2).* Only ids in Google's own calendar list are kept, at most 50; the calendar
+    WhenDoWe made is dropped, a calendar of your own that events go into stays listed. A
+    reconnect keeps the ticks. "The account page" is home, as for `calendar_sync` (rc43): its
+    "Google Calendar connected" line links to *Choose whose busy times count*. The export lists
+    the ticks per connection; erasing an account deletes them.
+  - *Google's part (B3).* The lookup asks from the first day's midnight to the midnight after the
+    last, in the asker's zone, and runs alongside your WhenDoWe events, not after them. A
+    calendar Google can't read (deleted, unshared) is skipped; any other failure keeps your
+    WhenDoWe busy times and says so. The answer gains `google`: `shown`, `unavailable` or
+    `failed`, and has none when there was nothing to ask.
+  - *The line.* "Isn't available" is shown only to an account that has a Google connection; one
+    that never connected already sees the disabled connect button and its line on home. The
+    event and poll forms put the line under the calendar; plan pages and voting put it under the
+    heading, and across several requests a failure outweighs unavailable.
 
 ```sql
 -- rc41
