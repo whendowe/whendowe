@@ -2197,8 +2197,8 @@ CREATE INDEX held_action_due ON held_action (due_at) WHERE taken_at IS NULL;
 ```
   The kind is not a CHECK in the table (rc46, 2026-11-16): SQLite can't change a CHECK in
   place, so each new kind would rebuild the table. Migration 0041 rebuilds it once without
-  it, copying every row; the app parses the kind on every read, and refuses one it doesn't
-  know.
+  it, copying every row — allowed by §16's second exception, for transient tables only; the
+  app parses the kind on every read, and refuses one it doesn't know.
   Leaving a thread and deleting an account remove their own held actions with the rest of
   their rows (§10 *Privacy basics*).
 - **Taking an answer back** is deleting your own `plan_vote` row, by the same rules as
@@ -2445,6 +2445,7 @@ After the MVP, per-instance overrides are "start accepting rows into `event_over
 - **No business logic in views/templates.** Build a typed (zod) view-model; views only render its fields.
 - **Compute the push hash over the FILTERED fieldset**, per projection — not over raw canonical (matters once profiles exist).
 - **One recorded exception to expand/contract (rc11): migration 0005 rebuilds `canonical_event`** to widen its status CHECK, which SQLite cannot alter in place. It is safe for exactly one reason: **no instance has ever been deployed**, so no data and no running version depend on the old shape. The moment a first instance is deployed, the additive-first rule binds without exception — a later change of this kind ships as a new column plus a contract step, never as a rebuild.
+- **A second recorded exception (rc46, owner 2026-11-16): a table that holds only transient rows may be rebuilt** to change a CHECK, until the first real users. Today that is `held_action` alone (migration 0041): its rows live a minute while waiting and a day after they run, nothing else refers to them, and the rebuild copies every row. Nothing else qualifies: a table that holds anything a person would miss is rebuilt never. This is to be revisited before the first real user (owner: "we might need to revisit that before we have first real user"); it is on the launch checklist.
 - **Migrations are plain `.sql` files** — applied identically by `wrangler d1 migrations` and the Node runner; no programmatic migrations, ever.
 - **The storage port is async-only, SQLite-dialect-only, and uses no D1-exclusive features** in domain code; better-sqlite3's sync API never leaks past its driver.
 - **Durable Objects hold no domain data** — serialization + alarms only; all state lives in D1/SQLite.
