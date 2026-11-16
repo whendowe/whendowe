@@ -24,7 +24,7 @@ import {
   registerOAuthRoutes,
 } from "./routes/oauth.js";
 import { registerOperatorRoutes } from "./routes/operator.js";
-import { PLANS_PATH, registerPlanRoutes, voteLinksRunner } from "./routes/plans.js";
+import { chooseRunner, PLANS_PATH, registerPlanRoutes, voteLinksRunner } from "./routes/plans.js";
 import { registerRespondRoutes } from "./routes/respond.js";
 import { registerShareRoutes } from "./routes/share.js";
 import { type AppEnv, page, sessionMiddleware } from "./session.js";
@@ -80,7 +80,7 @@ function withOptOut(auth: AuthDeps): AuthDeps {
  */
 export function heldRunners(auth: AuthDeps): HeldRunners {
   const deps = withOptOut(auth);
-  return { vote_links: voteLinksRunner(deps) };
+  return { vote_links: voteLinksRunner(deps), choose: chooseRunner(deps) };
 }
 
 export function createApp(options: AppOptions = {}): Hono<AppEnv> {

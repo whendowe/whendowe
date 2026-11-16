@@ -2,7 +2,7 @@
 
 import type { Context, Hono } from "hono";
 import { Temporal } from "temporal-polyfill";
-import { ZodError } from "zod";
+import { ZodError, z } from "zod";
 import type { StoragePort } from "../../db/port.js";
 import {
   MAX_INVITEES,
@@ -131,6 +131,7 @@ import {
 import {
   noteList,
   oneTime,
+  sendResultMail,
   sendThreadReceipt,
   sendThreadRequestLink,
   sendVoteLink,
@@ -472,7 +473,7 @@ function answersGrid(v: View): Html | "" {
         const maybe = p.votes.filter((x) => x.answer === "ifneedbe").length;
         return html`<li${p.id === lead ? html` class="lead"` : ""}>${head(p)}<span class="bar" role="img" aria-label="${yes} yes, ${maybe} if need be, of ${n}"><span class="y" style="width:${pct(yes)}"></span><span class="m" style="width:${pct(maybe)}"></span></span><span class="n">${canCome(p)}</span></li>`;
       },
-    )}</ul><p class="small muted">${n} people. Each option's page has the names.</p>${waitingLine}</section>`;
+    )}</ul><p class="small muted">${n} people. Each option's page has the names.</p>${waitingLine}${chooseButton(v, options, lead)}</section>`;
   }
   return html`<section class="stands"><h3>Where it stands</h3><div class="scroll"><table class="answers"><thead><tr><th scope="col"><span class="vh">Who</span></th>${options.map(
     (p) => html`<th scope="col"${p.id === lead ? html` class="lead"` : ""}>${head(p)}</th>`,
@@ -488,7 +489,22 @@ function answersGrid(v: View): Html | "" {
     )}</tr>`;
   })}</tbody><tfoot><tr><th scope="row">Can come</th>${options.map(
     (p) => html`<td${p.id === lead ? html` class="lead"` : ""}>${canCome(p)}</td>`,
-  )}</tr></tfoot></table></div>${waitingLine}</section>`;
+  )}</tr></tfoot></table></div>${waitingLine}${chooseButton(v, options, lead)}</section>`;
+}
+
+/**
+ * rc46: the one main button under where it stands — the organizer chooses the leading option.
+ * It says it emails everyone; it is held a minute with Undo. None on a tie, and none while
+ * a choice is already waiting its minute.
+ */
+function chooseButton(v: View, options: readonly Plan[], lead: string | null): Html | "" {
+  const t = v.access.thread;
+  const p = options.find((x) => x.id === lead);
+  if (p === undefined || decidesByConsensus(v.access) || t.organizerId !== v.access.personId)
+    return "";
+  if (v.held.some((h) => h.kind === "choose" && h.takenAt === null)) return "";
+  return html`<form method="post" action="${planPath(t.id, p.id)}/accept"><input type="hidden" name="csrf" value="${v.csrf}" /><button class="primary" type="submit">Choose ${p.letter ?? ""} · ${optionLabel(p)}</button></form>
+<p class="small muted">Choosing emails everyone in it the result. You'll have a minute to undo it.</p>`;
 }
 
 function planRow(v: View, p: Plan): Html {
@@ -698,10 +714,20 @@ ${others.map((m) =>
 )}</section>`;
 }
 
-/** What each held kind is called on the page, as "<what> — in about a minute". */
-const HELD_WHAT: Readonly<Record<HeldAction["kind"], string>> = {
-  vote_links: "Emailing vote links",
-};
+const chooseArgs = z.object({ planId: z.string() });
+
+/** What a held action is called on the page, as "<what> — in about a minute". */
+function heldWhat(v: View, h: HeldAction): string {
+  switch (h.kind) {
+    case "vote_links":
+      return "Emailing vote links";
+    case "choose": {
+      const id = chooseArgs.safeParse(h.args).data?.planId;
+      const p = v.plans.find((x) => x.id === id);
+      return p === undefined ? "Choosing" : `Choosing ${p.letter ?? ""} · ${optionLabel(p)}`;
+    }
+  }
+}
 
 /**
  * rc46: the viewer's held actions here. Undo is offered exactly while undoing is possible:
@@ -712,10 +738,10 @@ function heldSection(v: View): Html | "" {
   const t = v.access.thread;
   return html`<ul class="rows held">${v.held.map((h) =>
     h.takenAt === null
-      ? html`<li><span><strong>${HELD_WHAT[h.kind]}</strong> — in about a minute</span><form method="post" action="${threadPath(t.id)}/held/${h.id}/undo"><input type="hidden" name="csrf" value="${v.csrf}" /><button type="submit">Undo</button></form></li>`
+      ? html`<li><span><strong>${heldWhat(v, h)}</strong> — in about a minute</span><form method="post" action="${threadPath(t.id)}/held/${h.id}/undo"><input type="hidden" name="csrf" value="${v.csrf}" /><button type="submit">Undo</button></form></li>`
       : h.outcome === null
-        ? html`<li><span><strong>${HELD_WHAT[h.kind]}</strong> — sending…</span></li>`
-        : html`<li><span><strong>${HELD_WHAT[h.kind]}:</strong> ${h.outcome}</span></li>`,
+        ? html`<li><span><strong>${heldWhat(v, h)}</strong> — sending…</span></li>`
+        : html`<li><span><strong>${heldWhat(v, h)}:</strong> ${h.outcome}</span></li>`,
   )}</ul>`;
 }
 
@@ -958,7 +984,8 @@ ${shareBox("Message to paste", html`${t.name}: I've proposed “${p.name}” (${
     return html`${about}<div class="confirm"><p><strong>Accept “${p.name}” as a whole?</strong> ${tally(v, p)}${
       notVoted.length > 0 ? ` (not yet: ${notVoted.map(memberName).join(", ")})` : ""
     }. Other plans for the same time are replaced by it.</p>
-<div class="row"><form method="post" action="${here}/accept">${csrf}<button class="primary" type="submit">Yes, accept</button></form><a class="btn" href="${here}">Cancel</a></div></div>`;
+<p class="small">Accepting emails everyone in it the result. You'll have a minute to undo it.</p>
+<div class="row"><form method="post" action="${here}/accept">${csrf}<button class="primary" type="submit">Yes, accept and email everyone</button></form><a class="btn" href="${here}">Cancel</a></div></div>`;
   }
   // rc46: each tap is saved; your answer tapped again takes it back. In a pair, a yes the
   // other has given already agrees the time, and the button says so.
@@ -1980,20 +2007,38 @@ ${
     const r = await posting(c);
     if (r instanceof Response) return r;
     const planId = c.req.param("plan");
-    const result = await acceptPlan(deps.storage, r.access, { planId, now: deps.now() });
-    if (result.kind === "accepted") return c.redirect(planPath(r.access.thread.id, planId), 303);
-    if (result.kind === "invalid") return notFound(c);
+    // rc46: choosing emails everyone, so it is held a minute with Undo (chooseRunner below).
+    // The checks are made now, to refuse at once, and again when it runs.
     const v = await load(deps, r.access, r.me);
     const p = v.plans.find((x) => x.id === planId);
-    if (p === undefined) return notFound(c);
-    const why =
-      result.kind === "forbidden"
-        ? "Only the organizer accepts a plan here."
-        : "This plan is no longer on the table.";
-    return c.html(
-      page(c, p.name, planPage(v, p, planQuery(c), deps, why)),
-      result.kind === "forbidden" ? 403 : 409,
-    );
+    if (p === undefined || p.status === "draft") return notFound(c);
+    const organizer =
+      !decidesByConsensus(r.access) && r.access.thread.organizerId === r.access.personId;
+    if (!organizer || p.status !== "on_table")
+      return c.html(
+        page(
+          c,
+          p.name,
+          planPage(
+            v,
+            p,
+            planQuery(c),
+            deps,
+            organizer
+              ? "This plan is no longer on the table."
+              : "Only the organizer accepts a plan here.",
+          ),
+        ),
+        organizer ? 409 : 403,
+      );
+    await holdAction(deps.storage, {
+      actorId: r.access.personId,
+      threadId: r.access.thread.id,
+      kind: "choose",
+      args: { planId },
+      now: deps.now(),
+    });
+    return c.redirect(threadPath(r.access.thread.id), 303);
   });
 
   app.post(`${PLANS_PATH}/:thread/p/:plan/withdraw`, async (c) => {
@@ -2196,6 +2241,38 @@ export function voteLinksRunner(deps: PlanRouteDeps): HeldRunner {
           : `Couldn't send to ${failed}. ${cappedText(capped, now, true)}`,
     ]
       .filter((p) => p !== "")
+      .join(" ");
+  };
+}
+
+/**
+ * rc46: choosing an option, as the scheduled pass runs it a minute after the press: accept it
+ * as the organizer — the button's checks made again — then email everyone the result.
+ */
+export function chooseRunner(deps: PlanRouteDeps): HeldRunner {
+  return async ({ actorId, threadId, args, now }) => {
+    const planId = chooseArgs.safeParse(args).data?.planId;
+    const access =
+      threadId === null || planId === undefined
+        ? null
+        : await findThreadForMember(deps.storage, threadId, actorId);
+    if (access === null || planId === undefined)
+      return "You're no longer in this plan, so nothing was chosen.";
+    const result = await acceptPlan(deps.storage, access, { planId, now });
+    if (result.kind === "forbidden")
+      return "You're no longer the one who decides here, so nothing was chosen.";
+    if (result.kind !== "accepted")
+      return "That option is no longer on the table, so nothing was chosen.";
+    const mailed = await sendResultMail(deps, access, { planId, how: "chose" });
+    return [
+      `Chosen. Emailed ${mailed.sent} ${mailed.sent === 1 ? "person" : "people"} the result.`,
+      mailed.failed === 0
+        ? ""
+        : mailed.capped === null
+          ? `Couldn't email ${mailed.failed}.`
+          : `Couldn't email ${mailed.failed}. ${cappedText(mailed.capped, now, false)}`,
+    ]
+      .filter((x) => x !== "")
       .join(" ");
   };
 }

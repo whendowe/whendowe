@@ -58,6 +58,10 @@ async function setUp(makePort: () => Promise<StoragePort>, tag: string) {
       ran.push(a.id);
       return Promise.resolve(`ran ${a.id} at ${a.now}`);
     },
+    choose: (a) => {
+      ran.push(a.id);
+      return Promise.resolve(`chose ${a.id}`);
+    },
   };
   const hold = (actorId = ann.id) =>
     holdAction(port, { actorId, threadId: thread.id, kind: "vote_links", now: T0 });
@@ -146,6 +150,7 @@ export function runHeldContract(makePort: () => Promise<StoragePort>): void {
       const a = await t.hold();
       const failing: HeldRunners = {
         vote_links: () => Promise.reject(new Error("Dinner at Ann's, token abc")),
+        choose: () => Promise.reject(new Error("never")),
       };
       expect(await runDueHeld(t.port, failing, at(HOLD_MS))).toBe(1);
       const [shown] = await heldOn(t.port, {
@@ -155,6 +160,30 @@ export function runHeldContract(makePort: () => Promise<StoragePort>): void {
       });
       expect(shown).toMatchObject({ id: a.id, outcome: FAILED_OUTCOME });
       expect(await runDueHeld(t.port, t.runners, at(2 * HOLD_MS))).toBe(0); // not tried again
+    });
+
+    it("a kind this version doesn't know is left alone: not shown, not run, not a crash (rc46)", async () => {
+      const t = await setUp(makePort, "unknown");
+      await t.port.batch([
+        stmt(
+          `INSERT INTO held_action (id, actor_id, thread_id, kind, args, due_at, created_at)
+           VALUES ('future-1', ?, ?, 'some_later_kind', '{}', ?, ?)`,
+          t.ann,
+          t.thread,
+          T0,
+          T0,
+        ),
+      ]);
+      const mine = await t.hold();
+      expect(
+        (await heldOn(t.port, { actorId: t.ann, threadId: t.thread, now: T0 })).map((h) => h.id),
+      ).toEqual([mine.id]);
+      expect(await runDueHeld(t.port, t.runners, at(HOLD_MS))).toBe(1); // only the known one
+      const [left] = await t.port.query(
+        stmt("SELECT taken_at FROM held_action WHERE id = 'future-1'"),
+      );
+      expect(left?.taken_at).toBeNull(); // waiting for the version that knows it
+      await t.port.batch([stmt("DELETE FROM held_action WHERE id = 'future-1'")]);
     });
 
     it("what happened shows for a day, then the purge pass removes it", async () => {

@@ -1271,6 +1271,123 @@ export async function sendResponseLink(
   });
 }
 
+const resultRowSchema = z.object({
+  person_id: z.string(),
+  email: z.string(),
+  signed_in_at: z.string().nullable(),
+  visibility: z.enum(["FULL", "DETAILS", "BUSY"]),
+  event_id: z.string(),
+  title: z.string(),
+  all_day: z.number(),
+  start_local: z.string(),
+  end_local: z.string(),
+  location: z.string().nullable(),
+});
+
+/** What became of one result email (rc46): for the chooser to read. */
+export interface ResultMailed {
+  readonly sent: number;
+  readonly failed: number;
+  readonly capped: MailCapReachedError | null;
+}
+
+/**
+ * The result email (DESIGN §10 *Asking when*, rc46, owner 2026-11-16): once an option is
+ * agreed — chosen by the organizer, or agreed by two people's yeses — everyone its events
+ * went to is told, at their own tier, the one who decided included: one more layer of paper
+ * trail. Opt-outs drop through the mail seam (rc24); it counts against the decider's share
+ * (rc37). Someone who has signed in gets a link to the event; one who never has gets none,
+ * as the page would only ask them to sign in. A reached cap stops the rest. Never throws.
+ */
+export async function sendResultMail(
+  deps: Pick<RespondRouteDeps, "storage" | "mail" | "publicBaseUrl">,
+  access: ThreadAccess,
+  input: { readonly planId: string; readonly how: "chose" | "agreed" },
+): Promise<ResultMailed> {
+  const plan = (await listPlans(deps.storage, access)).find((p) => p.id === input.planId);
+  if (plan === undefined || plan.status !== "accepted") return { sent: 0, failed: 0, capped: null };
+  const rows = (
+    await deps.storage.query({
+      sql: `SELECT ep.person_id, p.email, p.signed_in_at, ep.visibility, e.id AS event_id, e.title,
+                   e.all_day, e.start_local, e.end_local, e.location
+            FROM plan_event pe
+              JOIN canonical_event e ON e.id = pe.canonical_event_id
+              JOIN event_participation ep ON ep.canonical_event_id = e.id
+              JOIN person p ON p.id = ep.person_id
+            WHERE pe.plan_id = ? AND ep.visibility <> 'HIDDEN' AND p.erased_at IS NULL
+            ORDER BY e.start_local, e.id`,
+      params: [input.planId],
+    })
+  ).map((r) => resultRowSchema.parse(r));
+  const byPerson = new Map<string, z.infer<typeof resultRowSchema>[]>();
+  for (const r of rows) byPerson.set(r.person_id, [...(byPerson.get(r.person_id) ?? []), r]);
+  const me = access.members.find((m) => m.personId === access.personId);
+  const decider = me === undefined ? "Someone" : memberName(me);
+  const thread = access.thread.name;
+  // One event is named by its time ("Sat 17 Dec, 19:00–21:00"); several by the plan's name.
+  const [only, ...more] = plan.events;
+  const what = only !== undefined && more.length === 0 ? whenText(only) : `"${plan.name}"`;
+  let sent = 0;
+  let failed = 0;
+  let capped: MailCapReachedError | null = null;
+  for (const [personId, events] of byPerson) {
+    if (capped !== null) {
+      failed += 1;
+      continue;
+    }
+    const [first] = events;
+    if (first === undefined) continue;
+    const lines = events.map((e) => {
+      const when = whenText({
+        allDay: e.all_day === 1,
+        startLocal: e.start_local,
+        endLocal: e.end_local,
+      });
+      return e.visibility === "BUSY"
+        ? `- ${BUSY_LABEL}, ${when}`
+        : `- ${e.title}, ${when}${e.location === null ? "" : `, ${e.location}`}`;
+    });
+    const lead =
+      input.how === "agreed"
+        ? `${what} is agreed for "${thread}": both of you said yes.`
+        : personId === access.personId
+          ? `You chose ${what} for "${thread}".`
+          : `${decider} chose ${what} for "${thread}".`;
+    const link =
+      first.signed_in_at === null
+        ? []
+        : [
+            "",
+            `See it: ${new URL(`${EVENTS_PATH}/${first.event_id}`, deps.publicBaseUrl).toString()}`,
+          ];
+    try {
+      await deps.mail.send({
+        to: first.email,
+        subject: `Agreed: "${thread}"`,
+        cause: {
+          kind: "from",
+          senderId: access.personId,
+          groupId: access.thread.groupId,
+          why: `${decider} decided a plan you are in on WhenDoWe`,
+        },
+        text: [
+          lead,
+          "",
+          ...lines,
+          "",
+          "It is in your WhenDoWe events, and in your calendar if you have added your WhenDoWe feed or connected Google Calendar.",
+          ...link,
+        ].join("\n"),
+      });
+      sent += 1;
+    } catch (error) {
+      if (error instanceof MailCapReachedError) capped = error;
+      failed += 1;
+    }
+  }
+  return { sent, failed, capped };
+}
+
 /**
  * One vote-link email (rc26). The thread's name is user-written: the same accepted
  * phishing surface as an event title. Everyone in a thread sees its name, so it goes

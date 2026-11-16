@@ -20,7 +20,7 @@ export const SHOWN_MS = 24 * 60 * 60 * 1000;
 /** At most this many actions per pass; the rest wait for the next minute. */
 export const PASS_LIMIT = 20;
 
-export const heldKindSchema = z.enum(["vote_links"]);
+export const heldKindSchema = z.enum(["vote_links", "choose"]);
 export type HeldKind = z.infer<typeof heldKindSchema>;
 
 export interface HeldAction {
@@ -32,6 +32,8 @@ export interface HeldAction {
   readonly takenAt: string | null;
   /** What happened, once it has run. */
   readonly outcome: string | null;
+  /** Its arguments, as stored: what the page says it is about (a chosen plan's id). */
+  readonly args: unknown;
 }
 
 /** What a runner gets: the action, its actor and its arguments, unparsed — the runner checks them. */
@@ -58,14 +60,18 @@ export const FAILED_OUTCOME =
 const rowSchema = z.object({
   id: z.string(),
   kind: heldKindSchema,
+  args: z.string(),
   thread_id: z.string().nullable(),
   due_at: z.string(),
   taken_at: z.string().nullable(),
   outcome: z.string().nullable(),
 });
 
-function toAction(raw: unknown): HeldAction {
-  const r = rowSchema.parse(raw);
+/** A row of a kind this version knows, or null for one it doesn't: it is left alone (rc46). */
+function toAction(raw: unknown): HeldAction | null {
+  const parsed = rowSchema.safeParse(raw);
+  if (!parsed.success) return null;
+  const r = parsed.data;
   return {
     id: r.id,
     kind: r.kind,
@@ -73,10 +79,19 @@ function toAction(raw: unknown): HeldAction {
     dueAt: r.due_at,
     takenAt: r.taken_at,
     outcome: r.outcome,
+    args: parseArgs(r.args),
   };
 }
 
-const COLUMNS = "id, kind, thread_id, due_at, taken_at, outcome";
+function parseArgs(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return {};
+  }
+}
+
+const COLUMNS = "id, kind, thread_id, due_at, taken_at, outcome, args";
 
 /**
  * Hold an action for a minute. Pressing the same button again while one is waiting holds
@@ -121,7 +136,9 @@ export async function holdAction(
       input.threadId,
     ),
   );
-  return toAction(row);
+  const held = toAction(row);
+  if (held === null) throw new Error("a held action just written could not be read back");
+  return held;
 }
 
 /**
@@ -164,7 +181,10 @@ export async function heldOn(
         since,
       ),
     )
-  ).map(toAction);
+  ).flatMap((r) => {
+    const held = toAction(r);
+    return held === null ? [] : [held];
+  });
 }
 
 const dueSchema = z.object({
@@ -194,7 +214,11 @@ export async function runDueHeld(
         PASS_LIMIT,
       ),
     )
-  ).map((r) => dueSchema.parse(r));
+  ).flatMap((r) => {
+    // A kind this version doesn't know is left for the version that does (rc46).
+    const parsed = dueSchema.safeParse(r);
+    return parsed.success ? [parsed.data] : [];
+  });
   let ran = 0;
   for (const row of due) {
     const claimed = await storage.query(
@@ -211,7 +235,7 @@ export async function runDueHeld(
         id: row.id,
         actorId: row.actor_id,
         threadId: row.thread_id,
-        args: JSON.parse(row.args),
+        args: parseArgs(row.args),
         now,
       });
     } catch {

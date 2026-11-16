@@ -1046,6 +1046,7 @@ export const heldAction = sqliteTable(
   (t) => [
     index("held_action_due").on(t.dueAt).where(sql`${t.takenAt} IS NULL`),
     index("held_action_thread_idx").on(t.threadId, t.actorId),
-    check("held_action_kind_chk", sql`${t.kind} IN ('vote_links')`),
+    // rc46 (2026-11-16): the kind is checked by the app on every read, not a CHECK here —
+    // SQLite can't change a CHECK in place (DESIGN §16's transient-table exception, 0041).
   ],
 );
