@@ -169,6 +169,77 @@ export function runAskContract(makePort: () => Promise<StoragePort>): void {
       expect(await findAskDraft(port, { id: e.id, authorId: p.ann })).not.toBeNull();
     });
 
+    it("a group's question takes its people; one whose group is no longer theirs isn't asked", async () => {
+      const port = await makePort();
+      const p = await people(port, "group");
+      const g = await createGroup(port, { name: "Table", creatorId: p.ann, now: T0 });
+      const d = await startAskDraft(port, { authorId: p.ann, groupId: g.id, now: T0 });
+      if (d === null) throw new Error("draft");
+      await saveAskDraft(port, { id: d.id, authorId: p.ann, body: BODY, now: T0 });
+      const asked = await askDraft(port, { id: d.id, authorId: p.ann, now: T1 });
+      const access = await findThreadForMember(port, asked?.threadId ?? "", p.ann);
+      expect(access?.thread.groupId).toBe(g.id);
+
+      const e = await startAskDraft(port, { authorId: p.ann, groupId: g.id, now: T0 });
+      if (e === null) throw new Error("draft");
+      await saveAskDraft(port, { id: e.id, authorId: p.ann, body: BODY, now: T0 });
+      await port.batch([
+        stmt("DELETE FROM group_member WHERE group_id = ? AND person_id = ?", g.id, p.ann),
+      ]);
+      expect(await askDraft(port, { id: e.id, authorId: p.ann, now: T1 })).toBeNull();
+      expect(await findAskDraft(port, { id: e.id, authorId: p.ann })).not.toBeNull(); // kept
+    });
+
+    it("a row that no longer reads as a question is skipped, not a crash", async () => {
+      const port = await makePort();
+      const p = await people(port, "corrupt");
+      const good = await startAskDraft(port, { authorId: p.ann, groupId: null, now: T0 });
+      for (const [id, body] of [
+        ["bad-json", "{not json"],
+        ["bad-shape", JSON.stringify({ title: 7 })],
+      ] as const)
+        await port.batch([
+          stmt(
+            `INSERT INTO ask_draft (id, author_id, group_id, body, created_at, updated_at)
+             VALUES (?, ?, NULL, ?, ?, ?)`,
+            `${id}-${p.ann}`,
+            p.ann,
+            body,
+            T0,
+            T0,
+          ),
+        ]);
+      expect((await listAskDrafts(port, p.ann)).map((d) => d.id)).toEqual([good?.id]);
+      expect(await findAskDraft(port, { id: `bad-json-${p.ann}`, authorId: p.ann })).toBeNull();
+    });
+
+    it("if writing the thread fails, the draft is put back as it was", async () => {
+      const inner = await makePort();
+      let fail = true;
+      const port: StoragePort = {
+        query: (s) => inner.query(s),
+        batch: (s) =>
+          fail && s.some((x) => x.sql.includes("INSERT INTO plan_thread "))
+            ? Promise.reject(new Error("disk full"))
+            : inner.batch(s),
+      };
+      const p = await people(port, "restore");
+      const d = await startAskDraft(port, { authorId: p.ann, groupId: null, now: T0 });
+      if (d === null) throw new Error("draft");
+      await saveAskDraft(port, { id: d.id, authorId: p.ann, body: BODY, now: T1 });
+      await expect(askDraft(port, { id: d.id, authorId: p.ann, now: T1 })).rejects.toThrow(
+        "disk full",
+      );
+      expect(await findAskDraft(port, { id: d.id, authorId: p.ann })).toEqual({
+        id: d.id,
+        groupId: null,
+        body: BODY,
+        updatedAt: T1,
+      });
+      fail = false;
+      expect(await askDraft(port, { id: d.id, authorId: p.ann, now: T1 })).not.toBeNull();
+    });
+
     it(`untouched for ${ASK_DRAFT_KEEP_DAYS} days it goes; the export has it; erasing takes it`, async () => {
       const port = await makePort();
       const p = await people(port, "keep");
