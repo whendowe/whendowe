@@ -508,7 +508,7 @@ function errorMessage(error: unknown): string {
   return "Please check the form.";
 }
 
-function zoneOptions(): Html {
+export function zoneOptions(): Html {
   const zones =
     typeof Intl.supportedValuesOf === "function" ? Intl.supportedValuesOf("timeZone") : [];
   return html`<datalist id="zones">${zones.map((z) => html`<option value="${z}"></option>`)}</datalist>`;

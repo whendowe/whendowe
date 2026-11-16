@@ -202,6 +202,15 @@ export const PLAN_STYLE = html`<style>
   .pl .bar { display: flex; height: 14px; border: 1px solid var(--muted); border-radius: 4px; overflow: hidden; }
   .pl .bar .y { background: var(--fg); } .pl .bar .m { background: color-mix(in srgb, var(--fg) 22%, transparent); }
   .pl .bars .n { text-align: right; }
+  /* rc46: Ask when, the plain page. */
+  .pl.ask .askstatus { font-size: .85rem; }
+  .pl.ask .discard { margin-top: 1.5rem; }
+  .pl.ask .option { border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; display: grid; gap: 6px; }
+  .pl.ask .option legend { padding: 0 4px; }
+  .pl.ask .or, .pl.ask .and { margin: 2px 0; font-size: .75rem; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+  .pl.ask .or { text-align: center; }
+  .pl.ask .row.wrap { flex-wrap: wrap; align-items: end; gap: 8px; }
+  .pl.ask .readback { border-radius: 10px; padding: 10px 12px; background: var(--accent-soft); }
   .pl .vh { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 </style>`;
 
