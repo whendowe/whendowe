@@ -1066,3 +1066,84 @@ it("without `verify`: a thread's decider and the new-plan form show it disabled,
   );
   expect(await (await b.request(f.thread)).text()).toContain("Answers here are verified:");
 });
+
+// --- answers saved per tap, taken back by tapping again (rc46) ---------------------------
+
+it("by the link: tapping your answer again takes it back, with Undo that gives it again", async () => {
+  const b = await browser({ now: () => NOW });
+  const f = await pollWith(b, ["david", "ana"], "Picnic", NO_PLACE);
+  const [early = "", late = ""] = f.planIds;
+  await vote(b, f.token(0), { [`plan_${early}`]: "ifneedbe", [`plan_${late}`]: "no" });
+  const res = await vote(b, f.token(0), { [`plan_${early}`]: "none" });
+  expect(res.status).toBe(303);
+  expect(res.headers.get("location")).toBe(`${f.link(0)}&took=${early}%3Aifneedbe`);
+  const after = await (await b.request(res.headers.get("location") ?? "")).text();
+  expect(after).toContain(
+    `Took back your if need be. <button class="link" type="submit" name="plan_${early}" value="ifneedbe">Undo</button>`,
+  );
+  expect(after).toContain(`name="plan_${early}" value="ifneedbe" aria-pressed="false">If need be<`);
+  expect(after).toContain(`name="plan_${late}" value="none" aria-pressed="true">No<`); // untouched
+  const davids = async () =>
+    (await listPlans(b.storage, await f.as(f.mara.id))).flatMap((p) =>
+      p.votes.filter((v) => v.personId === f.rest[0]?.id).map((v) => v.answer),
+    );
+  expect(await davids()).toEqual(["no"]);
+
+  // Undo is the same tap as giving the answer: it comes back, saved.
+  const undo = await vote(b, f.token(0), { [`plan_${early}`]: "ifneedbe" });
+  expect(undo.headers.get("location")).toBe(`${f.link(0)}&saved=1`);
+  expect((await davids()).sort()).toEqual(["ifneedbe", "no"]);
+  // Taking back what isn't there is no error, and leaves nothing to undo.
+  await vote(b, f.token(1), { [`plan_${early}`]: "none" });
+  expect(await (await b.request(f.link(1))).text()).not.toContain("Took back");
+  // A forged took= for an answer still given shows no Undo.
+  expect(await (await b.request(`${f.link(0)}&took=${early}%3Ayes`)).text()).not.toContain(
+    "Took back",
+  );
+});
+
+it("in a pair, the yes that agrees it says so before it is tapped", async () => {
+  const b = await browser({ now: () => NOW });
+  const f = await pollWith(b, ["david"], "Picnic", NO_PLACE);
+  const [early = ""] = f.planIds;
+  // Made by Mara, the poll carries her yes to every time: David's yes agrees it.
+  const page = await (await b.request(f.link(0))).text();
+  expect(page).toContain(
+    `name="plan_${early}" value="yes" aria-pressed="false">Yes, and agree it<`,
+  );
+  expect(page).toContain(`value="ifneedbe" aria-pressed="false">If need be<`);
+  // In a group, nobody's yes agrees it alone.
+  const c = await browser({ now: () => NOW });
+  const g = await pollWith(c, ["david", "ana"], "Picnic", NO_PLACE);
+  expect(await (await c.request(g.link(0))).text()).not.toContain("and agree it");
+});
+
+it("on the plan's page: tap it again to take it back, Undo, and a receipt that says so when verified", async () => {
+  const b = await browser({ now: () => NOW });
+  const f = await signedInPoll(b, ["david", "ana"]);
+  const [early = ""] = f.planIds;
+  const csrf = async () => (await home(b)).csrf;
+  const planPage = `${f.thread}/p/${early}`;
+  // Mara's poll carries her yes; it is pressed, and tapping it sends none.
+  const before = await (await b.request(planPage)).text();
+  expect(before).toContain('name="answer" value="none" aria-pressed="true">Yes<');
+  expect(before).toContain("Saved: yes. Tap it again to take it back.");
+  await b.request(`${f.thread}/verify`, post({ csrf: await csrf() }));
+  const res = await b.request(`${planPage}/vote`, post({ csrf: await csrf(), answer: "none" }));
+  expect(res.status).toBe(303);
+  expect(res.headers.get("location")).toBe(`${planPage}?took=yes`);
+  const after = await (await b.request(res.headers.get("location") ?? "")).text();
+  expect(after).toContain(
+    'Took back your yes. <button class="link" type="submit" name="answer" value="yes">Undo</button>',
+  );
+  const receipt = b.sent.filter((m) => m.subject.startsWith("Your answer")).at(-1);
+  expect(receipt?.text).toMatch(/- "[^"]+": took back yes\n/);
+  // Nothing to take back: back to the page, no Undo.
+  const again = await b.request(`${planPage}/vote`, post({ csrf: await csrf(), answer: "none" }));
+  expect(again.headers.get("location")).toBe(planPage);
+  expect(await (await b.request(planPage)).text()).toContain("<strong>Not answered</strong>");
+  // Decided: it can't be taken back.
+  await acceptPlan(b.storage, await f.as(f.mara.id), { planId: f.planIds[1] ?? "", now: NOW });
+  const closed = await b.request(`${planPage}/vote`, post({ csrf: await csrf(), answer: "none" }));
+  expect(closed.status).toBe(409);
+});

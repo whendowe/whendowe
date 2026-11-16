@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import type { StoragePort } from "../../src/db/port.js";
 import { findEventForParticipant, listEventsFor } from "../../src/events/event.js";
 import { listParticipants } from "../../src/events/participation.js";
-import { SIGNED_IN } from "../../src/events/response.js";
+import { SHARED_LINK, SIGNED_IN } from "../../src/events/response.js";
 import { findOrCreatePerson } from "../../src/people/person.js";
 import { diffPlans } from "../../src/plans/diff.js";
 import {
@@ -17,6 +17,7 @@ import {
   findDraft,
   listPlans,
   type Plan,
+  retractVote,
   sendDraft,
   startDraft,
   updateDraftEvent,
@@ -251,6 +252,76 @@ export function runPlansContract(makePort: () => Promise<StoragePort>): void {
       );
       expect((await withdrawPlan(port, a, { planId: pb.planId, now: T2 })).kind).toBe("closed");
       expect((await withdrawPlan(port, b, { planId: pb.planId, now: T2 })).kind).toBe("withdrawn");
+    });
+
+    it("taking an answer back (rc46): only your own, only while it is on the table, by a way that counts", async () => {
+      const port = await makePort();
+      const [ann, bob, cat] = await people(port, "takeback", ["ann", "bob", "cat"]);
+      if (ann === undefined || bob === undefined || cat === undefined) throw new Error();
+      const thread = await createThread(port, {
+        name: "Takeback",
+        tzid: "Europe/Prague",
+        creatorId: ann.id,
+        memberIds: [bob.id, cat.id],
+        now: T0,
+      });
+      const a = await gate(port, thread.id, ann.id);
+      const b = await gate(port, thread.id, bob.id);
+      const c = await gate(port, thread.id, cat.id);
+      await startDraft(port, a, { fromId: null, rest: false, replace: false, now: T0 });
+      await addDraftEvent(port, a, week("W", "2101-11-02", "2101-11-09", []));
+      const sent = await sendDraft(port, a, { now: T0 });
+      if (sent.kind !== "sent") throw new Error();
+      const planId = sent.planId;
+      const answers = async () =>
+        (await sentPlan(port, a, planId)).votes.map((v) => [v.personId, v.answer]).sort();
+      await castVote(port, b, { planId, answer: "ifneedbe", now: T1, arrival: SIGNED_IN });
+      await castVote(port, c, { planId, answer: "no", now: T1, arrival: SIGNED_IN });
+
+      expect(await retractVote(port, b, { planId, arrival: SIGNED_IN })).toEqual({
+        kind: "taken",
+        previous: "ifneedbe",
+      });
+      expect(await retractVote(port, b, { planId, arrival: SIGNED_IN })).toEqual({ kind: "none" });
+      expect(await answers()).toEqual(
+        [
+          [ann.id, "yes"],
+          [cat.id, "no"],
+        ].sort(),
+      ); // Cat's stays: only your own goes
+      // A plan in another thread is not this thread's to touch.
+      const other = await createThread(port, {
+        name: "Other",
+        tzid: "Europe/Prague",
+        creatorId: cat.id,
+        memberIds: [ann.id],
+        now: T0,
+      });
+      const o = await gate(port, other.id, cat.id);
+      expect(await retractVote(port, o, { planId, arrival: SIGNED_IN })).toEqual({
+        kind: "closed",
+      });
+      expect(await answers()).toHaveLength(2);
+
+      // Someone who takes answers only from their own email: a shared link can't take it back.
+      await port.batch([
+        {
+          sql: "UPDATE plan_thread_member SET own_answers_only = 1 WHERE thread_id = ? AND person_id = ?",
+          params: [thread.id, cat.id],
+        },
+      ]);
+      const guarded = await gate(port, thread.id, cat.id);
+      expect(await retractVote(port, guarded, { planId, arrival: SHARED_LINK })).toEqual({
+        kind: "forbidden",
+      });
+      expect(await answers()).toHaveLength(2);
+
+      // Decided: nothing to take back any more.
+      await acceptPlan(port, a, { planId, now: T2 });
+      expect(await retractVote(port, guarded, { planId, arrival: SIGNED_IN })).toEqual({
+        kind: "closed",
+      });
+      expect(await answers()).toHaveLength(2);
     });
 
     it("plan the rest: a replaced plan's events that overlap nothing agreed", async () => {

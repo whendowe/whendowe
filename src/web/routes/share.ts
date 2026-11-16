@@ -38,7 +38,10 @@ import {
   questionPreview,
   readAnswers,
   readToken,
+  readTook,
   sensitive,
+  tookParam,
+  type VoteValue,
 } from "./respond.js";
 
 // The shared link's page (DESIGN §10 rc25, rc29; slice L1): one link for a question, pasted
@@ -170,10 +173,12 @@ async function sharePage(
   token: string,
   who: Answering,
   notice: Html | string,
-  typed: { readonly name: string; readonly votes: ReadonlyMap<string, Answer> } = {
+  typed: { readonly name: string; readonly votes: ReadonlyMap<string, VoteValue> } = {
     name: "",
     votes: new Map(),
   },
+  /** A plan whose answer was just taken back (rc46), for its Undo. */
+  took: ReadonlyMap<string, Answer> = new Map(),
 ): Promise<string> {
   const held = who.kind === "claim" ? who : who.kind === "account" ? who.held : null;
   const claimField =
@@ -206,8 +211,9 @@ async function sharePage(
     s.onTable,
     html`<p><label>Anything to add? <span class="muted">(optional — everyone in it sees it)</span><br />
   <textarea name="note" rows="2" maxlength="500" class="wide"></textarea></label></p>`,
-    html`<button class="primary" type="submit">Send my answer</button>`,
+    html`<button type="submit">Add the note</button>`,
     typed.votes,
+    took,
   )}
 </form>`;
   // A guest's answer is kept by this browser only; the page offers to keep it for good.
@@ -300,10 +306,12 @@ function claimedName(access: ThreadAccess): string {
   return me === undefined ? "you" : memberName(me);
 }
 
-const saved = (token: string) => {
+const saved = (token: string, took: string | null = null) => {
   const back = new URL(SHARE_PATH, "http://placeholder");
   back.searchParams.set("t", token);
-  back.searchParams.set("saved", "1");
+  // A take-back (rc46) comes back with its Undo instead of a thank-you.
+  if (took === null) back.searchParams.set("saved", "1");
+  else back.searchParams.set("took", took);
   return `${back.pathname}${back.search}`;
 };
 
@@ -318,7 +326,9 @@ export function registerShareRoutes(app: Hono<AppEnv>, deps: ShareRouteDeps): vo
         ? html`<p class="notice"><strong>Thanks — your answer is saved.</strong> Open this link again to change it.</p>`
         : "";
     const who = await answering(c, deps, q, c.req.query("c"));
-    return c.html(await sharePage(c, deps, q, token, who, notice));
+    return c.html(
+      await sharePage(c, deps, q, token, who, notice, undefined, readTook(c.req.query("took"))),
+    );
   });
 
   app.post(SHARE_PATH, async (c) => {
@@ -343,7 +353,7 @@ export function registerShareRoutes(app: Hono<AppEnv>, deps: ShareRouteDeps): vo
         status,
       );
     if (!q.open) return again("This was decided meanwhile.", 409);
-    if (answers === null) return again("Pick an answer first.", 400);
+    if (answers === null) return again("Tap an answer, or write a note first.", 400);
 
     let access: ThreadAccess;
     let claimedNow: string | null = null;
@@ -371,7 +381,7 @@ export function registerShareRoutes(app: Hono<AppEnv>, deps: ShareRouteDeps): vo
       claimedNow = claimed.token;
       remember(c, deps, { threadId: q.thread.id, token: claimed.token });
     }
-    const { refused } = await applyAnswers(
+    const { refused, recorded } = await applyAnswers(
       deps.storage,
       access,
       answers satisfies Answers,
@@ -394,7 +404,7 @@ export function registerShareRoutes(app: Hono<AppEnv>, deps: ShareRouteDeps): vo
         refused.status,
       );
     }
-    if (claimedNow === null) return c.redirect(saved(token), 303);
+    if (claimedNow === null) return c.redirect(saved(token, tookParam(recorded)), 303);
     // Just claimed: the one time the claim link is shown (rc30), so this page isn't a redirect.
     return c.html(
       await sharePage(
