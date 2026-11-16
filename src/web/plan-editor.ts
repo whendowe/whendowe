@@ -180,6 +180,29 @@ export const PLAN_STYLE = html`<style>
   .pl .card { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; background: var(--card); display: grid; gap: 4px; }
   .pl .card .when { font-weight: 700; font-size: 1.05rem; }
   .pl .card .notes { white-space: pre-line; margin: 0; }
+
+  /* rc46: where it stands. Fill says the answer, never hue: solid yes, grey if need be,
+     empty no, dashed nothing yet; the leading option has the strongest outline. */
+  .pl .stands .scroll { overflow-x: auto; }
+  .pl .answers { border-collapse: separate; border-spacing: 4px; font-size: .85rem; }
+  .pl .answers th { font-weight: 400; text-align: left; white-space: nowrap; padding: 0 4px; }
+  .pl .answers thead th + th { vertical-align: bottom; border: 1px solid var(--line); border-radius: 8px; padding: 4px 6px; white-space: normal; min-width: 5.5rem; }
+  .pl .answers thead th a { color: inherit; text-decoration: none; display: grid; gap: 2px; }
+  .pl .answers td { text-align: center; border-radius: 6px; padding: .45rem .3rem; min-width: 4.5rem; }
+  .pl .answers .a-yes { background: var(--fg); color: Canvas; font-weight: 700; }
+  .pl .answers .a-ifneedbe { background: color-mix(in srgb, var(--fg) 22%, transparent); }
+  .pl .answers .a-no { border: 1px solid var(--muted); }
+  .pl .answers .a-none { border: 1px dashed var(--line); color: var(--muted); }
+  .pl .answers tfoot td { font-weight: 700; font-size: 1rem; }
+  .pl .answers .lead { outline: 3px solid var(--fg); outline-offset: -3px; }
+  .pl .bars { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+  .pl .bars li { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 2fr) 2rem; gap: 8px; align-items: center; font-size: .85rem; }
+  .pl .bars li.lead { font-weight: 700; }
+  .pl .bars a { color: inherit; text-decoration: none; display: flex; gap: 4px; align-items: center; }
+  .pl .bar { display: flex; height: 14px; border: 1px solid var(--muted); border-radius: 4px; overflow: hidden; }
+  .pl .bar .y { background: var(--fg); } .pl .bar .m { background: color-mix(in srgb, var(--fg) 22%, transparent); }
+  .pl .bars .n { text-align: right; }
+  .pl .vh { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 </style>`;
 
 // The week-row editor script (slice P4). Progressive enhancement, never a replacement:
