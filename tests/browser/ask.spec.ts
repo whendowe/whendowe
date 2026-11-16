@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+import { z } from "zod";
 import { expect, type Page, test } from "./fixtures.js";
 
 // Ask when as a plain page (DESIGN §10 *Asking when*, rc46, A2) in a real browser: pages.ts
@@ -48,4 +49,197 @@ test("the same question by the hour: four days, the evenings marked, the weekend
   await expect(page.getByRole("button", { name: "Add 2026-11-06 12:00" })).toBeVisible();
   await expect(page.locator(".hours")).toHaveScreenshot("ask-hours.png");
   expect(errors).toEqual([]);
+});
+
+// --- dragging (rc47) ------------------------------------------------------------------------
+// The pages are files here, so instead of navigating, sending the form records which button
+// it was sent by: the drag's only output is the action it names.
+async function recordSends(page: Page): Promise<void> {
+  // A string, run in the page: this file is typed without the DOM.
+  await page.evaluate(`(() => {
+    window.sent = [];
+    HTMLFormElement.prototype.requestSubmit = function (by) {
+      window.sent.push(by ? by.value : "");
+    };
+    document.addEventListener("submit", function (e) {
+      e.preventDefault();
+      window.sent.push("native " + (e.submitter ? e.submitter.value : ""));
+    });
+  })()`);
+}
+const sent = async (page: Page) => z.array(z.string()).parse(await page.evaluate("window.sent"));
+async function centre(page: Page, selector: string) {
+  await page.locator(selector).first().scrollIntoViewIfNeeded();
+  const b = await page.locator(selector).first().boundingBox();
+  if (b === null) throw new Error(`${selector} is not on screen`);
+  return { x: b.x + b.width / 2, y: b.y + b.height / 2 };
+}
+async function mouseDrag(
+  page: Page,
+  from: { x: number; y: number },
+  to: { x: number; y: number },
+  during?: () => Promise<void>,
+) {
+  await page.mouse.move(from.x, from.y);
+  await page.mouse.down();
+  for (let i = 1; i <= 10; i++)
+    await page.mouse.move(from.x + ((to.x - from.x) * i) / 10, from.y + ((to.y - from.y) * i) / 10);
+  if (during !== undefined) await during();
+  await page.mouse.up();
+}
+const day = (k: string) => `.days [data-day="${k}"]`;
+
+test.describe("dragging", () => {
+  test("along a week's empty days makes one option over them; ending where it began is a tap", async ({
+    page,
+  }) => {
+    const errors = await open(page, "ask");
+    await recordSends(page);
+    await mouseDrag(
+      page,
+      await centre(page, day("2026-11-09")),
+      await centre(page, day("2026-11-11")),
+      async () => {
+        // The days it would cover are outlined while the finger is down.
+        await expect(page.locator(".days .day.drag")).toHaveCount(3);
+      },
+    );
+    await expect(page.locator(".days .day.drag")).toHaveCount(0);
+    expect(await sent(page)).toEqual(["span:2026-11-09:2026-11-11"]);
+    // Right to left, the same span.
+    await mouseDrag(
+      page,
+      await centre(page, day("2026-11-11")),
+      await centre(page, day("2026-11-09")),
+      async () => {
+        await expect(page.locator(".days .day.drag")).toHaveCount(3);
+      },
+    );
+    expect(await sent(page)).toEqual(["span:2026-11-09:2026-11-11", "span:2026-11-09:2026-11-11"]);
+    // Back where it began: the tap's own button, nothing more.
+    const tue = await centre(page, day("2026-11-10"));
+    await mouseDrag(page, tue, { x: tue.x + 60, y: tue.y });
+    await mouseDrag(page, tue, tue);
+    expect(await sent(page)).toEqual([
+      "span:2026-11-09:2026-11-11",
+      "span:2026-11-09:2026-11-11",
+      "span:2026-11-10:2026-11-11",
+      "native add:2026-11-10",
+    ]);
+    expect(errors).toEqual([]);
+  });
+
+  test("an all-day event's last day, dragged by its letter, moves that end", async ({ page }) => {
+    const errors = await open(page, "ask");
+    await recordSends(page);
+    // A's weekend is its second event: Saturday holds its start, Sunday its end.
+    await expect(page.locator(`${day("2026-11-07")} a.letter`)).toHaveAttribute(
+      "data-ends",
+      "start",
+    );
+    const sunday = `${day("2026-11-08")} a.letter[data-grip="0:1"]`;
+    await expect(page.locator(sunday)).toHaveAttribute("data-ends", "end");
+    await mouseDrag(page, await centre(page, sunday), await centre(page, day("2026-11-10")));
+    expect(await sent(page)).toEqual(["move:0:1:end:2026-11-10"]);
+    // A tap on the letter still opens its sheet: it is a link to the option's card.
+    await page.locator(sunday).click();
+    await expect(page).toHaveURL(/#o0$/);
+    expect(await sent(page)).toEqual(["move:0:1:end:2026-11-10"]);
+    expect(errors).toEqual([]);
+  });
+
+  test("in Hours, an event's end grip moves it by whole hours", async ({ page }) => {
+    const errors = await open(page, "ask-hours");
+    await recordSends(page);
+    const end = '[data-at="2026-11-05T22:00"] .grip[data-ends="end"]';
+    await expect(page.locator(end)).toBeVisible();
+    await expect(
+      page.locator('[data-at="2026-11-05T19:00"] .grip[data-ends="start"]'),
+    ).toBeVisible();
+    await mouseDrag(
+      page,
+      await centre(page, end),
+      await centre(page, '[data-at="2026-11-05T20:00"]'),
+      async () => {
+        await expect(page.locator('[data-at="2026-11-05T20:00"]')).toHaveClass(/drag/);
+      },
+    );
+    // Straight across into another day's column: not this event's day, so nothing moves.
+    await mouseDrag(
+      page,
+      await centre(page, end),
+      await centre(page, '[data-at="2026-11-06T22:00"]'),
+    );
+    expect(await sent(page)).toEqual(["move:0:0:end:2026-11-05T20:00"]);
+    expect(errors).toEqual([]);
+  });
+
+  test.describe("on a touch screen", () => {
+    test.use({ hasTouch: true });
+
+    async function fingerDrag(
+      page: Page,
+      from: { x: number; y: number },
+      to: { x: number; y: number },
+    ) {
+      const cdp = await page.context().newCDPSession(page);
+      const touch = (type: "touchStart" | "touchMove" | "touchEnd", x: number, y: number) =>
+        cdp.send("Input.dispatchTouchEvent", {
+          type,
+          touchPoints: type === "touchEnd" ? [] : [{ x: Math.round(x), y: Math.round(y) }],
+        });
+      await touch("touchStart", from.x, from.y);
+      for (let i = 1; i <= 12; i++)
+        await touch(
+          "touchMove",
+          from.x + ((to.x - from.x) * i) / 12,
+          from.y + ((to.y - from.y) * i) / 12,
+        );
+      await touch("touchEnd", to.x, to.y);
+    }
+
+    test("a finger along a week makes the span, and adds nothing else", async ({ page }) => {
+      const errors = await open(page, "ask");
+      await recordSends(page);
+      await fingerDrag(
+        page,
+        await centre(page, day("2026-11-16")),
+        await centre(page, day("2026-11-19")),
+      );
+      expect(await sent(page)).toEqual(["span:2026-11-16:2026-11-19"]);
+      expect(errors).toEqual([]);
+    });
+
+    test("a finger on a start grip moves it up; on empty hours it only scrolls", async ({
+      page,
+    }) => {
+      const errors = await open(page, "ask-hours");
+      await recordSends(page);
+      const start = '[data-at="2026-11-05T19:00"] .grip[data-ends="start"]';
+      await fingerDrag(
+        page,
+        await centre(page, start),
+        await centre(page, '[data-at="2026-11-05T17:00"]'),
+      );
+      expect(await sent(page)).toEqual(["move:0:0:start:2026-11-05T17:00"]);
+      // Down empty hours the page scrolls, and nothing is asked for.
+      const top = await page.evaluate("window.scrollY");
+      const free = await centre(page, '[data-at="2026-11-06T14:00"]');
+      await fingerDrag(page, free, { x: free.x, y: free.y - 200 });
+      expect(await page.evaluate("window.scrollY")).not.toBe(top);
+      expect(await sent(page)).toEqual(["move:0:0:start:2026-11-05T17:00"]);
+      expect(errors).toEqual([]);
+    });
+  });
+});
+
+test.describe("without JavaScript", () => {
+  test.use({ javaScriptEnabled: false });
+
+  test("there are no grips, and a day is still a button that adds it", async ({ page }) => {
+    await open(page, "ask-hours");
+    await expect(page.locator(".grip").first()).toBeHidden();
+    await open(page, "ask");
+    await expect(page.getByRole("button", { name: "Add 2026-11-20" })).toBeVisible();
+  });
 });

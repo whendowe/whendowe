@@ -2,11 +2,12 @@
 import { writeFileSync } from "node:fs";
 import { test as base, type Page } from "@playwright/test";
 import type { z } from "zod";
-import { RAW_NAME, type runSchema } from "./coverage.js";
+import { RAW_NAME, type runSchema, SCRIPTS } from "./coverage.js";
 
-// Every browser test imports `test` from here. It records which parts of the picker's
-// script ran (Chromium's JS coverage) and leaves the record in the test's output
-// directory, for coverage.ts to merge after the run (DESIGN §9 rc17).
+// Every browser test imports `test` from here. It records which parts of the pages' scripts
+// ran — the picker's and, rc47, the Ask page's drag — (Chromium's JS coverage) and leaves
+// the record in the test's output directory, for coverage.ts to merge after the run
+// (DESIGN §9 rc17).
 //
 // V8 drops a script's counts when its page navigates away, so a test that opens the
 // page more than once (the state machine) calls `pickerCoverage.flush()` before each
@@ -16,8 +17,9 @@ type Run = z.infer<typeof runSchema>;
 
 async function collect(page: Page, into: Run[]): Promise<void> {
   for (const e of await page.coverage.stopJSCoverage()) {
-    if (e.source?.includes("globalThis.WhenDoWePicker") === true) {
-      into.push({ source: e.source, functions: e.functions });
+    const script = SCRIPTS.find((s) => e.source?.includes(s.marker) === true);
+    if (script !== undefined && e.source !== undefined) {
+      into.push({ script: script.name, source: e.source, functions: e.functions });
     }
   }
 }
