@@ -2081,7 +2081,7 @@ are.
 
 **A minute to take it back** (owner, 2026-11-15: "let's do the email-hold right away"). An
 action that sends mail to other people waits a minute before it happens. That covers asking
-people, choosing an option, a yes that agrees it, and reminders. Its button says it sends mail,
+people, choosing an option, and reminders. Its button says it sends mail,
 and once pressed the page shows "Choosing A — in about a minute · Undo".
 - **The whole action waits, not only its mail.** Undoing a choice after its events were written,
   the other options replaced and calendars updated would be a second, riskier action. A held
@@ -2107,8 +2107,9 @@ and once pressed the page shows "Choosing A — in about a minute · Undo".
 - **A pass with nothing held reads and writes nothing more** (§6 economics): one indexed read
   of what is due.
 - **The first held action is "Email vote links"** (A0). The others — asking from the *Ask when*
-  page, choosing, a yes that agrees it, reminders, asking everyone to agree — are held as their
-  slices reach them.
+  page, choosing, reminders, asking everyone to agree — are held as their slices reach them.
+- **A yes that agrees it is not held** (owner, 2026-11-16). It is an answer, and answers are
+  saved per tap; its button says before the tap that it agrees it and emails you both.
 - **Mail not caused by a person** (sign-in links, the deletion email, receipts) is not held.
 
 **Colour: one channel per kind of information.** Colour can carry one thing per screen, so
@@ -2135,7 +2136,7 @@ pair that must be told apart also differs in lightness.
 - **Tapping your current answer again takes it back** to not answered, with Undo. No
   `plan_vote` row means not answered.
 - **When a tap would decide** — two people, and your yes agrees it (rc26) — the button says
-  so before you tap ("Yes, and agree it"). Deciding sends mail.
+  so before you tap ("Yes, and agree it"), and a line under it says it emails you both.
 - An option still waiting for your answer is marked with the attention colour.
 
 **Where it stands: the answers grid.** People down the side, options across, each cell filled
@@ -2144,8 +2145,23 @@ outline. Those who haven't answered are listed, not hidden.
 - With many people (about 15 and up) the grid folds to one bar per option in the same fills;
   tapping an option shows the names.
 - The one main button chooses the leading option, by letter ("Choose A · Thu 19 Nov,
-  19:00") and says that it emails everyone. Reminding the people who haven't answered says it
-  sends mail.
+  19:00") and says that it emails everyone. It is held a minute with Undo, and runs as
+  accepting does today, with its checks made again. Reminding the people who haven't answered
+  says it sends mail.
+
+**The result email** (owner, 2026-11-16). Whenever an option is agreed — chosen by the
+organizer, or agreed by two people's yeses — everyone the accepted events go to is emailed,
+`BUSY` members included, except whoever opted out (§10 rc24; the one mail seam drops them).
+Two people who just agreed are emailed too: one more layer of paper trail.
+- It says who chose what and when — "dm chose A · Thu 19 Nov, 19:00 for Pizza at ours", or
+  "You and lea agreed …" — with the place, and that it is now in their WhenDoWe events and
+  calendar. Each copy is at its reader's tier: a `BUSY` member reads only the time.
+- A person who has signed in gets a link to the event. One who never has gets none: the page
+  would only ask them to sign in.
+- It is mail someone caused, `from` the organizer (or the one whose yes agreed it), through
+  the thread's group if any (rc24), and it counts against that person's share of the cap
+  (rc37). One that can't be sent is reported to the chooser beside what happened, never
+  retried.
 
 **The people picker.** One component for questions, events and groups.
 - **Chips:** each person or group is a chip, and a group chip names its members.
@@ -2170,7 +2186,7 @@ CREATE TABLE held_action (                  -- rc46: an action that mails people
     id         text PRIMARY KEY,            -- UUIDv7
     actor_id   text NOT NULL REFERENCES person(id),  -- who pressed it; only they see or undo it
     thread_id  text REFERENCES plan_thread(id),      -- what it acts on, where it is shown
-    kind       text NOT NULL,               -- vote_links (CHECK; more kinds as slices add them)
+    kind       text NOT NULL,               -- vote_links | choose; checked by the app (zod) when read
     args       text NOT NULL DEFAULT '{}',  -- JSON, parsed per kind with zod when it runs
     due_at     text NOT NULL,               -- pressed + 60 s
     taken_at   text,                        -- claimed by a pass: Undo is gone from here on
@@ -2179,6 +2195,10 @@ CREATE TABLE held_action (                  -- rc46: an action that mails people
 );
 CREATE INDEX held_action_due ON held_action (due_at) WHERE taken_at IS NULL;
 ```
+  The kind is not a CHECK in the table (rc46, 2026-11-16): SQLite can't change a CHECK in
+  place, so each new kind would rebuild the table. Migration 0041 rebuilds it once without
+  it, copying every row; the app parses the kind on every read, and refuses one it doesn't
+  know.
   Leaving a thread and deleting an account remove their own held actions with the rest of
   their rows (§10 *Privacy basics*).
 - **Taking an answer back** is deleting your own `plan_vote` row, by the same rules as
