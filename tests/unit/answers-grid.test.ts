@@ -151,3 +151,59 @@ it("exactly the limit is still a grid", async () => {
   ); // Mara + 14 = 15
   expect(grid(await f.page())).toContain("<table");
 });
+
+it("ties are broken by yeses, whichever comes first; only one row is you; non-leaders carry no mark", async () => {
+  const b = await browser({ now: () => NOW });
+  const f = await poll(b, ["lea", "cat"]);
+  const [thu = "", fri = ""] = f.planIds;
+  const [lea = "", cat = ""] = f.people;
+  // A: Mara yes, Lea if need be = 2 can come, 1 yes. B: Mara yes, Lea yes = 2, 2 yes. B leads.
+  await f.answer(lea, thu, "ifneedbe");
+  await f.answer(lea, fri, "yes");
+  const g = grid(await f.page());
+  expect(g).toContain(
+    `<th scope="col" class="lead"><a href="${PLANS_PATH}/${f.threadId}/p/${fri}"`,
+  );
+  expect(g).toContain(`<th scope="col"><a href="${PLANS_PATH}/${f.threadId}/p/${thu}"`);
+  expect(g).toContain('<td>2</td><td class="lead">2</td>');
+  expect(g.match(/<span class="muted">you<\/span>/g)).toHaveLength(1);
+  expect(g).toMatch(/Not answered yet: [^,<]+<\/p>/); // only Cat
+  await f.answer(cat, thu, "no");
+  expect(grid(await f.page())).not.toContain("Not answered yet");
+});
+
+it("one option nobody can come to leads nothing; two waiting are listed; several events are named", async () => {
+  const b = await browser({ now: () => NOW });
+  const f = await poll(b, ["lea", "cat"]);
+  const [thu = "", fri = ""] = f.planIds;
+  await b.storage.batch([
+    { sql: "UPDATE plan SET status = 'withdrawn' WHERE id = ?", params: [fri] },
+  ]);
+  await f.answer(f.mara, thu, "no");
+  const g = grid(await f.page());
+  expect(g).not.toContain('class="lead"');
+  expect(g.match(/Not answered yet: ([^<]*)</)?.[1]?.split(", ")).toHaveLength(2);
+  // A plan of several events is its name and how many.
+  await b.storage.batch([
+    {
+      sql: `INSERT INTO plan_event (plan_id, sid, title, all_day, start_local, end_local, who)
+            SELECT plan_id, 'extra', title, all_day, '2101-12-24T19:00', '2101-12-24T21:00', who
+            FROM plan_event WHERE plan_id = ?`,
+      params: [thu],
+    },
+  ]);
+  expect(grid(await f.page())).toMatch(/>A<\/span> <span>[^<]+ · 2 events<\/span>/);
+});
+
+it("folded, the leader's bar is marked and the others are not", async () => {
+  const b = await browser({ now: () => NOW });
+  const f = await poll(
+    b,
+    Array.from({ length: GRID_MAX_PEOPLE }, (_, i) => `r${i}`),
+  );
+  const [thu = ""] = f.planIds;
+  await f.answer(f.people[0] ?? "", thu, "yes");
+  const g = grid(await f.page());
+  expect(g.match(/<li class="lead">/g)).toHaveLength(1);
+  expect(g.match(/<li><a /g)).toHaveLength(1);
+});
