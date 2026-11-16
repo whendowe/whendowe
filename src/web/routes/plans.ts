@@ -2266,6 +2266,9 @@ export function chooseRunner(deps: PlanRouteDeps): HeldRunner {
     const mailed = await sendResultMail(deps, access, { planId, how: "chose" });
     return [
       `Chosen. Emailed ${mailed.sent} ${mailed.sent === 1 ? "person" : "people"} the result.`,
+      mailed.optedOut === 0
+        ? ""
+        : `${mailed.optedOut} opted out of email from here, so ${mailed.optedOut === 1 ? "wasn't" : "weren't"} told.`,
       mailed.failed === 0
         ? ""
         : mailed.capped === null

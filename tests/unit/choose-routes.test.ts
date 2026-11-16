@@ -197,7 +197,7 @@ it("the result drops opt-outs through the app's seam, is at each reader's tier, 
     hm,
     { planId: h.planIds[0] ?? "", how: "chose" },
   );
-  expect(mailed).toEqual({ sent: 2, failed: 0, capped: null });
+  expect(mailed).toEqual({ sent: 2, optedOut: 0, failed: 0, capped: null });
   const busy = sent.find((m) => m.to === "lea@example.org")?.text ?? "";
   expect(busy).toContain("- Busy, Sat 17 Dec, 19:00–21:00\n");
   expect(busy).not.toContain("Pizza,");
@@ -209,7 +209,7 @@ it("the result drops opt-outs through the app's seam, is at each reader's tier, 
       hm,
       { planId: h.planIds[1] ?? "", how: "chose" },
     ),
-  ).toEqual({ sent: 0, failed: 0, capped: null });
+  ).toEqual({ sent: 0, optedOut: 0, failed: 0, capped: null });
 
   // The cap: the first refusal stops the rest, and the chooser reads how many weren't told.
   let tried = 0;
@@ -228,4 +228,93 @@ it("the result drops opt-outs through the app's seam, is at each reader's tier, 
     /Chosen\. Emailed 0 people the result\. Couldn(&#39;|')t email 3\./,
   );
   expect(tried).toBe(1);
+});
+
+it("the route refuses what can't be chosen, and says why", async () => {
+  const b = await browser({ now: () => NOW });
+  const f = await poll(b);
+  const [thu = "", fri = ""] = f.planIds;
+  const csrf = async () => (await home(b)).csrf;
+  expect((await b.request(`${f.thread}/p/nope/accept`, post({ csrf: await csrf() }))).status).toBe(
+    404,
+  );
+  await acceptPlan(b.storage, await f.as(f.mara), { planId: thu, now: NOW });
+  const late = await b.request(`${f.thread}/p/${fri}/accept`, post({ csrf: await csrf() }));
+  expect(late.status).toBe(409);
+  expect(await late.text()).toContain("This plan is no longer on the table.");
+  expect(await b.pass()).toBe(0);
+
+  const c = await browser({ now: () => NOW });
+  const g = await poll(c);
+  await addAccount(c, "lea@example.org");
+  const theirs = await c.request(
+    `${g.thread}/p/${g.planIds[0]}/accept`,
+    post({ csrf: (await home(c)).csrf }),
+  );
+  expect(theirs.status).toBe(403);
+  expect(await theirs.text()).toContain("Only the organizer accepts a plan here.");
+});
+
+it("waiting vote links don't hide the Choose button; a waiting choice of a plan gone just says Choosing", async () => {
+  const b = await browser({ now: () => NOW });
+  const f = await poll(b);
+  await b.request(`${f.thread}/links`, post({ csrf: (await home(b)).csrf }));
+  const page = await f.page();
+  expect(page).toContain("<strong>Emailing vote links</strong> — in about a minute");
+  expect(page).toContain(">Choose A ·");
+  await b.storage.batch([
+    {
+      sql: `INSERT INTO held_action (id, actor_id, thread_id, kind, args, due_at, created_at)
+            VALUES ('gone-1', ?, ?, 'choose', '{"planId":"nope"}', ?, ?)`,
+      params: [f.mara, f.threadId, "2101-12-01T09:01:00.000Z", NOW],
+    },
+  ]);
+  const gone = await f.page();
+  expect(gone).toContain("<strong>Choosing</strong> — in about a minute");
+  expect(gone).not.toContain(">Choose A ·"); // one choice waiting is enough
+});
+
+it("the runner refuses what it can't act on; one told is a person; a failed send is counted", async () => {
+  const b = await browser({
+    now: () => NOW,
+    mailFails: (m) =>
+      m.subject.startsWith("Agreed:") && m.to === "cat@example.org" ? new Error("bounced") : null,
+  });
+  const f = await poll(b);
+  for (const [threadId, args] of [
+    [null, { planId: f.planIds[0] }],
+    [f.threadId, {}],
+    [f.threadId, { planId: 7 }],
+  ] as const)
+    await b.storage.batch([
+      {
+        sql: `INSERT INTO held_action (id, actor_id, thread_id, kind, args, due_at, created_at)
+              VALUES (?, ?, ?, 'choose', ?, ?, ?)`,
+        params: [
+          `bad-${JSON.stringify(args)}-${threadId}`,
+          f.mara,
+          threadId,
+          JSON.stringify(args),
+          NOW,
+          NOW,
+        ],
+      },
+    ]);
+  expect(await b.pass()).toBe(3);
+  const outcomes = await b.storage.query({
+    sql: "SELECT outcome FROM held_action WHERE id LIKE 'bad-%'",
+    params: [],
+  });
+  expect(new Set(outcomes.map((o) => o.outcome))).toEqual(
+    new Set(["You're no longer in this plan, so nothing was chosen."]),
+  );
+  expect(result(b)).toEqual([]);
+
+  // Lea opted out, Cat's send bounces: one person told, one counted as not.
+  await suppress(b.storage, "lea@example.org", { kind: "all" }, NOW);
+  await b.request(`${f.thread}/p/${f.planIds[0]}/accept`, post({ csrf: (await home(b)).csrf }));
+  await b.pass();
+  expect(await f.page()).toMatch(
+    /Chosen\. Emailed 1 person the result\. 1 opted out of email from here, so wasn(&#39;|')t told\. Couldn(&#39;|')t email 1\.</,
+  );
 });

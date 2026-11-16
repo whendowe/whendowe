@@ -1287,6 +1287,8 @@ const resultRowSchema = z.object({
 /** What became of one result email (rc46): for the chooser to read. */
 export interface ResultMailed {
   readonly sent: number;
+  /** Not mailed because they opted out (rc24): told apart, so "sent" is never a guess. */
+  readonly optedOut: number;
   readonly failed: number;
   readonly capped: MailCapReachedError | null;
 }
@@ -1305,7 +1307,8 @@ export async function sendResultMail(
   input: { readonly planId: string; readonly how: "chose" | "agreed" },
 ): Promise<ResultMailed> {
   const plan = (await listPlans(deps.storage, access)).find((p) => p.id === input.planId);
-  if (plan === undefined || plan.status !== "accepted") return { sent: 0, failed: 0, capped: null };
+  if (plan === undefined || plan.status !== "accepted")
+    return { sent: 0, optedOut: 0, failed: 0, capped: null };
   const rows = (
     await deps.storage.query({
       sql: `SELECT ep.person_id, p.email, p.signed_in_at, ep.visibility, e.id AS event_id, e.title,
@@ -1328,15 +1331,26 @@ export async function sendResultMail(
   const [only, ...more] = plan.events;
   const what = only !== undefined && more.length === 0 ? whenText(only) : `"${plan.name}"`;
   let sent = 0;
+  let optedOut = 0;
   let failed = 0;
   let capped: MailCapReachedError | null = null;
   for (const [personId, events] of byPerson) {
+    const [first] = events;
+    if (first === undefined) continue;
+    // The mail seam drops these too; asked here first, so what the chooser reads is true.
+    if (
+      await isSuppressed(deps.storage, first.email, {
+        senderId: access.personId,
+        groupId: access.thread.groupId,
+      })
+    ) {
+      optedOut += 1;
+      continue;
+    }
     if (capped !== null) {
       failed += 1;
       continue;
     }
-    const [first] = events;
-    if (first === undefined) continue;
     const lines = events.map((e) => {
       const when = whenText({
         allDay: e.all_day === 1,
@@ -1385,7 +1399,7 @@ export async function sendResultMail(
       failed += 1;
     }
   }
-  return { sent, failed, capped };
+  return { sent, optedOut, failed, capped };
 }
 
 /**
