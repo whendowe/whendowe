@@ -53,10 +53,11 @@ it("US-14: the D&D table finds a date and says who's coming — players never si
     body: new URLSearchParams(fields).toString(),
   });
   const lastLinkTo = (email: string, path: string): URL => {
-    const mail = [...sent].reverse().find((m) => m.to === email);
-    const match = new RegExp(`${BASE.replace(/\./g, "\\.")}${path}\\?t=\\S+`).exec(
-      mail?.text ?? "",
-    );
+    // The last mail to them that carries such a link: a result email (rc46) carries none.
+    const linkOf = (text: string) =>
+      new RegExp(`${BASE.replace(/\./g, "\\.")}${path}\\?t=\\S+`).exec(text);
+    const mail = [...sent].reverse().find((m) => m.to === email && linkOf(m.text) !== null);
+    const match = linkOf(mail?.text ?? "");
     if (match === null) throw new Error(`no ${path} link mailed to ${email}`);
     return new URL(match[0]);
   };
@@ -160,7 +161,12 @@ it("US-14: the D&D table finds a date and says who's coming — players never si
   );
 
   // --- The DM accepts Saturday ----------------------------------------------------------
+  // rc46: choosing emails everyone, so it waits a minute with Undo; then every player is told.
   expect((await dm(`${saturday}/accept`)).status).toBe(303);
+  expect(await dmGet(thread)).toMatch(/<strong>Choosing B · [^<]+<\/strong> — in about a minute/);
+  expect(await minuteLater()).toBe(1);
+  for (const email of players)
+    expect(sent.filter((m) => m.to === email && m.subject.startsWith("Agreed:"))).toHaveLength(1);
   const event = `/events/${/href="\/events\/([0-9a-f-]+)"/.exec(await dmGet(thread))?.[1] ?? "none"}`;
   expect(await dmGet(event)).toContain("2101-11-08 18:00 – 22:00 · Europe/Prague");
   // A late vote from a player's old link finds nothing left to vote on.

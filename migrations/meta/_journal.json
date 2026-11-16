@@ -288,6 +288,13 @@
       "when": 1794776252843,
       "tag": "0040_held_action",
       "breakpoints": true
+    },
+    {
+      "idx": 41,
+      "version": "6",
+      "when": 1794825349815,
+      "tag": "0041_held_action_kind_unchecked",
+      "breakpoints": true
     }
   ]
 }
