@@ -19,6 +19,7 @@ import {
 } from "../../plans/ask.js";
 import { MAX_OPTION_EVENTS, MAX_OPTIONS } from "../../plans/plan.js";
 import { addDays, dayLabel } from "../../plans/weeks.js";
+import { askDragAssets } from "../ask-drag.js";
 import { type Html, html } from "../layout.js";
 import { PLAN_STYLE } from "../plan-editor.js";
 import {
@@ -142,6 +143,42 @@ function tappedEvent(day: string, body: AskBody): AskBody["options"][number][num
   };
 }
 
+/** A real calendar day, not only its shape: a drag's value is checked like any other. */
+function isDate(s: string | undefined): s is string {
+  if (s === undefined || !DAY.test(s)) return false;
+  try {
+    Temporal.PlainDate.from(s, { overflow: "reject" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * One end of an event moved by a drag (rc47), or the event as it was when the move would put
+ * that end past the other: a drag never turns an event inside out.
+ */
+function movedEnd(
+  e: AskBody["options"][number][number],
+  which: string | undefined,
+  day: string,
+  hour: string | undefined,
+): AskBody["options"][number][number] {
+  if (hour === undefined) {
+    if (!e.allDay || !DAY.test(e.startLocal) || !DAY.test(e.endLocal)) return e;
+    if (which === "start") return day < e.endLocal ? { ...e, startLocal: day } : e;
+    return day >= e.startLocal ? { ...e, endLocal: addDays(day, 1) } : e;
+  }
+  if (e.allDay || e.startLocal === "" || e.endLocal === "") return e;
+  const at = Temporal.PlainDateTime.from(`${day}T${hour}:00`);
+  if (which === "start") {
+    const start = at.toString().slice(0, 16);
+    return start < e.endLocal ? { ...e, startLocal: start } : e;
+  }
+  const end = at.add({ hours: 1 }).toString().slice(0, 16);
+  return end > e.startLocal ? { ...e, endLocal: end } : e;
+}
+
 /** The one thing a button does after the save. */
 function act(body: AskBody, action: string): AskBody {
   // rc46: a free day tapped on the calendar becomes a new option, of the defaults.
@@ -164,6 +201,34 @@ function act(body: AskBody, action: string): AskBody {
           },
         ],
       ],
+    };
+  }
+  // rc47: a drag along a week's empty days, one all-day option over them.
+  const span = /^span:(\d{4}-\d{2}-\d{2}):(\d{4}-\d{2}-\d{2})$/.exec(action);
+  if (span !== null && isDate(span[1]) && isDate(span[2]) && body.options.length < MAX_OPTIONS) {
+    const [a, z] = [span[1] ?? "", span[2] ?? ""].sort();
+    return {
+      ...body,
+      options: [
+        ...body.options,
+        [{ allDay: true, startLocal: a ?? "", endLocal: addDays(z ?? "", 1) }],
+      ],
+    };
+  }
+  // rc47: an end dragged — an all-day event's first or last day, or a timed one's hour.
+  const move = /^move:(\d+):(\d+):(start|end):(\d{4}-\d{2}-\d{2})(?:T([01]\d|2[0-3]):00)?$/.exec(
+    action,
+  );
+  if (move !== null && isDate(move[4])) {
+    const [i, j] = [Number(move[1]), Number(move[2])];
+    const which = move[3];
+    const day = move[4] ?? "";
+    const hour = move[5];
+    return {
+      ...body,
+      options: body.options.map((o, k) =>
+        k !== i ? o : o.map((e, m) => (m === j ? movedEnd(e, which, day, hour) : e)),
+      ),
     };
   }
   const remove = /^remove:(\d+)$/.exec(action);
@@ -261,14 +326,19 @@ function daysView(body: AskBody, month: string, today: string): Html {
   const last = first.add({ months: 1 }).subtract({ days: 1 });
   const end = last.add({ days: 7 - last.dayOfWeek });
   const onDay = new Map<string, number[]>();
+  // rc47: an all-day event's first and last day carry a grip on its letter, for dragging.
+  const grips = new Map<string, Grip>();
   body.options.forEach((events, i) => {
-    for (const e of events) {
+    events.forEach((e, j) => {
       const a = e.startLocal.slice(0, 10);
-      if (!DAY.test(a)) continue;
+      if (!DAY.test(a)) return;
       const z = e.allDay && DAY.test(e.endLocal) ? addDays(e.endLocal, -1) : a;
       for (let d = a; d <= z; d = addDays(d, 1))
         onDay.set(d, [...new Set([...(onDay.get(d) ?? []), i])]);
-    }
+      if (!e.allDay || z < a) return;
+      if (!grips.has(`${a}|${i}`)) grips.set(`${a}|${i}`, { j, ends: a === z ? "both" : "start" });
+      if (a !== z && !grips.has(`${z}|${i}`)) grips.set(`${z}|${i}`, { j, ends: "end" });
+    });
   });
   const weeks: Html[] = [];
   for (let w = start; Temporal.PlainDate.compare(w, end) <= 0; w = w.add({ days: 7 })) {
@@ -281,13 +351,13 @@ function daysView(body: AskBody, month: string, today: string): Html {
       const label = `${d.day}`;
       cells.push(
         here !== undefined
-          ? html`<span class="day has${out}"><b>${label}</b>${here.map(
-              (i) =>
-                html`<a class="letter" href="#o${i}" style="background:var(--o${i % 8})" aria-label="Option ${LETTERS[i] ?? ""}">${LETTERS[i] ?? ""}</a>`,
-            )}</span>`
+          ? html`<span class="day has${out}" data-day="${key}"><b>${label}</b>${here.map((i) => {
+              const g = grips.get(`${key}|${i}`);
+              return html`<a class="letter" href="#o${i}" style="background:var(--o${i % 8})" aria-label="Option ${LETTERS[i] ?? ""}"${g === undefined ? "" : html` data-grip="${String(i)}:${String(g.j)}" data-ends="${g.ends}" draggable="false"`}>${LETTERS[i] ?? ""}</a>`;
+            })}</span>`
           : body.options.length < MAX_OPTIONS
-            ? html`<button class="day${out}${key === today ? " today" : ""}" type="submit" name="act" value="add:${key}" aria-label="Add ${key}">${label}</button>`
-            : html`<span class="day${out}">${label}</span>`,
+            ? html`<button class="day${out}${key === today ? " today" : ""}" type="submit" name="act" value="add:${key}" aria-label="Add ${key}" data-day="${key}">${label}</button>`
+            : html`<span class="day${out}" data-day="${key}">${label}</span>`,
       );
     }
     weeks.push(html`<div class="wkrow">${cells}</div>`);
@@ -312,6 +382,12 @@ function newOnes(body: AskBody): Html {
     (h) =>
       html`<option value="${String(h)}"${(d?.hours ?? 2) === h ? html` selected` : ""}>${String(h)} h</option>`,
   )}</select></label> <span class="muted small">(no time: a day you tap is all day)</span></p>`;
+}
+
+/** Which end of an event a grip holds (rc47): both, for a one-day or one-hour event. */
+interface Grip {
+  readonly j: number;
+  readonly ends: "start" | "end" | "both";
 }
 
 /** Hours shown in the Hours view: a day's waking hours. Earlier or later: the option's fields. */
@@ -362,17 +438,48 @@ function hoursView(body: AskBody, from: string, today: string): Html {
         html`<a class="letter" href="#o${i}" style="background:var(--o${i % 8})" aria-label="Option ${LETTERS[i] ?? ""}">${LETTERS[i] ?? ""}</a>`,
     );
   const full = body.options.length >= MAX_OPTIONS;
+  // rc47: a timed event's first and last hour on screen carry a grip, for dragging that end.
+  const grips = new Map<string, { readonly start: Html[]; readonly end: Html[] }>();
+  const grip = (at: string, i: number, j: number, ends: Grip["ends"]) => {
+    const g = grips.get(at) ?? { start: [], end: [] };
+    (ends === "end" ? g.end : g.start).push(
+      html`<span class="grip" data-grip="${String(i)}:${String(j)}" data-ends="${ends}" aria-hidden="true"></span>`,
+    );
+    grips.set(at, g);
+  };
+  body.options.forEach((events, i) => {
+    events.forEach((e, j) => {
+      // An end typed before its start, or at it, has no ends to drag yet.
+      if (e.allDay || e.endLocal <= e.startLocal) return;
+      const first = `${e.startLocal.slice(0, 13)}:00`;
+      let last: string;
+      try {
+        // As typed, the end may not be a real time yet: then it shows no grips.
+        const lastMinute = Temporal.PlainDateTime.from(e.endLocal).subtract({ minutes: 1 });
+        last = `${lastMinute.toString().slice(0, 13)}:00`;
+      } catch {
+        return;
+      }
+      if (first === last) grip(first, i, j, "both");
+      else {
+        grip(first, i, j, "start");
+        grip(last, i, j, "end");
+      }
+    });
+  });
   const rows: Html[] = [];
   for (let h = FIRST_HOUR; h <= LAST_HOUR; h++) {
     const hh = String(h).padStart(2, "0");
     rows.push(
       html`<div class="hrow"><span class="hr">${hh}</span>${days.map((day) => {
         const here = inHour(body, day, h);
+        const at = `${day}T${hh}:00`;
+        const g = grips.get(at);
         return here.length > 0
-          ? html`<span class="hour has">${letters(here)}</span>`
+          ? html`<span class="hour has" data-at="${at}">${g?.start ?? ""}${letters(here)}${g?.end ?? ""}</span>`
           : full
-            ? html`<span class="hour"></span>`
-            : html`<button class="hour" type="submit" name="act" value="addh:${day}T${hh}:00" aria-label="Add ${day} ${hh}:00"></button>`;
+            ? html`<span class="hour" data-at="${at}"></span>`
+            : html`<button class="hour" type="submit" name="act" value="addh:${at}" aria-label="Add ${day} ${hh}:00" data-at="${at}"></button>`;
       })}</div>`,
     );
   }
@@ -405,8 +512,11 @@ function addedBar(b: AskBody, added: number | null): Html | "" {
   if (added === null) return "";
   const e = b.options[added]?.[0];
   if (e === undefined) return "";
+  const last = e.allDay && DAY.test(e.endLocal) ? addDays(e.endLocal, -1) : e.startLocal;
   const when = e.allDay
-    ? dayLabel(e.startLocal.slice(0, 10))
+    ? last > e.startLocal
+      ? `${dayLabel(e.startLocal)} – ${dayLabel(last)}`
+      : dayLabel(e.startLocal.slice(0, 10))
     : `${dayLabel(e.startLocal.slice(0, 10))}, ${e.startLocal.slice(11, 16)}`;
   return html`<p class="undo">Added ${when} as ${LETTERS[added] ?? ""} <button class="link" type="submit" name="act" value="remove:${String(added)}">Undo</button></p>`;
 }
@@ -435,7 +545,7 @@ ${events.map((e, j) => eventRow(i, j, rowOf(e), events.length > 1 || b.options.l
 ${events.length < MAX_OPTION_EVENTS ? html`<p><button type="submit" name="act" value="and:${i}">+ and</button> <span class="muted small">another event, in this option</span></p>` : ""}
 </fieldset>`,
   );
-  return html`${PLAN_STYLE}<div class="pl ask">
+  return html`${PLAN_STYLE}<div class="pl ask" data-ask-drag>
 <p class="askstatus"><strong>Draft</strong> · step 1 of 4 · nobody has been told${input.saved ? html` · <span class="muted">Saved</span>` : ""}</p>
 ${input.problem === null ? "" : html`<p class="error">${input.problem}</p>`}
 <form method="post" action="${ASK_PATH}/${draft.id}">
@@ -444,6 +554,7 @@ ${input.problem === null ? "" : html`<p class="error">${input.problem}</p>`}
 <input type="hidden" name="v" value="${input.view}" />
 <input type="hidden" name="d" value="${input.from}" />
 <button type="submit" name="act" value="save" hidden></button>
+<button type="submit" name="act" value="save" hidden data-drag-act></button>
 <p><label>What<br /><input name="title" maxlength="200" value="${b.title}" class="wide" required /></label></p>
 <p><label>Where <span class="muted">(optional)</span><br /><input name="location" maxlength="200" value="${b.location ?? ""}" class="wide" /></label></p>
 <div class="row spread"><h2>When could it be</h2>${viewSwitch(input.view)}</div>
@@ -465,7 +576,7 @@ ${readBack(draft, input.asked)}
   }</button><button type="submit" name="act" value="save">Save</button></div>
 <p class="muted small">Asking emails them a minute later; until then you can undo it.</p>
 <p class="discard"><button class="link" type="submit" name="act" value="discard">Throw this question away</button></p>
-</form></div>`;
+</form></div>${askDragAssets()}`;
 }
 
 /** Unsent questions on home (rc46): found again, never lost. */
@@ -568,7 +679,7 @@ export function registerAskRoutes(app: Hono<AppEnv>, deps: AuthDeps): void {
       if (view === "hours") q.set("v", "hours");
       const month = /^month:(\d{4}-\d{2})$/.exec(action)?.[1] ?? str(form, "m");
       const from = /^from:(\d{4}-\d{2}-\d{2})$/.exec(action)?.[1] ?? str(form, "d");
-      const tapped = /^addh?:(\d{4}-\d{2})/.exec(action)?.[1];
+      const tapped = /^(?:addh?|span):(\d{4}-\d{2})/.exec(action)?.[1];
       const grew = body.options.length > draft.body.options.length;
       if (tapped !== undefined && grew) {
         q.set("m", tapped);

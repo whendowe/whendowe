@@ -403,3 +403,150 @@ it("Hours moves four days at a time, keeps its place across saves, and shows all
   });
   expect(back.headers.get("location")).toBe(`${f.path}?saved=1&m=2101-12`);
 });
+
+// --- dragging (rc47): a finished drag is the same POST a button makes --------------------
+
+it("a drag along a week's empty days adds one all-day option over them, with Undo naming them", async () => {
+  const b = await browser({ now: () => NOW });
+  const f = await start(b);
+  const page = await (await b.request(f.path)).text();
+  expect(page).toContain('<div class="pl ask" data-ask-drag>');
+  expect(page).toContain('<button type="submit" name="act" value="save" hidden data-drag-act>');
+  expect(page).toContain("globalThis.WhenDoWeAskDrag");
+  // Dragged right to left, it is the same span.
+  const res = await f.send({ ...PIZZA, m: "2101-12", act: "span:2101-12-16:2101-12-14" });
+  expect(res.headers.get("location")).toBe(`${f.path}?saved=1&m=2101-12&added=1`);
+  const after = await (await b.request(res.headers.get("location") ?? "")).text();
+  expect(after).toContain("Added Wed 14 Dec – Fri 16 Dec as B");
+  expect((await findAskDraft(b.storage, { id: f.id, authorId: f.mara }))?.body.options[1]).toEqual([
+    { allDay: true, startLocal: "2101-12-14", endLocal: "2101-12-17" },
+  ]);
+  // Its first and last days carry a grip on B's letter; the day between doesn't.
+  expect(after).toContain(
+    'aria-label="Option B" data-grip="1:0" data-ends="start" draggable="false"',
+  );
+  expect(after).toContain(
+    'aria-label="Option B" data-grip="1:0" data-ends="end" draggable="false"',
+  );
+  expect(after.match(/data-grip="1:0"/g)).toHaveLength(2);
+  // A day that isn't one adds nothing.
+  await f.send({
+    ...PIZZA,
+    o1e0day: "2101-12-14",
+    o1e0last: "2101-12-16",
+    act: "span:2101-02-28:2101-02-30",
+  });
+  expect(
+    (await findAskDraft(b.storage, { id: f.id, authorId: f.mara }))?.body.options,
+  ).toHaveLength(2);
+});
+
+it("dragging an all-day event's first or last day moves that end, never past the other", async () => {
+  const b = await browser({ now: () => NOW });
+  const f = await start(b);
+  const allDay = { ...PIZZA, o0e0from: "", o0e0day: "2101-12-10", o0e0last: "2101-12-12" };
+  const opts = async () =>
+    (await findAskDraft(b.storage, { id: f.id, authorId: f.mara }))?.body.options[0];
+  await f.send({ ...allDay, act: "save" });
+  const one = await (await b.request(f.path)).text();
+  expect(one).toContain('data-grip="0:0" data-ends="start"');
+  await f.send({ ...allDay, act: "move:0:0:end:2101-12-14" });
+  expect(await opts()).toEqual([
+    { allDay: true, startLocal: "2101-12-10", endLocal: "2101-12-15" },
+  ]);
+  const moved = { ...allDay, o0e0last: "2101-12-14" };
+  await f.send({ ...moved, act: "move:0:0:start:2101-12-08" });
+  expect(await opts()).toEqual([
+    { allDay: true, startLocal: "2101-12-08", endLocal: "2101-12-15" },
+  ]);
+  const both = { ...moved, o0e0day: "2101-12-08" };
+  // Past the other end: nothing changes. The last day may meet the first.
+  await f.send({ ...both, act: "move:0:0:start:2101-12-15" });
+  await f.send({ ...both, act: "move:0:0:end:2101-12-07" });
+  expect(await opts()).toEqual([
+    { allDay: true, startLocal: "2101-12-08", endLocal: "2101-12-15" },
+  ]);
+  await f.send({ ...both, act: "move:0:0:end:2101-12-08" });
+  expect(await opts()).toEqual([
+    { allDay: true, startLocal: "2101-12-08", endLocal: "2101-12-09" },
+  ]);
+  // A one-day event has one grip that holds both ends.
+  expect(await (await b.request(f.path)).text()).toContain('data-grip="0:0" data-ends="both"');
+  // An hour is not a day's move: an all-day event ignores it.
+  await f.send({ ...both, o0e0last: "", act: "move:0:0:end:2101-12-10T19:00" });
+  expect(await opts()).toEqual([
+    { allDay: true, startLocal: "2101-12-08", endLocal: "2101-12-09" },
+  ]);
+});
+
+it("in Hours a timed event has a grip at each end; dragging one moves it by whole hours", async () => {
+  const b = await browser({ now: () => NOW });
+  const f = await start(b);
+  const opts = async () =>
+    (await findAskDraft(b.storage, { id: f.id, authorId: f.mara }))?.body.options[0];
+  const hours = { ...PIZZA, v: "hours", d: "2101-12-17" };
+  await f.send({ ...hours, act: "save" });
+  const page = await (await b.request(`${f.path}?v=hours&d=2101-12-17`)).text();
+  // 19:00–21:00: the start grip in the 19 cell, the end grip in the 20 cell.
+  expect(page).toContain(
+    '<span class="hour has" data-at="2101-12-17T19:00"><span class="grip" data-grip="0:0" data-ends="start" aria-hidden="true"></span>',
+  );
+  expect(page).toMatch(
+    /data-at="2101-12-17T20:00"><a [^>]*>A<\/a><span class="grip" data-grip="0:0" data-ends="end"/,
+  );
+  expect(page).toContain('aria-label="Add 2101-12-17 12:00" data-at="2101-12-17T12:00"');
+  const res = await f.send({ ...hours, act: "move:0:0:start:2101-12-17T17:00" });
+  expect(res.headers.get("location")).toBe(`${f.path}?saved=1&v=hours&d=2101-12-17`);
+  expect(await opts()).toEqual([
+    { allDay: false, startLocal: "2101-12-17T17:00", endLocal: "2101-12-17T21:00" },
+  ]);
+  // The end lands at the end of the hour it was dropped on.
+  await f.send({ ...hours, o0e0from: "17:00", act: "move:0:0:end:2101-12-17T22:00" });
+  expect(await opts()).toEqual([
+    { allDay: false, startLocal: "2101-12-17T17:00", endLocal: "2101-12-17T23:00" },
+  ]);
+  const now = { ...hours, o0e0from: "17:00", o0e0to: "23:00" };
+  // An hour in the middle of an event holds only its letter: grips are at its ends.
+  const middle = await (await b.request(`${f.path}?v=hours&d=2101-12-17`)).text();
+  expect(middle).toMatch(
+    /<span class="hour has" data-at="2101-12-17T18:00"><a class="letter" href="#o0"[^>]*>A<\/a><\/span>/,
+  );
+  // Never inside out; an hour that isn't one, or an event not there, changes nothing.
+  for (const act of [
+    "move:0:0:start:2101-12-17T23:00",
+    "move:0:0:end:2101-12-17T16:00",
+    "move:0:0:end:2101-12-17T24:00",
+    "move:0:3:end:2101-12-17T20:00",
+    "move:0:0:start:2101-12-17",
+  ])
+    await f.send({ ...now, act });
+  expect(await opts()).toEqual([
+    { allDay: false, startLocal: "2101-12-17T17:00", endLocal: "2101-12-17T23:00" },
+  ]);
+  // An hour-long event has one grip, both ends; a 23:00 end grip moves to midnight.
+  await f.send({
+    ...now,
+    o0e0from: "20:00",
+    o0e0to: "21:00",
+    act: "move:0:0:end:2101-12-17T23:00",
+  });
+  expect(await opts()).toEqual([
+    { allDay: false, startLocal: "2101-12-17T20:00", endLocal: "2101-12-18T00:00" },
+  ]);
+  await f.send({ ...now, o0e0from: "20:00", o0e0to: "21:00", act: "save" });
+  expect(await (await b.request(`${f.path}?v=hours&d=2101-12-17`)).text()).toContain(
+    'data-grip="0:0" data-ends="both"',
+  );
+  // An end that isn't a real time yet, or is before or at the start, as typed: no grips.
+  for (const to of ["25:00", "19:00", "20:00"]) {
+    await f.send({ ...now, o0e0from: "20:00", o0e0to: to, act: "save" });
+    expect(await (await b.request(`${f.path}?v=hours&d=2101-12-17`)).text()).not.toContain(
+      'class="grip"',
+    );
+  }
+  // Ten options: no free hour adds one, and every hour still names itself for a grip's drop.
+  for (let i = 0; i < 9; i++) await f.send({ ...now, act: "option" });
+  const full = await (await b.request(`${f.path}?v=hours&d=2101-12-17`)).text();
+  expect(full).not.toContain('value="addh:');
+  expect(full).toContain('<span class="hour" data-at="2101-12-17T12:00"></span>');
+});
