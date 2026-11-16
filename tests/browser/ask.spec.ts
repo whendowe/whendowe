@@ -27,6 +27,11 @@ test("a question being written: lettered options, or between, and inside, and wh
     "Asking emails 2 people one question: does A or B suit for “Session 17”? One of them will happen.",
   );
   await expect(page.getByRole("button", { name: "Ask 2 people by email" })).toBeVisible();
+  // The Days view: November 2026 in whole weeks; A's days carry its letter, B's too.
+  await expect(page.locator(".days .nav strong")).toHaveText("November 2026");
+  await expect(page.locator('.days a.letter[href="#o0"]')).toHaveCount(3); // the 5th, 7th, 8th
+  await expect(page.locator('.days a.letter[href="#o1"]')).toHaveCount(1);
+  await expect(page.getByRole("button", { name: "Add 2026-11-20" })).toBeVisible();
   await expect(page).toHaveScreenshot("ask.png", { fullPage: true });
   expect(errors).toEqual([]);
 });
