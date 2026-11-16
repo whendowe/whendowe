@@ -183,6 +183,7 @@ whendowe/
     plans/                     # Plans (§10 rc19): several events proposed and accepted as one
       thread.ts                # threads and their members; the access gate (findThreadForMember)
       plan.ts                  # drafts, sending, votes, deciding, accept (writes canonical events), withdraw
+      ask.ts                   # (rc46) an unsent Ask when question, saved as you go; asking turns it into a thread
       share.ts                 # shared links, guests and claim links (§10 rc25)
       vote-link.ts             # (rc26) voting by emailed link without an account: one per person per thread, only the hash stored
       diff.ts                  # pure: match plan events by sid -> same / changed / only in one
@@ -235,6 +236,7 @@ whendowe/
         events.ts              # your events (home); create/view/edit; the people on an event; polls; history
         respond.ts             # token-link responses: vote / attend / acknowledge with no account (MVP-2)
         plans.ts               # threads, plans, drafts and their editor forms (rc19)
+        ask.ts                 # (rc46) the Ask when page: Days view, lettered options, the sheet, Undo
         share.ts               # the shared-link page: vote signed in, or claim a name; Open Graph tags (rc25)
         account.ts             # your handle, export, delete your account; the opt-out page for email recipients (rc21)
         operator.ts            # the operator page (rc43): who has which capability; grant and revoke by address
@@ -2175,10 +2177,31 @@ Two people who just agreed are emailed too: one more layer of paper trail.
   longer three dropdowns under every address.
 
 **What the model needs.**
-- **A draft question with several options.** Today a person has one draft plan per thread
-  (`plan_one_draft`), and a poll has no draft step: the form is the draft. Saving as you go
-  needs a thread with draft options, sent together. The first slice settles the shape, as an
-  additive migration first (§16).
+- **A draft question with several options** (settled for A2, 2026-11-16). Today a person has
+  one draft plan per thread (`plan_one_draft`), and a poll has no draft step. An unsent
+  question is therefore kept apart from plans, in a table of its own, so nothing about how
+  plans work changes and the migration only adds:
+```sql
+CREATE TABLE ask_draft (                    -- rc46: an Ask when question nobody has been asked yet
+    id          text PRIMARY KEY,           -- UUIDv7
+    author_id   text NOT NULL REFERENCES person(id),
+    group_id    text REFERENCES person_group(id),  -- the group it is asked of, if any (rc27)
+    body        text NOT NULL,              -- JSON: title, place, note, tzid, the options (each
+                                            -- with its events, in order, lettered by position),
+                                            -- the people named by address; zod-checked on read
+    created_at  text NOT NULL,
+    updated_at  text NOT NULL               -- every save; what "untouched" counts from
+);
+CREATE INDEX ask_draft_author ON ask_draft (author_id, updated_at);
+```
+  - Each change on the page is one save of the whole body, and says "Saved".
+  - **Asking** turns it into a thread and its options into plans on the table in one question,
+    as a poll is made today (§10 *Polls are one-event plans*), then deletes the draft — in one
+    batch, so a question is never both asked and still a draft.
+  - **Unsent drafts are listed on home**, so a forgotten one is found again.
+  - **A draft untouched for 90 days is removed** by the purge pass (owner to confirm the
+    period). Deleting an account removes its drafts; the export includes them.
+  - A draft is only ever its author's: no one else can see it, by any link.
 - **Held actions** need a table of their own. It is the first slice (A0), with its migration
   first:
 ```sql
