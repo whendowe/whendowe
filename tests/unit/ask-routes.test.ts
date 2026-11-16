@@ -173,3 +173,66 @@ it("home lists what isn't asked yet; only its author opens it; CSRF on every but
   expect(gone.headers.get("location")).toBe("/");
   expect((await b.request(f.path)).status).toBe(404);
 });
+
+it("the read-back counts a group's people who see what it plans, not you, and names three options", async () => {
+  const b = await browser({ now: () => NOW });
+  await addAccount(b, "mara@example.org");
+  const csrf = async () => (await home(b)).csrf;
+  const g = (await b.request("/groups", post({ csrf: await csrf(), name: "Table" }))).headers.get(
+    "location",
+  );
+  for (const [email, visibility] of [
+    ["full@example.org", "FULL"],
+    ["details@example.org", "DETAILS"],
+    ["busy@example.org", "BUSY"],
+  ] as const)
+    await b.request(
+      `${g}/invites`,
+      post({ csrf: await csrf(), email, editTier: "view", visibility }),
+    );
+  // Invited isn't joined: accept them as the group's members.
+  const { acceptInvite } = await import("../../src/people/invite.js");
+  const tokens = b.sent.flatMap((m) => [...m.text.matchAll(/\/invite\?t=([A-Za-z0-9_-]+)/g)]);
+  for (const t of tokens) await acceptInvite(b.storage, t[1] ?? "", NOW);
+  const groupId = g?.split("/").at(-1) ?? "";
+  const res = await b.request(ASK_PATH, post({ csrf: await csrf(), group: groupId }));
+  const path = res.headers.get("location") ?? "";
+  const send = async (fields: Record<string, string>) =>
+    b.request(path, post({ csrf: await csrf(), ...fields }));
+  await send({ ...PIZZA, emails: "", act: "option" });
+  await send({ ...PIZZA, emails: "", act: "option" });
+  const page = await (await b.request(path)).text();
+  // FULL and DETAILS see what the group plans; BUSY doesn't; Mara isn't asked herself.
+  expect(page).toContain("Asking emails 2 people one question: does <strong>A, B or C</strong>");
+  expect(page).toContain(">Ask 2 people by email</button>");
+  // Someone else's group can't start a question.
+  await addAccount(b, "lea@example.org");
+  expect((await b.request(ASK_PATH, post({ csrf: await csrf(), group: groupId }))).status).toBe(
+    404,
+  );
+});
+
+it("one person; no times; a time with no end kept as typed; ten options and no more", async () => {
+  const b = await browser({ now: () => NOW });
+  const f = await start(b);
+  await f.send({ ...PIZZA, emails: "lea@example.org", o0e0to: "", act: "save" });
+  const one = await (await b.request(f.path)).text();
+  expect(one).toContain("Asking emails 1 person one question");
+  expect(one).toContain(">Ask 1 person by email</button>");
+  expect(one).toContain('name="o0e0to" value=""');
+  const draft = await findAskDraft(b.storage, { id: f.id, authorId: f.mara });
+  expect(draft?.body.options).toEqual([
+    [{ allDay: false, startLocal: "2101-12-17T19:00", endLocal: "" }],
+  ]);
+  await f.send({ ...PIZZA, act: "drop:0:0" });
+  const none = await (await b.request(f.path)).text();
+  expect(none).toContain('<p class="muted">No times yet.</p>');
+  expect(none).toContain("does nothing yet suit for “Pizza”? </p>");
+  for (let i = 0; i < 11; i++) await f.send({ ...PIZZA, act: "option" });
+  const ten = await (await b.request(f.path)).text();
+  expect(ten).toContain('<span class="letter">J</span>');
+  expect(ten).not.toContain('value="option"');
+  expect(
+    (await findAskDraft(b.storage, { id: f.id, authorId: f.mara }))?.body.options,
+  ).toHaveLength(10);
+});
