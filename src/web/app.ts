@@ -10,6 +10,7 @@ import { suppressingMailPort } from "../privacy/suppression.js";
 import { securityHeaders } from "./csp.js";
 import { ACCOUNT_PATH, html } from "./layout.js";
 import { registerAccountRoutes } from "./routes/account.js";
+import { askDraftsSection, registerAskRoutes } from "./routes/ask.js";
 import { type AuthDeps, registerAuthRoutes, SIGN_IN_PATH } from "./routes/auth.js";
 import { EVENTS_PATH, POLLS_PATH, registerEventRoutes, yourEvents } from "./routes/events.js";
 import { registerFeedRoutes } from "./routes/feeds.js";
@@ -155,7 +156,7 @@ export function createApp(options: AppOptions = {}): Hono<AppEnv> {
 <p>One canonical event, projected into many calendars — with attribution.</p>
 <p class="muted">Milestone: MVP-1 — People</p>
 ${connect}`
-          : html`${await nameNudge(auth, signedIn.personId)}${await yourEvents(auth.storage, signedIn.personId, auth.now())}
+          : html`${await nameNudge(auth, signedIn.personId)}${await askDraftsSection(auth, signedIn)}${await yourEvents(auth.storage, signedIn.personId, auth.now())}
 <p><a href="${EVENTS_PATH}/new">+ New event</a> · <a href="${POLLS_PATH}/new">+ Find a time (poll)</a> · <a href="${PLANS_PATH}/new">+ Start planning</a></p>
 <p><a href="${PLANS_PATH}">Your plans</a> · <a href="${GROUPS_PATH}">Your groups</a></p>
 ${connect}`,
@@ -171,6 +172,7 @@ ${connect}`,
     registerGroupRoutes(app, auth);
     registerEventRoutes(app, auth);
     registerPlanRoutes(app, auth);
+    registerAskRoutes(app, auth);
     registerRespondRoutes(app, auth);
     registerShareRoutes(app, auth);
     registerFeedRoutes(app, {
