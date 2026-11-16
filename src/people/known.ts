@@ -86,22 +86,21 @@ export async function listKnownPeople(storage: StoragePort, me: string): Promise
       a.kind.localeCompare(b.kind) ||
       a.place_id.localeCompare(b.place_id),
   );
-  const byPerson = new Map<string, { shown: Shown; places: Place[]; at: string }>();
+  // Rows come newest first, so a person's first row is the place you most recently shared;
+  // each place holds a person once (its primary key), so no place repeats.
+  const byPerson = new Map<string, KnownPerson & { places: Place[] }>();
   for (const r of rows) {
     const place: Place = { kind: r.kind, id: r.place_id, name: r.place_name };
     const known = byPerson.get(r.person_id);
     if (known === undefined)
       byPerson.set(r.person_id, {
+        personId: r.person_id,
         shown: shownAs(r.person_id, r, r.place_id),
         places: [place],
-        at: r.at,
       });
-    else if (!known.places.some((p) => p.kind === place.kind && p.id === place.id))
-      known.places.push(place);
+    else known.places.push(place);
   }
-  return [...byPerson.entries()]
-    .sort(([a, x], [b, y]) => y.at.localeCompare(x.at) || a.localeCompare(b))
-    .map(([personId, k]) => ({ personId, shown: k.shown, places: k.places }));
+  return [...byPerson.values()];
 }
 
 /**

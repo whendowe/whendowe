@@ -267,3 +267,81 @@ it("draws chips, the paste field and suggestions — names and places, an addres
   expect(nobody).not.toContain("People you know");
   expect(nobody).not.toContain('class="chips"');
 });
+
+it("odd buttons and values: nothing done beyond what the button says", () => {
+  const base = { known: KNOWN, max: 20, filter: null, exclude: new Set<string>() };
+  const eleven = Array.from({ length: 11 }, (_, i) => chip("email", `${i}@x.org`));
+  expect(applyPick({ ...base, chips: eleven, action: "rm:10" }).chips).toHaveLength(10);
+  expect(applyPick({ ...base, chips: eleven, action: "rm:10" }).chips.at(-1)?.value).toBe(
+    "9@x.org",
+  );
+  for (const action of ["rm:1x", "xrm:1", "xpick:p-lea", "pick:p-lea\nx", "xgroup:g-band"])
+    expect(applyPick({ ...base, chips: eleven, action }).chips).toEqual(eleven);
+  expect(applyPick({ ...base, chips: [], action: "group:g-band\nx" }).chips).toEqual([]);
+  expect(applyPick({ ...base, chips: eleven, action: "xfilter:g-band" }).filter).toBeNull();
+  expect(applyPick({ ...base, chips: eleven, action: "filter:g\nx" }).filter).toBeNull();
+  expect(applyPick({ ...base, chips: eleven, action: `filter:${"g".repeat(80)}` }).filter).toBe(
+    "g".repeat(64),
+  );
+  // An unknown pick keeps what was there.
+  expect(applyPick({ ...base, chips: eleven, action: "pick:p-stranger" }).chips).toEqual(eleven);
+  // A group's people, but never one already in some other way.
+  expect(
+    applyPick({ ...base, chips: [], action: "group:g-band", exclude: new Set(["p-dan"]) }).chips,
+  ).toEqual([chip("person", "p-cat", { from: "g-band" })]);
+  // An address and a person id that happen to read the same are two chips.
+  expect(uniqueChips([chip("email", "p"), chip("person", "p")])).toHaveLength(2);
+  // Long values are cut, never refused here.
+  const long = readChips({ pc_0: "p:x", pg_0: "g".repeat(80), email: `${"a".repeat(400)}@x` }, 5);
+  expect(long[0]?.from).toHaveLength(64);
+  expect(long[1]?.value).toHaveLength(320);
+  expect(carriedFilter({ pp_filter: "f".repeat(80) })).toBe("f".repeat(64));
+  expect(leversValid({ pt_100: "nonsense" }, false)).toBe(true);
+  expect(chipsRefusal([chip("email", "x y"), chip("person", "p-gone")], KNOWN)).toBe(
+    "Not an email address: x y. Someone chosen is no longer someone you share a group, event or thread with. Fix or remove the marked people first.",
+  );
+});
+
+const drawn = (v: Parameters<typeof peoplePicker>[0]) =>
+  String(peoplePicker(v)).replace(/<style>[\s\S]*?<\/style>/, "");
+
+it("draws a picker exactly: chips with their levers, the group, filters, and who's left", () => {
+  expect(
+    drawn({
+      chips: [
+        chip("email", "new@example.org", { editTier: "edit", visibility: "BUSY", ask: "ack" }),
+        chip("person", "p-dan", { from: "g-band" }),
+      ],
+      known: KNOWN,
+      levers: { terms: true, asking: true },
+      filter: "g-table",
+      lead: "Who is it for?",
+      group: { name: "Family", members: [] },
+      exclude: new Set(),
+    }),
+  ).toMatchInlineSnapshot(`
+    "<fieldset class="people"><legend>People</legend>
+    <p class="muted">Who is it for?</p>
+    <ul class="chips"><li class="chip"><details><summary>Family <span class="muted">· 0 people</span></summary><p class="small">Nobody else yet.</p></details></li><li class="chip"><details><summary>new@example.org</summary>
+    <p><select name="pt_0" aria-label="Can change it (new@example.org)"><option value="view" >can&#39;t change it</option><option value="propose" >can propose changes</option><option value="edit" selected>can edit it</option></select> <select name="pv_0" aria-label="Sees (new@example.org)"><option value="FULL" >sees everything</option><option value="DETAILS" >sees title, time and place</option><option value="BUSY" selected>sees only that the time is taken</option></select> <select name="pa_0" aria-label="Asked (new@example.org)"><option value="" >asked nothing</option><option value="accept" >must agree</option><option value="ack" selected>please acknowledge</option></select></p><p><button type="submit" name="pp" value="rm:0">Remove</button></p></details><input type="hidden" name="pc_0" value="e:new@example.org" /></li><li class="chip"><details><summary>dan <span class="muted">· from Band</span></summary>
+    <p><select name="pt_1" aria-label="Can change it (dan)"><option value="view" selected>can&#39;t change it</option><option value="propose" >can propose changes</option><option value="edit" >can edit it</option></select> <select name="pv_1" aria-label="Sees (dan)"><option value="FULL" selected>sees everything</option><option value="DETAILS" >sees title, time and place</option><option value="BUSY" >sees only that the time is taken</option></select> <select name="pa_1" aria-label="Asked (dan)"><option value="" selected>asked nothing</option><option value="accept" >must agree</option><option value="ack" >please acknowledge</option></select></p><p><button type="submit" name="pp" value="rm:1">Remove</button></p></details><input type="hidden" name="pc_1" value="p:p-dan" /><input type="hidden" name="pg_1" value="g-band" /></li></ul>
+    <p><label>Add by email <span class="muted">(several at once: spaces, commas or new lines between them)</span><br /><textarea name="email" rows="2" style="width:100%"></textarea></label></p>
+    <p class="row wrap"><select name="editTier" aria-label="Can change it (new)"><option value="view" selected>can&#39;t change it</option><option value="propose" >can propose changes</option><option value="edit" >can edit it</option></select> <select name="visibility" aria-label="Sees (new)"><option value="FULL" selected>sees everything</option><option value="DETAILS" >sees title, time and place</option><option value="BUSY" >sees only that the time is taken</option></select> <select name="newAsk" aria-label="Asked (new)"><option value="" selected>asked nothing</option><option value="accept" >must agree</option><option value="ack" >please acknowledge</option></select> <button type="submit" name="pp" value="add">Add</button></p>
+    <h3>People you know</h3>
+    <p class="row wrap"><button type="submit" name="pp" value="filter:" aria-pressed="false">Everyone</button> <button type="submit" name="pp" value="filter:g-table" aria-pressed="true">Table</button> <button type="submit" name="pp" value="filter:g-band" aria-pressed="false">Band</button><input type="hidden" name="pp_filter" value="g-table" /></p><p><button type="submit" name="pp" value="group:g-table">+ Everyone from Table (1)</button></p><ul class="known"><li><button type="submit" name="pp" value="pick:p-lea">+ lea</button> <span class="muted small">· Table, Pizza night</span></li></ul>
+    </fieldset>"
+  `);
+  // Narrowed to a group whose people are all in: nobody to add, and no button to add them.
+  const allIn = drawn({
+    chips: [chip("person", "p-cat"), chip("person", "p-dan")],
+    known: KNOWN,
+    levers: NO_LEVERS,
+    filter: "g-band",
+    lead: "",
+    group: { name: "Band", members: ["cat", "dan"] },
+    exclude: new Set(),
+  });
+  expect(allIn).toContain("Everyone here is already in.");
+  expect(allIn).not.toContain('value="group:');
+  expect(allIn).toContain('· 2 people</span></summary><p class="small">cat, dan</p>');
+});

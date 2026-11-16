@@ -62,10 +62,7 @@ function askOf(raw: string): AskFor | "" {
 
 /** Split pasted text into addresses: spaces, commas, semicolons or new lines between them. */
 export function splitAddresses(text: string): string[] {
-  return text
-    .split(/[\s,;]+/)
-    .map((e) => e.trim())
-    .filter((e) => e !== "");
+  return text.split(/[\s,;]+/).filter((e) => e !== "");
 }
 
 const keyOf = (c: Pick<Chip, "kind" | "value">) =>
@@ -323,7 +320,7 @@ ${
       : html`<li class="chip"><details><summary>${v.group.name} <span class="muted">· ${v.group.members.length} ${v.group.members.length === 1 ? "person" : "people"}</span></summary><p class="small">${v.group.members.length === 0 ? "Nobody else yet." : v.group.members.join(", ")}</p></details></li>`;
   const groups = new Map<string, string>();
   for (const k of v.known)
-    for (const p of k.places) if (p.kind === "group" && !groups.has(p.id)) groups.set(p.id, p.name);
+    for (const p of k.places) if (p.kind === "group") groups.set(p.id, p.name);
   const shown = v.known.filter(
     (k) =>
       !chosen.has(k.personId) &&
@@ -345,8 +342,8 @@ ${
           html` <button type="submit" name="pp" value="filter:${id}" aria-pressed="${String(v.filter === id)}">${name}</button>`,
       )}<input type="hidden" name="pp_filter" value="${v.filter ?? ""}" /></p>`
 }${
-  v.filter !== null && filterName !== null && shown.length > 0
-    ? html`<p><button type="submit" name="pp" value="group:${v.filter}">+ Everyone from ${filterName} (${shown.length})</button></p>`
+  filterName !== null && shown.length > 0
+    ? html`<p><button type="submit" name="pp" value="group:${v.filter ?? ""}">+ Everyone from ${filterName} (${shown.length})</button></p>`
     : ""
 }${
   shown.length === 0

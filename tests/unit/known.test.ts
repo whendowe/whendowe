@@ -100,6 +100,7 @@ it("counts events and threads, newest place first; never a hidden participant, a
 
   // Addresses only for the ids asked about, and only of people known.
   expect(await knownAddresses(b.storage, mara, [])).toEqual(new Map());
+  expect(await knownAddresses(b.storage, mara, [hid])).toEqual(new Map());
   expect(await knownAddresses(b.storage, mara, [lea, hid, gus, "nobody"])).toEqual(
     new Map([[lea, "lea@example.org"]]),
   );
