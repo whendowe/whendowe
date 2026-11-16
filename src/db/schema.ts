@@ -1050,3 +1050,21 @@ export const heldAction = sqliteTable(
     // SQLite can't change a CHECK in place (DESIGN §16's transient-table exception, 0041).
   ],
 );
+
+// rc46 (DESIGN §10 *Asking when*), slice A2: an Ask when question nobody has been asked yet,
+// saved as you go. Kept apart from plans so plan drafts are untouched; asking turns it into a
+// thread and deletes it in one batch. Untouched for 90 days, the purge pass removes it.
+export const askDraft = sqliteTable(
+  "ask_draft",
+  {
+    id: text("id").primaryKey(),
+    authorId: text("author_id")
+      .notNull()
+      .references(() => person.id, { onDelete: "cascade" }),
+    groupId: text("group_id").references(() => personGroup.id, { onDelete: "set null" }),
+    body: text("body").notNull(),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (t) => [index("ask_draft_author").on(t.authorId, t.updatedAt)],
+);

@@ -2,6 +2,7 @@
 import { z } from "zod";
 import type { SqlStatement, StoragePort } from "../db/port.js";
 import {
+  ASK_DRAFT_KEEP_DAYS,
   cutoff,
   DEFAULT_RETAIN_DAYS,
   isEventDue,
@@ -335,7 +336,8 @@ async function pastPlans(storage: StoragePort, now: string): Promise<string[]> {
  * the day keeps the per-address and per-group rate windows whole — mail_send rows from
  * before this month (the cap counts this month only), opt-out links once they expire
  * (they hold the address; rc24), notes on days past their
- * retention, held actions a day after they ran (rc46), and the erasure ledger after the
+ * retention, unsent questions untouched for 90 days and held actions a day after they ran
+ * (rc46), and the erasure ledger after the
  * backup window. One read says which have
  * anything to delete; only those statements run.
  */
@@ -384,6 +386,13 @@ async function expired(storage: StoragePort, now: string): Promise<number> {
       },
     },
     {
+      flag: "ask",
+      stmt: {
+        sql: "DELETE FROM ask_draft WHERE updated_at < ?",
+        params: [cutoff(now, ASK_DRAFT_KEEP_DAYS)],
+      },
+    },
+    {
       flag: "held",
       stmt: { sql: "DELETE FROM held_action WHERE taken_at < ?", params: [dayAgo] },
     },
@@ -403,6 +412,7 @@ async function expired(storage: StoragePort, now: string): Promise<number> {
             EXISTS (SELECT 1 FROM mail_send WHERE month < ?) AS mail,
             EXISTS (SELECT 1 FROM opt_out_token WHERE expires_at < ?) AS optout,
             EXISTS (SELECT 1 FROM plan_note WHERE last_day < date(?, ?)) AS note,
+            EXISTS (SELECT 1 FROM ask_draft WHERE updated_at < ?) AS ask,
             EXISTS (SELECT 1 FROM held_action WHERE taken_at < ?) AS held,
             EXISTS (SELECT 1 FROM erasure_ledger WHERE erased_at < ?) AS ledger`,
     params: [
@@ -417,6 +427,7 @@ async function expired(storage: StoragePort, now: string): Promise<number> {
       now,
       now,
       `-${DEFAULT_RETAIN_DAYS + 1} days`,
+      cutoff(now, ASK_DRAFT_KEEP_DAYS),
       dayAgo,
       ledgerBefore,
     ],

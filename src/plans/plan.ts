@@ -1139,6 +1139,124 @@ export async function suggestTime(
 
 // --- polls (rc26) ---------------------------------------------------------------------
 
+/** One event of an option asked about (rc46): its time; title and place are the question's. */
+export interface OptionEventInput {
+  readonly allDay: boolean;
+  readonly startLocal: string;
+  readonly endLocal: string;
+}
+
+/** Most options one question offers, as a poll's times (§10 rc26). */
+export const MAX_OPTIONS = 10;
+/** Most events in one option (rc46): "+ and" is for a few, the week-row editor for many. */
+export const MAX_OPTION_EVENTS = 20;
+
+/**
+ * A question as a thread (rc26, rc46): its people as members, one plan per option on the
+ * table in one question, the creator's yes to each — so with one other person, their yes
+ * agrees it. An option is one event or several ("+ and"), of either kind; options keep the
+ * order given, which their letters follow. Every event is validated as an event's own time
+ * is. The statements to write, for the caller's one batch.
+ */
+export async function questionThreadStatements(
+  storage: StoragePort,
+  input: {
+    readonly creatorId: string;
+    readonly group: GroupMembership | null;
+    readonly fields: Omit<EventFieldsInput, "startLocal" | "endLocal" | "allDay">;
+    readonly options: readonly (readonly OptionEventInput[])[];
+    readonly people?: readonly string[];
+    readonly verified?: boolean;
+    readonly now: string;
+    readonly newId?: () => string;
+  },
+): Promise<{
+  readonly threadId: string;
+  readonly planIds: readonly string[];
+  readonly statements: SqlStatement[];
+}> {
+  const newId = input.newId ?? (() => uuidv7());
+  if (input.options.length === 0) throw new PollInputError("Offer a time.");
+  if (input.options.length > MAX_OPTIONS)
+    throw new PollInputError(`Offer at most ${MAX_OPTIONS} options.`);
+  const options = input.options.map((events) => {
+    if (events.length === 0) throw new PollInputError("Each option needs a time.");
+    if (events.length > MAX_OPTION_EVENTS)
+      throw new PollInputError(`An option can have at most ${MAX_OPTION_EVENTS} events.`);
+    return events.map((e) => eventFieldsSchema.parse({ ...input.fields, ...e }));
+  });
+  const key = (o: readonly { startLocal: string; endLocal: string; allDay: boolean }[]) =>
+    o
+      .map((e) => `${e.allDay ? "d" : "t"}${e.startLocal}/${e.endLocal}`)
+      .sort()
+      .join(" ");
+  if (new Set(options.map(key)).size !== options.length)
+    throw new PollInputError("Two of the options are the same.");
+  const [first] = options[0] ?? [];
+  if (first === undefined) throw new PollInputError("Offer a time.");
+  const fromGroup =
+    input.group === null
+      ? []
+      : (await groupDefaults(storage, input.group))
+          .filter((d) => d.visibility === "FULL" || d.visibility === "DETAILS")
+          .map((d) => d.personId);
+  const { thread, statements } = threadStatements({
+    name: first.title,
+    tzid: first.tzid ?? "UTC",
+    creatorId: input.creatorId,
+    memberIds: [...fromGroup, ...(input.people ?? [])],
+    groupId: input.group?.group.id ?? null,
+    // Nobody else yet is a poll made to be shared (rc29).
+    alone: true,
+    verified: await verifiedAtBirth(
+      storage,
+      input.group?.group.id ?? null,
+      input.verified === true,
+    ),
+    now: input.now,
+    newId,
+  });
+  // Ids sorted, then given out in the options' order: letters follow sent_at then id, and
+  // every option is sent at the same moment.
+  const ids = options.map(() => newId()).sort();
+  const questionId = ids[0] ?? "";
+  options.forEach((events, i) => {
+    const planId = ids[i] ?? "";
+    statements.push({
+      sql: `INSERT INTO plan (id, thread_id, author_id, name, question_id, status, sent_at, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, 'on_table', ?, ?, ?)`,
+      params: [
+        planId,
+        thread.id,
+        input.creatorId,
+        first.title,
+        questionId,
+        input.now,
+        input.now,
+        input.now,
+      ],
+    });
+    for (const e of events)
+      statements.push(
+        insertEvent(planId, {
+          sid: newId(),
+          title: e.title,
+          allDay: e.allDay,
+          startLocal: e.startLocal,
+          endLocal: e.endLocal,
+          who: [],
+          location: e.location,
+          description: e.description,
+        }),
+      );
+    statements.push({
+      sql: "INSERT INTO plan_vote (plan_id, person_id, answer, responded_at, answered_via) VALUES (?, ?, 'yes', ?, 'session')",
+      params: [planId, input.creatorId, input.now],
+    });
+  });
+  return { threadId: thread.id, planIds: ids, statements };
+}
+
 /**
  * "Find a time" (DESIGN §10 rc26 *Polls are one-event plans*): a thread named for the
  * poll, one plan per offered time — all on the table in one question, sent by the creator
@@ -1163,74 +1281,14 @@ export async function createPollThread(
     readonly newId?: () => string;
   },
 ): Promise<{ readonly threadId: string; readonly planIds: readonly string[] }> {
-  const newId = input.newId ?? (() => uuidv7());
+  // A poll is a question of one-event options, all of one kind, in time order (rc26).
   const times = validateCandidates(input.fields, input.candidates);
-  const first = times[0];
-  if (first === undefined) throw new PollInputError("Offer at least one time.");
-  const f = eventFieldsSchema.parse({
-    ...input.fields,
-    startLocal: first.startLocal,
-    endLocal: first.endLocal,
-  });
-  const fromGroup =
-    input.group === null
-      ? []
-      : (await groupDefaults(storage, input.group))
-          .filter((d) => d.visibility === "FULL" || d.visibility === "DETAILS")
-          .map((d) => d.personId);
-  const { thread, statements } = threadStatements({
-    name: f.title,
-    tzid: f.tzid ?? "UTC",
-    creatorId: input.creatorId,
-    memberIds: [...fromGroup, ...(input.people ?? [])],
-    groupId: input.group?.group.id ?? null,
-    // Nobody else yet is a poll made to be shared (rc29).
-    alone: true,
-    verified: await verifiedAtBirth(
-      storage,
-      input.group?.group.id ?? null,
-      input.verified === true,
-    ),
-    now: input.now,
-    newId,
-  });
-  // Ids sorted, then given out in time order: letters follow sent_at then id, and every
-  // time is sent at the same moment.
-  const ids = times.map(() => newId()).sort();
-  const questionId = ids[0] ?? "";
-  times.forEach((t, i) => {
-    const planId = ids[i] ?? "";
-    statements.push(
-      {
-        sql: `INSERT INTO plan (id, thread_id, author_id, name, question_id, status, sent_at, created_at, updated_at)
-              VALUES (?, ?, ?, ?, ?, 'on_table', ?, ?, ?)`,
-        params: [
-          planId,
-          thread.id,
-          input.creatorId,
-          f.title,
-          questionId,
-          input.now,
-          input.now,
-          input.now,
-        ],
-      },
-      insertEvent(planId, {
-        sid: newId(),
-        title: f.title,
-        allDay: t.allDay,
-        startLocal: t.startLocal,
-        endLocal: t.endLocal,
-        who: [],
-        location: f.location,
-        description: f.description,
-      }),
-      {
-        sql: "INSERT INTO plan_vote (plan_id, person_id, answer, responded_at, answered_via) VALUES (?, ?, 'yes', ?, 'session')",
-        params: [planId, input.creatorId, input.now],
-      },
-    );
+  const { allDay, ...fields } = input.fields;
+  const { threadId, planIds, statements } = await questionThreadStatements(storage, {
+    ...input,
+    fields,
+    options: times.map((t) => [{ allDay, startLocal: t.startLocal, endLocal: t.endLocal }]),
   });
   await storage.batch(statements);
-  return { threadId: thread.id, planIds: ids };
+  return { threadId, planIds };
 }

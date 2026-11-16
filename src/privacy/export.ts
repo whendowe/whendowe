@@ -6,6 +6,7 @@ import { canSee } from "../events/participation.js";
 import { listFeeds, listKeptLinks } from "../feeds/feed.js";
 import { sentThisMonth } from "../mail/capped.js";
 import { visibilitySchema } from "../people/invite.js";
+import { listAskDrafts } from "../plans/ask.js";
 
 // "Download your data" (DESIGN §10 rc21, GDPR Art. 15 and 20): one JSON document of the
 // account, the groups, events and plans it is in, and what it said in them — events at
@@ -248,6 +249,11 @@ export async function exportPerson(storage: StoragePort, personId: string, now: 
     // How many emails you caused to other addresses this month (rc37): all the mail cap
     // keeps about you, and only until the month is over.
     emails_you_caused_this_month: await sentThisMonth(storage, personId, now),
+    // Questions you started and haven't asked (rc46): only you ever saw them.
+    unsent_questions: (await listAskDrafts(storage, personId)).map((d) => ({
+      ...d.body,
+      last_changed: d.updatedAt,
+    })),
     // What you pressed that mails people and is waiting its minute, or ran in the last day
     // (rc46): kept only that long.
     held_actions: (

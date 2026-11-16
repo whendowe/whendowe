@@ -342,6 +342,8 @@ export async function eraseAccount(
     { sql: "DELETE FROM session WHERE person_id = ?", params: [p] },
     // rc46: everything they pressed that is waiting or ran in the last day, on any thread.
     { sql: "DELETE FROM held_action WHERE actor_id = ?", params: [p] },
+    // rc46: their unsent questions, which nobody else ever saw.
+    { sql: "DELETE FROM ask_draft WHERE author_id = ?", params: [p] },
     { sql: "DELETE FROM feed_token WHERE person_id = ?", params: [p] },
     { sql: "DELETE FROM login_token WHERE email = ?", params: [email] },
     { sql: "DELETE FROM group_invite WHERE email = ?", params: [email] },

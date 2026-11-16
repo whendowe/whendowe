@@ -132,6 +132,9 @@ export function isPlanDue(
   return dueAfter(last, DEFAULT_RETAIN_DAYS, nowIso);
 }
 
+/** rc46: an unsent Ask when question untouched this long is removed (owner to confirm, #48). */
+export const ASK_DRAFT_KEEP_DAYS = 90;
+
 /** The cutoff before which a row's own timestamp makes it due: now minus `days`. */
 export function cutoff(nowIso: string, days: number): string {
   return new Date(Date.parse(nowIso) - days * 24 * 60 * 60 * 1000).toISOString();
