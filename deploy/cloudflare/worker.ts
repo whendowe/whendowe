@@ -9,6 +9,7 @@ import {
 } from "../../src/config.js";
 import { d1StoragePort } from "../../src/db/d1.js";
 import type { StoragePort } from "../../src/db/port.js";
+import { type HeldRunners, runDueHeld } from "../../src/held.js";
 import { cappedMailPort } from "../../src/mail/capped.js";
 import { cloudflareBindingMailPort, type EmailBindingLike } from "../../src/mail/cloudflare.js";
 import { consoleMailPort } from "../../src/mail/console.js";
@@ -16,7 +17,8 @@ import { disabledMailPort, type MailPort } from "../../src/mail/port.js";
 import { eraseDue, type RevokeCalendars } from "../../src/privacy/erasure.js";
 import { retentionPass } from "../../src/privacy/purge.js";
 import { isRetentionMinute } from "../../src/privacy/retention.js";
-import { calendarRevoker, createApp } from "../../src/web/app.js";
+import { calendarRevoker, createApp, heldRunners } from "../../src/web/app.js";
+import type { AuthDeps } from "../../src/web/routes/auth.js";
 import { buildOAuthDeps, tokenCipherFor } from "../../src/web/routes/oauth-deps.js";
 import type { AppEnv } from "../../src/web/session.js";
 
@@ -62,6 +64,7 @@ interface Built {
   readonly app: Hono<AppEnv>;
   readonly storage: StoragePort;
   readonly revokeCalendars: RevokeCalendars | undefined;
+  readonly runners: HeldRunners;
 }
 let cached: Promise<Built> | undefined;
 
@@ -119,24 +122,27 @@ async function build(env: Env): Promise<Built> {
     ? await buildOAuthDeps(config, storage)
     : undefined;
 
-  const app = createApp({
-    auth: {
-      storage,
-      mail: buildMail(config, env, storage),
-      publicBaseUrl: config.PUBLIC_BASE_URL,
-      secureCookies: new URL(config.PUBLIC_BASE_URL).protocol === "https:",
-      now,
-      // Calendar feed links (rc34): only with a key to keep them under.
-      feedCipher:
-        config.TOKEN_ENCRYPTION_KEY === undefined
-          ? undefined
-          : await tokenCipherFor(config.TOKEN_ENCRYPTION_KEY),
-      // Capabilities (rc43): who may use what, and the operators who decide.
-      capabilities: capabilityConfigOf(config),
-    },
-    oauth,
-  });
-  return { app, storage, revokeCalendars: calendarRevoker(oauth) };
+  const auth: AuthDeps = {
+    storage,
+    mail: buildMail(config, env, storage),
+    publicBaseUrl: config.PUBLIC_BASE_URL,
+    secureCookies: new URL(config.PUBLIC_BASE_URL).protocol === "https:",
+    now,
+    // Calendar feed links (rc34): only with a key to keep them under.
+    feedCipher:
+      config.TOKEN_ENCRYPTION_KEY === undefined
+        ? undefined
+        : await tokenCipherFor(config.TOKEN_ENCRYPTION_KEY),
+    // Capabilities (rc43): who may use what, and the operators who decide.
+    capabilities: capabilityConfigOf(config),
+  };
+  const app = createApp({ auth, oauth });
+  return {
+    app,
+    storage,
+    revokeCalendars: calendarRevoker(oauth),
+    runners: heldRunners(auth),
+  };
 }
 
 function getBuilt(env: Env): Promise<Built> {
@@ -153,8 +159,11 @@ export default {
   async scheduled(controller: ScheduledController, env: Env, _ctx: ExecutionContext) {
     // The purge pass (§10 rc21/rc22): accounts whose 7 days are over, each minute, and
     // retention once an hour. Bounded per run; with nothing due, reads only (§16).
-    const { storage, revokeCalendars } = await getBuilt(env);
+    const { storage, revokeCalendars, runners } = await getBuilt(env);
     const at = new Date(controller.scheduledTime).toISOString();
+    // rc46: actions held their minute, first — someone is waiting on them.
+    const ran = await runDueHeld(storage, runners, at);
+    if (ran > 0) console.log(JSON.stringify({ reason: "held_ran", count: ran }));
     const erased = await eraseDue(storage, { now: at, revokeCalendars });
     if (erased > 0) console.log(JSON.stringify({ reason: "accounts_erased", count: erased }));
     if (isRetentionMinute(at)) {

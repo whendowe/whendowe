@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+
 import { Hono } from "hono";
+import type { HeldRunners } from "../held.js";
 import { revokeGoogleGrant } from "../oauth/token-exchange.js";
 import { UNAVAILABLE } from "../people/capability.js";
 import { findPersonById } from "../people/person.js";
@@ -22,7 +24,7 @@ import {
   registerOAuthRoutes,
 } from "./routes/oauth.js";
 import { registerOperatorRoutes } from "./routes/operator.js";
-import { PLANS_PATH, registerPlanRoutes } from "./routes/plans.js";
+import { PLANS_PATH, registerPlanRoutes, voteLinksRunner } from "./routes/plans.js";
 import { registerRespondRoutes } from "./routes/respond.js";
 import { registerShareRoutes } from "./routes/share.js";
 import { type AppEnv, page, sessionMiddleware } from "./session.js";
@@ -61,20 +63,30 @@ export function calendarRevoker(oauth: OAuthRouteDeps | undefined): RevokeCalend
   };
 }
 
+/** Every send passes the opt-out seam (rc24): applied here, so no route or pass can bypass it. */
+function withOptOut(auth: AuthDeps): AuthDeps {
+  return {
+    ...auth,
+    mail: suppressingMailPort(auth.mail, auth.storage, {
+      publicBaseUrl: auth.publicBaseUrl,
+      now: auth.now,
+    }),
+  };
+}
+
+/**
+ * rc46: what the scheduled pass runs for each held kind, with the same mail seam as the app.
+ * Built once by each deployment beside the app.
+ */
+export function heldRunners(auth: AuthDeps): HeldRunners {
+  const deps = withOptOut(auth);
+  return { vote_links: voteLinksRunner(deps) };
+}
+
 export function createApp(options: AppOptions = {}): Hono<AppEnv> {
   const app = new Hono<AppEnv>();
   const { oauth } = options;
-  // Every send passes the opt-out seam (rc24): here, once, so no route can bypass it.
-  const auth =
-    options.auth === undefined
-      ? undefined
-      : {
-          ...options.auth,
-          mail: suppressingMailPort(options.auth.mail, options.auth.storage, {
-            publicBaseUrl: options.auth.publicBaseUrl,
-            now: options.auth.now,
-          }),
-        };
+  const auth = options.auth === undefined ? undefined : withOptOut(options.auth);
   // First, so every response — errors and redirects included — carries them (§13 rc21).
   app.use(securityHeaders());
 

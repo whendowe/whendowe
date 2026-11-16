@@ -1024,3 +1024,28 @@ export const busyCalendar = sqliteTable(
   },
   (t) => [primaryKey({ columns: [t.connectionId, t.calendarId] })],
 );
+
+// rc46 (DESIGN §10 *Asking when*), slice A0: an action that mails other people waits a
+// minute, with Undo while it can still be held back. The scheduled pass claims it
+// (taken_at, Undo gone) and runs it at most once; outcome is shown to the actor for a day.
+export const heldAction = sqliteTable(
+  "held_action",
+  {
+    id: text("id").primaryKey(),
+    actorId: text("actor_id")
+      .notNull()
+      .references(() => person.id, { onDelete: "cascade" }),
+    threadId: text("thread_id").references(() => planThread.id, { onDelete: "cascade" }),
+    kind: text("kind").notNull(),
+    args: text("args").notNull().default("{}"),
+    dueAt: text("due_at").notNull(),
+    takenAt: text("taken_at"),
+    outcome: text("outcome"),
+    createdAt: text("created_at").notNull(),
+  },
+  (t) => [
+    index("held_action_due").on(t.dueAt).where(sql`${t.takenAt} IS NULL`),
+    index("held_action_thread_idx").on(t.threadId, t.actorId),
+    check("held_action_kind_chk", sql`${t.kind} IN ('vote_links')`),
+  ],
+);

@@ -10,6 +10,7 @@ import {
 } from "../../src/config.js";
 import type { StoragePort } from "../../src/db/port.js";
 import { sqliteStoragePort } from "../../src/db/sqlite.js";
+import { runDueHeld } from "../../src/held.js";
 import { cappedMailPort } from "../../src/mail/capped.js";
 import { cloudflareRestMailPort } from "../../src/mail/cloudflare.js";
 import { consoleMailPort } from "../../src/mail/console.js";
@@ -17,7 +18,8 @@ import { disabledMailPort, type MailPort } from "../../src/mail/port.js";
 import { eraseDue } from "../../src/privacy/erasure.js";
 import { retentionPass } from "../../src/privacy/purge.js";
 import { isRetentionMinute } from "../../src/privacy/retention.js";
-import { calendarRevoker, createApp } from "../../src/web/app.js";
+import { calendarRevoker, createApp, heldRunners } from "../../src/web/app.js";
+import type { AuthDeps } from "../../src/web/routes/auth.js";
 import type { OAuthRouteDeps } from "../../src/web/routes/oauth.js";
 import { buildOAuthDeps, tokenCipherFor } from "../../src/web/routes/oauth-deps.js";
 
@@ -69,31 +71,34 @@ if (anyGoogleOAuthConfigured(config)) {
   oauth = await buildOAuthDeps(config, storage);
 }
 
-const app = createApp({
-  auth: {
-    storage,
-    mail: buildMail(config, storage),
-    publicBaseUrl: config.PUBLIC_BASE_URL,
-    secureCookies: new URL(config.PUBLIC_BASE_URL).protocol === "https:",
-    now,
-    // Calendar feed links (rc34): only with a key to keep them under.
-    feedCipher:
-      config.TOKEN_ENCRYPTION_KEY === undefined
-        ? undefined
-        : await tokenCipherFor(config.TOKEN_ENCRYPTION_KEY),
-    // Capabilities (rc43): who may use what, and the operators who decide.
-    capabilities: capabilityConfigOf(config),
-  },
-  oauth,
-});
+const auth: AuthDeps = {
+  storage,
+  mail: buildMail(config, storage),
+  publicBaseUrl: config.PUBLIC_BASE_URL,
+  secureCookies: new URL(config.PUBLIC_BASE_URL).protocol === "https:",
+  now,
+  // Calendar feed links (rc34): only with a key to keep them under.
+  feedCipher:
+    config.TOKEN_ENCRYPTION_KEY === undefined
+      ? undefined
+      : await tokenCipherFor(config.TOKEN_ENCRYPTION_KEY),
+  // Capabilities (rc43): who may use what, and the operators who decide.
+  capabilities: capabilityConfigOf(config),
+};
+const app = createApp({ auth, oauth });
 
-// The purge pass (§10 rc21/rc22), each minute like the Worker's cron; retention hourly. Ticks never
+// The pass (§10 rc21/rc22, rc46), each minute like the Worker's cron: held actions, then purge;
+// retention hourly. Ticks never
 // overlap: the next is scheduled when this one is done.
 const PASS_INTERVAL_MS = 60_000;
 const revokeCalendars = calendarRevoker(oauth);
+const runners = heldRunners(auth);
 async function purgePass(): Promise<void> {
   try {
     const at = now();
+    // rc46: actions held their minute, first — someone is waiting on them.
+    const ran = await runDueHeld(storage, runners, at);
+    if (ran > 0) console.log(JSON.stringify({ reason: "held_ran", count: ran }));
     const erased = await eraseDue(storage, { now: at, revokeCalendars });
     if (erased > 0) console.log(JSON.stringify({ reason: "accounts_erased", count: erased }));
     if (isRetentionMinute(at)) {

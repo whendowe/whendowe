@@ -387,6 +387,8 @@ export async function leaveThread(
     // So do a guest's claim and the shared link this person made (rc25).
     { sql: "DELETE FROM guest_claim WHERE thread_id = ? AND person_id = ?", params: [t, me] },
     { sql: "DELETE FROM share_link WHERE thread_id = ? AND created_by = ?", params: [t, me] },
+    // And what they pressed that hasn't happened yet, or what it did (rc46).
+    { sql: "DELETE FROM held_action WHERE thread_id = ? AND actor_id = ?", params: [t, me] },
     {
       sql: `UPDATE plan_thread SET organizer_id =
               (SELECT person_id FROM plan_thread_member WHERE thread_id = ? AND person_id <> ?

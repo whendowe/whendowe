@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { expect, it } from "vitest";
+import { HOLD_MS } from "../../src/held.js";
 import { MailCapReachedError, SenderShareReachedError } from "../../src/mail/capped.js";
 import { grantCapability } from "../../src/people/capability.js";
 import { findOrCreatePerson, guestName } from "../../src/people/person.js";
@@ -267,8 +268,12 @@ async function signedInPoll(
   return { ...f, thread: `${PLANS_PATH}/${f.threadId}` };
 }
 
+/** Press "Email vote links", let its minute pass (rc46), and read the thread page. */
 async function sendLinks(b: Browser, thread: string) {
-  return b.request(`${thread}/links`, post({ csrf: (await home(b)).csrf }));
+  const pressed = await b.request(`${thread}/links`, post({ csrf: (await home(b)).csrf }));
+  if (pressed.status !== 303) return pressed; // refused: the page says why
+  await b.pass();
+  return b.request(thread);
 }
 
 it("the organizer emails each member their own link, in the thread's name for them", async () => {
@@ -278,7 +283,7 @@ it("the organizer emails each member their own link, in the thread's name for th
   const res = await sendLinks(b, f.thread);
   expect(res.status).toBe(200);
   const body = await res.text();
-  expect(body).toContain("Sent to 2 people.");
+  expect(body).toContain("<strong>Emailing vote links:</strong> Sent to 2 people.");
   expect(body).not.toMatch(/Couldn(&#39;|')t send/);
   const mails = b.sent.filter((m) => m.subject === 'When can you make "Picnic"?');
   expect(mails.map((m) => m.to).sort()).toEqual(["ana@example.org", "david@example.org"]);
@@ -354,7 +359,7 @@ it("an undelivered link is withdrawn, and the cap stops the rest from being trie
   });
   const f = await signedInPoll(b, ["ana", "bob", "cid"]);
   const res = await sendLinks(b, f.thread);
-  expect(res.status).toBe(503);
+  expect(res.status).toBe(200); // rc46: what happened is read on the page after the minute
   expect(await res.text()).toMatch(
     /Sent to 2 people\. Couldn(&#39;|')t send to 1 — please try again later\./,
   );
@@ -375,7 +380,7 @@ it("an undelivered link is withdrawn, and the cap stops the rest from being trie
   });
   const g = await signedInPoll(c, ["ana", "bob"]);
   const capped = await sendLinks(c, g.thread);
-  expect(capped.status).toBe(503);
+  expect(capped.status).toBe(200);
   expect(await capped.text()).toMatch(/Sent to 0 people\. Couldn(&#39;|')t send to 2/);
   const left = await c.storage.query({
     sql: "SELECT count(*) AS n FROM plan_vote_token WHERE thread_id = ?",
@@ -395,7 +400,7 @@ it("a sender whose share is used hears whose, and that the links can still be co
   });
   const g = await signedInPoll(c, ["ana", "bob"]);
   const capped = await sendLinks(c, g.thread);
-  expect(capped.status).toBe(503);
+  expect(capped.status).toBe(200);
   expect(await capped.text()).toMatch(
     /Couldn(&#39;|')t send to 2\. You(&#39;|')ve sent as much email this month as one person can\. You can send more from \d{4}-\d{2}-01, or copy their links to send yourself\./,
   );
@@ -544,7 +549,8 @@ it("the organizer copies a member's own link instead of emailing it: fresh, show
 });
 
 it("votes say how they arrived (rc42): the emailed link, or the link the organizer copied", async () => {
-  const b = await browser({ now: () => NOW });
+  let clock = NOW;
+  const b = await browser({ now: () => clock });
   const f = await signedInPoll(b, ["david", "ana"]);
   const [david = "", ana = ""] = f.rest.map((p) => p.id);
   const [plan = ""] = f.planIds;
@@ -573,6 +579,7 @@ it("votes say how they arrived (rc42): the emailed link, or the link the organiz
 
   // Ana votes with the link she was mailed. Its page names nobody.
   await sendLinks(b, f.thread);
+  clock = new Date(Date.parse(NOW) + HOLD_MS).toISOString(); // the minute the links waited (rc46)
   const mailed = linkIn(b.sent.find((m) => m.to === "ana@example.org")?.text ?? "");
   // The line under the form starts with the link's own words: no one is named before them.
   expect(await (await b.request(mailed.path)).text()).toContain(

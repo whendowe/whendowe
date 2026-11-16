@@ -4,9 +4,11 @@ import { createClient } from "@libsql/client";
 import type { TokenCipher } from "../../src/crypto/tokens.js";
 import type { SqlStatement, StoragePort } from "../../src/db/port.js";
 import { sqliteStoragePort } from "../../src/db/sqlite.js";
+import { HOLD_MS, runDueHeld } from "../../src/held.js";
 import type { MailMessage } from "../../src/mail/port.js";
 import type { CapabilityConfig } from "../../src/people/capability.js";
-import { createApp } from "../../src/web/app.js";
+import { createApp, heldRunners } from "../../src/web/app.js";
+import type { AuthDeps } from "../../src/web/routes/auth.js";
 import { CONFIRM_PATH, SIGN_IN_PATH } from "../../src/web/routes/auth.js";
 import { SESSION_COOKIE } from "../../src/web/session.js";
 import { loadMigrationSql } from "../conftest.js";
@@ -28,6 +30,11 @@ export interface Browser {
   request(path: string, init?: RequestInit): Promise<Response>;
   /** Another browser (another phone) on the same instance: same app, storage and mail; its own cookies. */
   another(): Browser;
+  /**
+   * The scheduled pass for held actions (rc46), as the cron runs it: by default once their
+   * minute is up from the clock's now. Returns how many ran.
+   */
+  pass(at?: string): Promise<number>;
 }
 
 const writing = (s: SqlStatement) => !/^\s*SELECT\b/i.test(s.sql);
@@ -58,24 +65,25 @@ export async function browser(
     },
   };
   const sent: MailMessage[] = [];
-  const app = createApp({
-    auth: {
-      storage,
-      mail: {
-        send: (m) => {
-          const error = options.mailFails?.(m) ?? null;
-          if (error !== null) return Promise.reject(error);
-          sent.push(m);
-          return Promise.resolve();
-        },
+  const now = options.now ?? (() => new Date().toISOString());
+  const auth: AuthDeps = {
+    storage,
+    mail: {
+      send: (m) => {
+        const error = options.mailFails?.(m) ?? null;
+        if (error !== null) return Promise.reject(error);
+        sent.push(m);
+        return Promise.resolve();
       },
-      publicBaseUrl: "https://whendowe.example",
-      secureCookies: true,
-      now: options.now ?? (() => new Date().toISOString()),
-      ...(options.feedCipher === undefined ? {} : { feedCipher: options.feedCipher }),
-      ...(options.capabilities === undefined ? {} : { capabilities: options.capabilities }),
     },
-  });
+    publicBaseUrl: "https://whendowe.example",
+    secureCookies: true,
+    now,
+    ...(options.feedCipher === undefined ? {} : { feedCipher: options.feedCipher }),
+    ...(options.capabilities === undefined ? {} : { capabilities: options.capabilities }),
+  };
+  const app = createApp({ auth });
+  const runners = heldRunners(auth);
   const open = (): Browser => {
     const b: Browser = {
       cookie: "",
@@ -89,6 +97,8 @@ export async function browser(
       sent,
       storage: inner,
       another: open,
+      pass: (at) =>
+        runDueHeld(storage, runners, at ?? new Date(Date.parse(now()) + HOLD_MS).toISOString()),
       async request(path, init = {}) {
         const headers = new Headers(init.headers);
         const cookies = [b.cookie, ...[...b.jar].map(([k, v]) => `${k}=${v}`)].filter(

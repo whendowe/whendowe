@@ -248,5 +248,32 @@ export async function exportPerson(storage: StoragePort, personId: string, now: 
     // How many emails you caused to other addresses this month (rc37): all the mail cap
     // keeps about you, and only until the month is over.
     emails_you_caused_this_month: await sentThisMonth(storage, personId, now),
+    // What you pressed that mails people and is waiting its minute, or ran in the last day
+    // (rc46): kept only that long.
+    held_actions: (
+      await storage.query({
+        sql: `SELECT h.kind, t.name AS thread, h.due_at, h.taken_at, h.outcome
+              FROM held_action h LEFT JOIN plan_thread t ON t.id = h.thread_id
+              WHERE h.actor_id = ? ORDER BY h.created_at, h.id`,
+        params: [personId],
+      })
+    ).map((raw) => {
+      const h = z
+        .object({
+          kind: z.string(),
+          thread: z.string().nullable(),
+          due_at: z.string(),
+          taken_at: z.string().nullable(),
+          outcome: z.string().nullable(),
+        })
+        .parse(raw);
+      return {
+        action: h.kind === "vote_links" ? "email vote links" : h.kind,
+        plan: h.thread,
+        due_at: h.due_at,
+        ran_at: h.taken_at,
+        what_happened: h.outcome,
+      };
+    }),
   };
 }
