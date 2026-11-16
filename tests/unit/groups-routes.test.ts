@@ -167,7 +167,7 @@ it("an organizer sees the invite form; the invite email links to PUBLIC_BASE_URL
   const dm = await signIn(h, "inv-dm@example.org");
   const group = await createGroupVia(h, dm, "Thursday Table");
   expect(await (await h.app.request(group, { headers: { cookie: dm.cookie } })).text()).toContain(
-    "Invite someone",
+    "Invite people",
   );
   const res = await inviteVia(h, dm, group, "Player@Example.org", { host: "evil.example" });
   expect(res.status).toBe(200);
@@ -228,7 +228,7 @@ it("the invitee joins with one click, is signed in, and sees the group — but c
   const cookie = (joined.headers.get("set-cookie") ?? "").split(";")[0] ?? "";
   const page = await (await h.app.request(group, { headers: { cookie } })).text();
   expect(page).toMatch(/<li>Guest \d{4} \(you\)/);
-  expect(page).not.toContain("Invite someone");
+  expect(page).not.toContain("Invite people");
 
   // A member who tries the organizer's invite action anyway is refused.
   const home = await (await h.app.request("/", { headers: { cookie } })).text();
@@ -443,7 +443,7 @@ it("leaving a group: the organizer's role passes on; the last one out deletes it
   );
   expect((await h.app.request(group, { headers: { cookie: dm.cookie } })).status).toBe(404);
   const lenaPage = await (await h.app.request(group, { headers: { cookie: lena } })).text();
-  expect(lenaPage).toContain("Invite someone"); // she organizes it now
+  expect(lenaPage).toContain("Invite people"); // she organizes it now
 
   const last = await (await h.app.request(`${group}/leave`, { headers: { cookie: lena } })).text();
   expect(last).toContain("leaving deletes the group");

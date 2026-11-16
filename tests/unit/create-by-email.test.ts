@@ -37,20 +37,21 @@ it("creates an event for people by email alone, each on their own terms", async 
   await addAccount(b, "ann@example.org");
   await nameActive(b, "ann@example.org");
   const form = await (await b.request(`${EVENTS_PATH}/new`)).text();
-  expect(form).toContain('name="email_0"');
-  expect(form).toContain('name="ask_0"');
+  // rc48: the people picker — addresses pasted at once, and what new ones are asked.
+  expect(form).toContain('name="email"');
+  expect(form).toContain('name="newAsk"');
 
   const res = await create(b, EVENTS_PATH, {
     ...NIGHT,
-    email_0: "Bob@Example.org",
-    tier_0: "edit",
-    vis_0: "FULL",
-    email_1: "cat@example.org",
-    tier_1: "view",
-    vis_1: "BUSY",
-    email_2: "ann@example.org", // the creator: stays edit + FULL, not demoted by a row
-    tier_2: "view",
-    vis_2: "BUSY",
+    pc_0: "e:Bob@Example.org",
+    pt_0: "edit",
+    pv_0: "FULL",
+    pc_1: "e:cat@example.org",
+    pt_1: "view",
+    pv_1: "BUSY",
+    pc_2: "e:ann@example.org", // the creator: stays edit + FULL, not demoted by a row
+    pt_2: "view",
+    pv_2: "BUSY",
   });
   expect(res.status).toBe(303);
   const event = res.headers.get("location") ?? "";
@@ -73,10 +74,10 @@ it("asking someone to agree by email makes it a proposal they can answer", async
   await addAccount(b, "ann@example.org");
   const res = await create(b, EVENTS_PATH, {
     ...NIGHT,
-    email_0: "bob@example.org",
-    tier_0: "view",
-    vis_0: "FULL",
-    ask_0: "accept",
+    pc_0: "e:bob@example.org",
+    pt_0: "view",
+    pv_0: "FULL",
+    pa_0: "accept",
   });
   const event = res.headers.get("location") ?? "";
   expect(await (await b.request(event)).text()).toContain("waiting for agreement");
@@ -86,13 +87,13 @@ it("a refused form keeps what was typed and creates no one", async () => {
   const b = await browser();
   await addAccount(b, "ann@example.org");
   for (const fields of [
-    { ...NIGHT, email_0: "good@example.org", email_1: "not an address" },
-    { ...NIGHT, end: "2101-11-20T18:00", email_0: "good@example.org" }, // ends before it starts
+    { ...NIGHT, pc_0: "e:good@example.org", pc_1: "e:not an address" },
+    { ...NIGHT, end: "2101-11-20T18:00", pc_0: "e:good@example.org" }, // ends before it starts
   ]) {
     const res = await create(b, EVENTS_PATH, fields);
     expect(res.status).toBe(400);
     const text = await res.text();
-    expect(text).toContain('value="good@example.org"');
+    expect(text).toContain('value="e:good@example.org"'); // rc48: kept as its chip
     expect(await findPersonByEmail(b.storage, "good@example.org")).toBeNull();
   }
   // A poll whose time ends before it starts is refused the same way. (One time is a
@@ -102,11 +103,11 @@ it("a refused form keeps what was typed and creates no one", async () => {
     tzid: "Europe/Prague",
     start_0: "2101-11-10T19:00",
     end_0: "2101-11-10T18:00",
-    email_0: "good@example.org",
+    pc_0: "e:good@example.org",
   });
   expect(poll.status).toBe(400);
   expect(await findPersonByEmail(b.storage, "good@example.org")).toBeNull();
-  expect(await (await create(b, EVENTS_PATH, { ...NIGHT, email_0: "x y" })).text()).toContain(
+  expect(await (await create(b, EVENTS_PATH, { ...NIGHT, pc_0: "e:x y" })).text()).toContain(
     "Not an email address: x y",
   );
 });
@@ -134,12 +135,12 @@ it("from a group: its members are copied in, and anyone else can be added by ema
   expect(form).toContain("Everyone in Table takes part");
   const res = await create(b, `${group}/events`, {
     ...NIGHT,
-    email_0: "eve@example.org",
-    tier_0: "view",
-    vis_0: "DETAILS",
-    email_1: "dan@example.org", // a member named here: these terms win
-    tier_1: "edit",
-    vis_1: "FULL",
+    pc_0: "e:eve@example.org",
+    pt_0: "view",
+    pv_0: "DETAILS",
+    pc_1: "e:dan@example.org", // a member named here: these terms win
+    pt_1: "edit",
+    pv_1: "FULL",
   });
   const event = res.headers.get("location") ?? "";
   const people = await participants(b, event);
@@ -157,13 +158,12 @@ it("a poll for people by email: a thread they vote in, and between two the secon
   const b = await browser();
   await addAccount(b, "ann@example.org");
   const form = await (await b.request(`${POLLS_PATH}/new`)).text();
-  expect(form).toContain('name="email_0"');
-  expect(form).toContain('aria-label="Email 1"');
+  expect(form).toContain('name="email"');
   expect(form).toContain("Who are you finding a time with?");
-  expect(form).not.toContain('name="ask_0"'); // a poll asks everyone the same thing
+  expect(form).not.toContain('name="newAsk"'); // a poll asks everyone the same thing
   // Everyone in a poll's thread sees what it says (rc26): no terms to pick.
-  expect(form).not.toContain('name="tier_0"');
-  expect(form).not.toContain('name="vis_0"');
+  expect(form).not.toContain('name="editTier"');
+  expect(form).not.toContain('name="visibility"');
   expect(form).toContain("everyone in the poll sees these");
   const res = await create(b, POLLS_PATH, {
     title: "When next?",
@@ -174,7 +174,7 @@ it("a poll for people by email: a thread they vote in, and between two the secon
     end_0: "2101-11-10T22:00",
     start_1: "2101-11-11T19:00",
     end_1: "2101-11-11T22:00",
-    email_0: "bob@example.org",
+    pc_0: "e:bob@example.org",
   });
   expect(res.status).toBe(303);
   const thread = res.headers.get("location") ?? "";

@@ -35,7 +35,7 @@ const PIZZA = {
   o0e0day: "2101-12-17",
   o0e0from: "19:00",
   o0e0to: "21:00",
-  emails: "lea@example.org, cat@example.org",
+  email: "lea@example.org, cat@example.org",
   // What the page's own form always sends with every button.
   new_from: "19:00",
   new_hours: "2",
@@ -65,7 +65,9 @@ it("every button saves first; the read-back and the button say who and what", as
   expect(page).toContain('<span class="muted">Saved</span>');
   expect(page).toContain('value="Pizza"');
   expect(page).toContain('name="o0e0from" value="19:00"');
-  expect(page).toContain("lea@example.org\ncat@example.org");
+  // rc48: each address is a chip, kept in the form as typed.
+  expect(page).toContain('name="pc_0" value="e:lea@example.org"');
+  expect(page).toContain('name="pc_1" value="e:cat@example.org"');
   expect(page).toContain(
     "Asking emails 2 people one question: does <strong>A</strong> suit for “Pizza”? If it suits, it happens.",
   );
@@ -154,7 +156,9 @@ it("a question that can't be asked says why and keeps every word", async () => {
   const page = await res.text();
   expect(page).toContain('class="error"');
   expect(page).toContain('value="Pizza"');
-  expect(page).toContain("lea@example.org\ncat@example.org");
+  // rc48: each address is a chip, kept in the form as typed.
+  expect(page).toContain('name="pc_0" value="e:lea@example.org"');
+  expect(page).toContain('name="pc_1" value="e:cat@example.org"');
   expect(await findAskDraft(b.storage, { id: f.id, authorId: f.mara })).not.toBeNull();
 });
 
@@ -202,8 +206,8 @@ it("the read-back counts a group's people who see what it plans, not you, and na
   const path = res.headers.get("location") ?? "";
   const send = async (fields: Record<string, string>) =>
     b.request(path, post({ csrf: await csrf(), ...fields }));
-  await send({ ...PIZZA, emails: "", act: "option" });
-  await send({ ...PIZZA, emails: "", act: "option" });
+  await send({ ...PIZZA, email: "", act: "option" });
+  await send({ ...PIZZA, email: "", act: "option" });
   const page = await (await b.request(path)).text();
   // FULL and DETAILS see what the group plans; BUSY doesn't; Mara isn't asked herself.
   expect(page).toContain("Asking emails 2 people one question: does <strong>A, B or C</strong>");
@@ -218,7 +222,7 @@ it("the read-back counts a group's people who see what it plans, not you, and na
 it("one person; no times; a time with no end kept as typed; ten options and no more", async () => {
   const b = await browser({ now: () => NOW });
   const f = await start(b);
-  await f.send({ ...PIZZA, emails: "lea@example.org", o0e0to: "", act: "save" });
+  await f.send({ ...PIZZA, email: "lea@example.org", o0e0to: "", act: "save" });
   const one = await (await b.request(f.path)).text();
   expect(one).toContain("Asking emails 1 person one question");
   expect(one).toContain(">Ask 1 person by email</button>");
