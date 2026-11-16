@@ -70,12 +70,10 @@ it("people down, options across, each cell its answer; you first; who hasn't ans
   ]);
   expect(rows[0]?.[0]).toMatch(/ <span class="muted">you<\/span>$/);
   expect(rows.at(-1)?.[0]).toBe("Can come"); // the foot row, after the people
-  expect(rows.slice(0, -1).map((r) => r[1])).toEqual([
-    ["yes", "yes"], // the poll carries Mara's yes to every time
-    ["yes", "no"],
-    ["none", "ifneedbe"],
-    ["none", "none"],
-  ]);
+  const cells = rows.slice(0, -1).map((r) => (r[1] as string[]).join(" "));
+  expect(cells[0]).toBe("yes yes"); // you first: the poll carries Mara's yes to every time
+  // The others in the thread's order; people made in one millisecond have no fixed order.
+  expect(cells.slice(1).sort()).toEqual(["none ifneedbe", "none none", "yes no"]);
   expect(g).toContain(
     '<td class="a-none"><span aria-hidden="true">–</span><span class="vh">no answer yet</span></td>',
   );
