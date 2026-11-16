@@ -35,3 +35,17 @@ test("a question being written: lettered options, or between, and inside, and wh
   await expect(page).toHaveScreenshot("ask.png", { fullPage: true });
   expect(errors).toEqual([]);
 });
+
+test("the same question by the hour: four days, the evenings marked, the weekend all day", async ({
+  page,
+}) => {
+  const errors = await open(page, "ask-hours");
+  await expect(page.getByRole("button", { name: "Hours" })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator(".hours .nav strong")).toHaveText("Thu 5 Nov – Sun 8 Nov");
+  // A on Thursday 19:00–23:00 is four hours; its weekend fills Saturday and Sunday's all-day row.
+  await expect(page.locator('.hrow:not(.allday) a.letter[href="#o0"]')).toHaveCount(4);
+  await expect(page.locator('.hrow.allday a.letter[href="#o0"]')).toHaveCount(2);
+  await expect(page.getByRole("button", { name: "Add 2026-11-06 12:00" })).toBeVisible();
+  await expect(page.locator(".hours")).toHaveScreenshot("ask-hours.png");
+  expect(errors).toEqual([]);
+});

@@ -279,6 +279,7 @@ await app.request(
 const pages: Record<string, string> = {
   home: "/",
   ask: askPath,
+  "ask-hours": `${askPath}?v=hours&d=2026-11-05`,
   "plan-thread": table,
   "plan-answer": planB,
   "plan-draft": `${kid}/draft`,
