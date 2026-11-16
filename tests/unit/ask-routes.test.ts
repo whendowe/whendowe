@@ -45,7 +45,7 @@ it("a new question: one time to fill in, the status line, a read-back; GET write
   const page = await (await b.request(f.path)).text();
   expect(b.writes).toBe(writes);
   expect(page).toContain("<strong>Draft</strong> · step 1 of 4 · nobody has been told");
-  expect(page).toContain('<span class="letter">A</span>');
+  expect(page).toMatch(/<legend><span class="letter" style="background:var\(--o0\)">A<\/span>/);
   expect(page).toContain('name="o0e0day"');
   expect(page).not.toContain('name="o1e0day"');
   expect(page).toContain("Asking emails nobody yet — add people below one question");
@@ -73,7 +73,7 @@ it("every button saves first; the read-back and the button say who and what", as
   const two = await (await b.request(f.path)).text();
   expect(two).toContain('value="Pizza night"');
   expect(two).toContain('<p class="or">or</p>');
-  expect(two).toContain('<span class="letter">B</span>');
+  expect(two).toMatch(/<legend><span class="letter" style="background:var\(--o1\)">B<\/span>/);
   expect(two).toContain(
     "does <strong>A or B</strong> suit for “Pizza night”? One of them will happen.",
   );
@@ -226,11 +226,11 @@ it("one person; no times; a time with no end kept as typed; ten options and no m
   ]);
   await f.send({ ...PIZZA, act: "drop:0:0" });
   const none = await (await b.request(f.path)).text();
-  expect(none).toContain('<p class="muted">No times yet.</p>');
+  expect(none).toContain('<p class="muted">No times yet. Tap a day to add one.</p>');
   expect(none).toContain("does nothing yet suit for “Pizza”? </p>");
   for (let i = 0; i < 11; i++) await f.send({ ...PIZZA, act: "option" });
   const ten = await (await b.request(f.path)).text();
-  expect(ten).toContain('<span class="letter">J</span>');
+  expect(ten).toMatch(/<legend><span class="letter" style="background:var\(--o1\)">J<\/span>/);
   expect(ten).not.toContain('value="option"');
   expect(
     (await findAskDraft(b.storage, { id: f.id, authorId: f.mara }))?.body.options,
