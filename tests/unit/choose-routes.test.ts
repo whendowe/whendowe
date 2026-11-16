@@ -318,3 +318,81 @@ it("the runner refuses what it can't act on; one told is a person; a failed send
     /Chosen\. Emailed 1 person the result\. 1 opted out of email from here, so wasn(&#39;|')t told\. Couldn(&#39;|')t email 1\.</,
   );
 });
+
+// --- two people agreeing (owner, 2026-11-16: one more layer of paper trail) -------------
+
+it("a pair's agreeing yes says so, and both are emailed the result at once — by the plan page", async () => {
+  const b = await browser({ now: () => NOW });
+  await addAccount(b, "mara@example.org");
+  const mara = await findOrCreatePerson(b.storage, "mara@example.org", { now: NOW });
+  const lea = await findOrCreatePerson(b.storage, "lea@example.org", { now: NOW });
+  const { threadId, planIds } = await createPollThread(b.storage, {
+    creatorId: lea.id,
+    group: null,
+    fields: { title: "Coffee", location: null, description: null, allDay: true, tzid: null },
+    candidates: [
+      { startLocal: "2101-12-21", endLocal: "2101-12-22" },
+      { startLocal: "2101-12-22", endLocal: "2101-12-23" },
+    ],
+    people: [mara.id],
+    now: NOW,
+  });
+  const [mon = ""] = planIds;
+  const planPage = `${PLANS_PATH}/${threadId}/p/${mon}`;
+  // Lea made it, so her yes is there: Mara's agrees it, and the page says it emails both.
+  const before = await (await b.request(planPage)).text();
+  expect(before).toContain(">Yes, and agree it<");
+  expect(before).toContain("Your yes agrees it, and emails you both.");
+  const res = await b.request(
+    `${planPage}/vote`,
+    post({ csrf: (await home(b)).csrf, answer: "yes" }),
+  );
+  expect(res.status).toBe(303);
+  expect(await b.pass()).toBe(0); // not held: it is an answer
+  expect(
+    result(b)
+      .map((m) => m.to)
+      .sort(),
+  ).toEqual(["lea@example.org", "mara@example.org"]);
+  const toLea = result(b).find((m) => m.to === "lea@example.org");
+  expect(toLea?.text).toMatch(
+    /^Wed 21 Dec, all day is agreed for "Coffee": both of you said yes\.\n/,
+  );
+  expect(toLea?.cause).toMatchObject({ senderId: mara.id });
+  // An if need be agrees nothing: no line, no mail.
+  expect(await (await b.request(planPage)).text()).not.toContain("emails you both");
+});
+
+it("by the emailed link: the agreeing yes tells both; an if need be tells nobody", async () => {
+  const b = await browser({ now: () => NOW });
+  const mara = await findOrCreatePerson(b.storage, "mara@example.org", { now: NOW });
+  const lea = await findOrCreatePerson(b.storage, "lea@example.org", { now: NOW });
+  const { threadId, planIds } = await createPollThread(b.storage, {
+    creatorId: mara.id,
+    group: null,
+    fields: { title: "Coffee", location: null, description: null, allDay: true, tzid: null },
+    candidates: [
+      { startLocal: "2101-12-21", endLocal: "2101-12-22" },
+      { startLocal: "2101-12-22", endLocal: "2101-12-23" },
+    ],
+    people: [lea.id],
+    now: NOW,
+  });
+  const access = await findThreadForMember(b.storage, threadId, mara.id);
+  if (access === null) throw new Error("member");
+  const { issueVoteLinks } = await import("../../src/plans/vote-link.js");
+  const issued = await issueVoteLinks(b.storage, access, { now: NOW });
+  if (issued.kind !== "issued") throw new Error(issued.kind);
+  const t = issued.links[0]?.token ?? "";
+  const [mon = "", tue = ""] = planIds;
+  const page = await (await b.request(`/vote?t=${encodeURIComponent(t)}`)).text();
+  expect(page).toContain("Your yes agrees it, and emails you both.");
+  await b.request("/vote", post({ t, [`plan_${tue}`]: "ifneedbe" }));
+  expect(result(b)).toEqual([]);
+  await b.request("/vote", post({ t, [`plan_${mon}`]: "yes" }));
+  expect(
+    result(b)
+      .map((m) => m.to)
+      .sort(),
+  ).toEqual(["lea@example.org", "mara@example.org"]);
+});
