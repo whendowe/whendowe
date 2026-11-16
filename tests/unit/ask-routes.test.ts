@@ -36,6 +36,9 @@ const PIZZA = {
   o0e0from: "19:00",
   o0e0to: "21:00",
   emails: "lea@example.org, cat@example.org",
+  // What the page's own form always sends with every button.
+  new_from: "19:00",
+  new_hours: "2",
 };
 
 it("a new question: one time to fill in, the status line, a read-back; GET writes nothing", async () => {
@@ -258,7 +261,7 @@ it("tapping a free day adds an option of the defaults, says so with Undo, and ke
   expect(res.headers.get("location")).toBe(`${f.path}?saved=1&m=2101-12&added=1`);
   const after = await (await b.request(res.headers.get("location") ?? "")).text();
   expect(after).toContain(
-    'Added Sat 24 Dec as B <button class="link" type="submit" name="act" value="remove:1">Undo</button>',
+    'Added Sat 24 Dec, 18:30 as B <button class="link" type="submit" name="act" value="remove:1">Undo</button>',
   );
   expect(after).toMatch(/<a class="letter" href="#o1"[^>]*>B<\/a>/);
   expect(after).not.toContain('value="add:2101-12-24"'); // a day with an option isn't free
@@ -321,4 +324,76 @@ it("the month buttons save first and move; a month asked for is kept by Save; te
   expect(full).not.toContain('value="add:');
   // An Undo for an option that isn't there shows nothing.
   expect(await (await b.request(`${f.path}?added=40`)).text()).not.toContain("Added ");
+});
+
+// --- the Hours view (rc46): the same options, four days as an hour grid ------------------
+
+it("Hours shows four days by the hour; a free hour adds an option of the length chosen", async () => {
+  const b = await browser({ now: () => NOW });
+  const f = await start(b);
+  const sw = await f.send({ ...PIZZA, m: "2101-12", new_hours: "1", act: "view:hours" });
+  expect(sw.headers.get("location")).toBe(`${f.path}?saved=1&v=hours&m=2101-12`);
+  const page = await (await b.request(sw.headers.get("location") ?? "")).text();
+  expect(page).toContain('value="view:hours" aria-pressed="true">Hours');
+  // From the first option's day, four days: 17–20 Dec. A covers 19:00 and 20:00 there.
+  expect(page).toContain("<strong>Sat 17 Dec – Tue 20 Dec</strong>");
+  expect(page.match(/<span class="hour has"><a class="letter" href="#o0"/g)).toHaveLength(2);
+  expect(page).toContain('value="addh:2101-12-18T12:00" aria-label="Add 2101-12-18 12:00"');
+  expect(page).toContain('name="v" value="hours"');
+  const res = await f.send({
+    ...PIZZA,
+    new_hours: "1",
+    v: "hours",
+    d: "2101-12-17",
+    act: "addh:2101-12-18T12:00",
+  });
+  expect(res.headers.get("location")).toBe(
+    `${f.path}?saved=1&v=hours&m=2101-12&added=1&d=2101-12-17`,
+  );
+  const after = await (await b.request(res.headers.get("location") ?? "")).text();
+  expect(after).toContain("Added Sun 18 Dec, 12:00 as B");
+  expect((await findAskDraft(b.storage, { id: f.id, authorId: f.mara }))?.body.options[1]).toEqual([
+    { allDay: false, startLocal: "2101-12-18T12:00", endLocal: "2101-12-18T13:00" },
+  ]);
+  // The defaults keep their time though Hours never uses it: switching back finds it.
+  expect(after).toContain('name="new_from" value="19:00"');
+});
+
+it("Hours moves four days at a time, keeps its place across saves, and shows all-day options above", async () => {
+  const b = await browser({ now: () => NOW });
+  const f = await start(b);
+  const next = await f.send({
+    ...PIZZA,
+    m: "2101-12",
+    v: "hours",
+    d: "2101-12-17",
+    act: "from:2101-12-21",
+  });
+  expect(next.headers.get("location")).toBe(`${f.path}?saved=1&v=hours&m=2101-12&d=2101-12-21`);
+  const later = await (await b.request(next.headers.get("location") ?? "")).text();
+  expect(later).toContain("<strong>Wed 21 Dec – Sat 24 Dec</strong>");
+  expect(later).toContain('value="from:2101-12-17" aria-label="Earlier days"');
+  await f.send({
+    ...PIZZA,
+    o0e0day: "2101-12-22",
+    o0e0from: "",
+    act: "save",
+    v: "hours",
+    d: "2101-12-21",
+  });
+  const allDay = await (await b.request(`${f.path}?v=hours&d=2101-12-21`)).text();
+  expect(allDay).toMatch(
+    /<div class="hrow allday">.*?<span class="hour has"><a class="letter" href="#o0"/s,
+  );
+  expect(allDay).not.toMatch(/<div class="hrow"><span class="hr">19<\/span>.*?href="#o0"/);
+  // Back to Days: the switch saves, and the month comes back.
+  const back = await f.send({
+    ...PIZZA,
+    o0e0day: "2101-12-22",
+    o0e0from: "",
+    m: "2101-12",
+    v: "hours",
+    act: "view:days",
+  });
+  expect(back.headers.get("location")).toBe(`${f.path}?saved=1&m=2101-12`);
 });

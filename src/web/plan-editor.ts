@@ -221,6 +221,18 @@ export const PLAN_STYLE = html`<style>
   .pl.ask .day.today { outline: 2px solid var(--fg); outline-offset: -2px; }
   .pl.ask .day.has b { width: 100%; text-align: center; font-weight: 400; font-size: .8rem; }
   .pl.ask .day .letter { color: Canvas; text-decoration: none; }
+  .pl.ask .spread { justify-content: space-between; align-items: center; }
+  .pl.ask .viewswitch button { min-height: 40px; padding: 0 14px; }
+  .pl.ask .hours { display: grid; gap: 3px; }
+  .pl.ask .hours .nav { justify-content: space-between; align-items: center; }
+  .pl.ask .hours .nav button { min-width: 44px; min-height: 44px; }
+  .pl.ask .hrow { display: grid; grid-template-columns: 2.6rem repeat(4, minmax(0, 1fr)); gap: 3px; }
+  .pl.ask .hrow.head span { font-size: .75rem; text-align: center; color: var(--muted); }
+  .pl.ask .hrow.head .today { color: var(--fg); font-weight: 700; }
+  .pl.ask .hr { font-size: .7rem; color: var(--muted); align-self: center; }
+  .pl.ask .hour { min-height: 44px; border-radius: 6px; border: 0; background: var(--tile); display: flex; flex-wrap: wrap;
+    gap: 2px; align-items: center; justify-content: center; padding: 2px; }
+  .pl.ask .hour .letter { color: Canvas; text-decoration: none; }
   .pl.ask .undo { border-radius: 10px; padding: 6px 12px; background: var(--fg); color: Canvas; }
   .pl.ask .undo .link { color: Canvas; font-weight: 700; }
   .pl.ask .readback { border-radius: 10px; padding: 10px 12px; background: var(--accent-soft); }

@@ -148,6 +148,24 @@ function act(body: AskBody, action: string): AskBody {
   const add = /^add:(\d{4}-\d{2}-\d{2})$/.exec(action);
   if (add !== null && body.options.length < MAX_OPTIONS)
     return { ...body, options: [...body.options, [tappedEvent(add[1] ?? "", body)]] };
+  const hour = /^addh:(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})$/.exec(action);
+  if (hour !== null && body.options.length < MAX_OPTIONS) {
+    const start = Temporal.PlainDateTime.from(`${hour[1]}T${hour[2]}`);
+    const end = start.add({ hours: body.defaults?.hours ?? 2 });
+    return {
+      ...body,
+      options: [
+        ...body.options,
+        [
+          {
+            allDay: false,
+            startLocal: start.toString().slice(0, 16),
+            endLocal: end.toString().slice(0, 16),
+          },
+        ],
+      ],
+    };
+  }
   const remove = /^remove:(\d+)$/.exec(action);
   if (remove !== null)
     return { ...body, options: body.options.filter((_, k) => k !== Number(remove[1])) };
@@ -281,11 +299,95 @@ function daysView(body: AskBody, month: string, today: string): Html {
 <div class="row nav"><button type="submit" name="act" value="month:${prev}" aria-label="Earlier month">‹</button><strong>${MONTHS[first.month - 1] ?? ""} ${String(first.year)}</strong><button type="submit" name="act" value="month:${next}" aria-label="Later month">›</button></div>
 <div class="wkrow head"><span></span>${["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"].map((x) => html`<span>${x}</span>`)}</div>
 ${weeks}
-<p class="row wrap newones"><span class="muted">A day you tap is</span> <label><span class="vh">From</span><input type="time" name="new_from" value="${d === undefined ? "19:00" : (d.from ?? "")}" /></label> <label><span class="vh">For</span><select name="new_hours">${HOURS.map(
+</div>`;
+}
+
+/**
+ * What a tap makes (rc46), under either view, so every save carries it: a day tapped in Days
+ * is this time and length (no time: all day); an hour tapped in Hours is this length.
+ */
+function newOnes(body: AskBody): Html {
+  const d = body.defaults;
+  return html`<p class="row wrap newones"><span class="muted">New ones are</span> <label><span class="vh">From</span><input type="time" name="new_from" value="${d === undefined ? "19:00" : (d.from ?? "")}" /></label> <label><span class="vh">For</span><select name="new_hours">${HOURS.map(
     (h) =>
       html`<option value="${String(h)}"${(d?.hours ?? 2) === h ? html` selected` : ""}>${String(h)} h</option>`,
-  )}</select></label> <span class="muted small">(no time: all day)</span></p>
+  )}</select></label> <span class="muted small">(no time: a day you tap is all day)</span></p>`;
+}
+
+/** Hours shown in the Hours view: a day's waking hours. Earlier or later: the option's fields. */
+const FIRST_HOUR = 7;
+const LAST_HOUR = 22;
+/** Days at a time in the Hours view: wide enough cells on a phone (rc46). */
+const HOURS_DAYS = 4;
+
+/** The first day the Hours view shows: asked for, else the first option's, else today. */
+function fromOf(body: AskBody, asked: string | null, today: string): string {
+  if (asked !== null && DAY.test(asked)) return asked;
+  const first = body.options.flat().find((e) => DAY.test(e.startLocal.slice(0, 10)));
+  return (first?.startLocal ?? today).slice(0, 10);
+}
+
+/** Which options a timed event covers in this hour of this day; all-day ones aside. */
+function inHour(body: AskBody, day: string, hour: number): number[] {
+  const a = `${day}T${String(hour).padStart(2, "0")}:00`;
+  const z = `${day}T${String(hour + 1).padStart(2, "0")}:00`;
+  const out = new Set<number>();
+  body.options.forEach((events, i) => {
+    for (const e of events)
+      if (!e.allDay && e.startLocal !== "" && e.startLocal < z && (e.endLocal || e.startLocal) > a)
+        out.add(i);
+  });
+  return [...out];
+}
+
+/**
+ * The Hours view (rc46): four days at a time as an hour grid, drawn by the server like Days.
+ * A free hour is a button that adds an option starting then, of the chosen length; an hour
+ * with options carries their letters, links to their cards. All-day options sit above.
+ */
+function hoursView(body: AskBody, from: string, today: string): Html {
+  const days = Array.from({ length: HOURS_DAYS }, (_, k) => addDays(from, k));
+  const allDay = (day: string) => {
+    const out = new Set<number>();
+    body.options.forEach((events, i) => {
+      for (const e of events)
+        if (e.allDay && DAY.test(e.startLocal) && e.startLocal <= day && e.endLocal > day)
+          out.add(i);
+    });
+    return [...out];
+  };
+  const letters = (is: readonly number[]) =>
+    is.map(
+      (i) =>
+        html`<a class="letter" href="#o${i}" style="background:var(--o${i % 8})" aria-label="Option ${LETTERS[i] ?? ""}">${LETTERS[i] ?? ""}</a>`,
+    );
+  const full = body.options.length >= MAX_OPTIONS;
+  const rows: Html[] = [];
+  for (let h = FIRST_HOUR; h <= LAST_HOUR; h++) {
+    const hh = String(h).padStart(2, "0");
+    rows.push(
+      html`<div class="hrow"><span class="hr">${hh}</span>${days.map((day) => {
+        const here = inHour(body, day, h);
+        return here.length > 0
+          ? html`<span class="hour has">${letters(here)}</span>`
+          : full
+            ? html`<span class="hour"></span>`
+            : html`<button class="hour" type="submit" name="act" value="addh:${day}T${hh}:00" aria-label="Add ${day} ${hh}:00"></button>`;
+      })}</div>`,
+    );
+  }
+  return html`<div class="hours">
+<div class="row nav"><button type="submit" name="act" value="from:${addDays(from, -HOURS_DAYS)}" aria-label="Earlier days">‹</button><strong>${dayLabel(from)} – ${dayLabel(addDays(from, HOURS_DAYS - 1))}</strong><button type="submit" name="act" value="from:${addDays(from, HOURS_DAYS)}" aria-label="Later days">›</button></div>
+<div class="hrow head"><span></span>${days.map((day) => html`<span${day === today ? html` class="today"` : ""}>${dayLabel(day)}</span>`)}</div>
+<div class="hrow allday"><span class="hr">all day</span>${days.map((day) => html`<span class="hour${allDay(day).length > 0 ? " has" : ""}">${letters(allDay(day))}</span>`)}</div>
+${rows}
+<p class="muted small">Earlier or later than ${String(FIRST_HOUR)}:00–${String(LAST_HOUR + 1)}:00: set it in the option below.</p>
 </div>`;
+}
+
+/** Days or Hours: two views of the same options (rc46). Switching saves first. */
+function viewSwitch(view: "days" | "hours"): Html {
+  return html`<div class="seg viewswitch" role="group" aria-label="View"><button type="submit" name="act" value="view:days" aria-pressed="${String(view === "days")}">Days</button><button type="submit" name="act" value="view:hours" aria-pressed="${String(view === "hours")}">Hours</button></div>`;
 }
 
 function eventRow(i: number, j: number, r: EventRow, many: boolean): Html {
@@ -303,7 +405,10 @@ function addedBar(b: AskBody, added: number | null): Html | "" {
   if (added === null) return "";
   const e = b.options[added]?.[0];
   if (e === undefined) return "";
-  return html`<p class="undo">Added ${dayLabel(e.startLocal.slice(0, 10))} as ${LETTERS[added] ?? ""} <button class="link" type="submit" name="act" value="remove:${String(added)}">Undo</button></p>`;
+  const when = e.allDay
+    ? dayLabel(e.startLocal.slice(0, 10))
+    : `${dayLabel(e.startLocal.slice(0, 10))}, ${e.startLocal.slice(11, 16)}`;
+  return html`<p class="undo">Added ${when} as ${LETTERS[added] ?? ""} <button class="link" type="submit" name="act" value="remove:${String(added)}">Undo</button></p>`;
 }
 
 function askPage(
@@ -315,6 +420,9 @@ function askPage(
     readonly problem: string | null;
     readonly month: string;
     readonly today: string;
+    readonly view: "days" | "hours";
+    /** The first day the Hours view shows. */
+    readonly from: string;
     /** An option just added by tapping a day (rc46): its Undo. */
     readonly added: number | null;
   },
@@ -333,13 +441,16 @@ ${input.problem === null ? "" : html`<p class="error">${input.problem}</p>`}
 <form method="post" action="${ASK_PATH}/${draft.id}">
 <input type="hidden" name="csrf" value="${me.csrfToken}" />
 <input type="hidden" name="m" value="${input.month}" />
+<input type="hidden" name="v" value="${input.view}" />
+<input type="hidden" name="d" value="${input.from}" />
 <button type="submit" name="act" value="save" hidden></button>
 <p><label>What<br /><input name="title" maxlength="200" value="${b.title}" class="wide" required /></label></p>
 <p><label>Where <span class="muted">(optional)</span><br /><input name="location" maxlength="200" value="${b.location ?? ""}" class="wide" /></label></p>
-<h2>When could it be</h2>
-${daysView(b, input.month, input.today)}
+<div class="row spread"><h2>When could it be</h2>${viewSwitch(input.view)}</div>
+${input.view === "hours" ? hoursView(b, input.from, input.today) : daysView(b, input.month, input.today)}
+${newOnes(b)}
 ${addedBar(b, input.added)}
-${b.options.length === 0 ? html`<p class="muted">No times yet. Tap a day to add one.</p>` : options}
+${b.options.length === 0 ? html`<p class="muted">No times yet. Tap ${input.view === "hours" ? "an hour" : "a day"} to add one.</p>` : options}
 ${b.options.length < MAX_OPTIONS ? html`<p><button type="submit" name="act" value="option">+ A time</button> <span class="muted small">another option to choose between</span></p>` : ""}
 <p><label>Time zone<br /><input name="tzid" list="zones" value="${b.tzid ?? ""}" placeholder="Europe/Prague" /></label></p>
 ${zoneOptions()}
@@ -425,6 +536,8 @@ export function registerAskRoutes(app: Hono<AppEnv>, deps: AuthDeps): void {
           problem: null,
           month: monthOf(draft.body, c.req.query("m") ?? null, deps.now().slice(0, 10)),
           today: deps.now().slice(0, 10),
+          view: c.req.query("v") === "hours" ? "hours" : "days",
+          from: fromOf(draft.body, c.req.query("d") ?? null, deps.now().slice(0, 10)),
           added: addedOf(c.req.query("added"), draft.body),
         }),
       ),
@@ -449,14 +562,19 @@ export function registerAskRoutes(app: Hono<AppEnv>, deps: AuthDeps): void {
     const now = deps.now();
     await saveAskDraft(deps.storage, { id, authorId: me.personId, body, now });
     if (action !== "ask") {
-      // The month stays where it was shown; a tapped day's month, and its Undo, come back too.
+      // The view, month and days stay where they were shown; a tap's Undo comes back too.
       const q = new URLSearchParams({ saved: "1" });
+      const view = /^view:(days|hours)$/.exec(action)?.[1] ?? str(form, "v");
+      if (view === "hours") q.set("v", "hours");
       const month = /^month:(\d{4}-\d{2})$/.exec(action)?.[1] ?? str(form, "m");
-      const tapped = /^add:(\d{4}-\d{2})/.exec(action)?.[1];
-      if (tapped !== undefined && body.options.length > draft.body.options.length) {
+      const from = /^from:(\d{4}-\d{2}-\d{2})$/.exec(action)?.[1] ?? str(form, "d");
+      const tapped = /^addh?:(\d{4}-\d{2})/.exec(action)?.[1];
+      const grew = body.options.length > draft.body.options.length;
+      if (tapped !== undefined && grew) {
         q.set("m", tapped);
         q.set("added", String(body.options.length - 1));
       } else if (/^\d{4}-\d{2}$/.test(month)) q.set("m", month);
+      if (view === "hours" && DAY.test(from)) q.set("d", from);
       return c.redirect(`${ASK_PATH}/${id}?${q.toString()}`, 303);
     }
     const saved: AskDraft = { ...draft, body, updatedAt: now };
@@ -474,8 +592,10 @@ export function registerAskRoutes(app: Hono<AppEnv>, deps: AuthDeps): void {
             asked: await askedCount(deps, me, saved),
             saved: true,
             problem: message,
-            month: monthOf(body, null, now.slice(0, 10)),
+            month: monthOf(body, str(form, "m"), now.slice(0, 10)),
             today: now.slice(0, 10),
+            view: str(form, "v") === "hours" ? "hours" : "days",
+            from: fromOf(body, str(form, "d"), now.slice(0, 10)),
             added: null,
           }),
         ),
