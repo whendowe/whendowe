@@ -237,8 +237,45 @@ const stretch = must(
   "Lea's week",
 );
 
+// Ask when (rc46, A2): a question being written — two options, the first two events.
+const askPath = must(
+  (await app.request("/ask", post({ csrf }, cookie))).headers.get("location"),
+  "ask draft",
+);
+const askFields = {
+  csrf,
+  title: "Session 17",
+  location: "The back room",
+  tzid: "Europe/Prague",
+  o0e0day: "2026-11-05",
+  o0e0from: "19:00",
+  o0e0to: "23:00",
+  emails: "ann@example.org bob@example.org",
+};
+await app.request(askPath, post({ ...askFields, act: "and:0" }, cookie));
+await app.request(
+  askPath,
+  post({ ...askFields, o0e1day: "2026-11-07", o0e1last: "2026-11-08", act: "option" }, cookie),
+);
+await app.request(
+  askPath,
+  post(
+    {
+      ...askFields,
+      o0e1day: "2026-11-07",
+      o0e1last: "2026-11-08",
+      o1e0day: "2026-11-12",
+      o1e0from: "19:00",
+      o1e0to: "23:00",
+      act: "save",
+    },
+    cookie,
+  ),
+);
+
 const pages: Record<string, string> = {
   home: "/",
+  ask: askPath,
   "plan-thread": table,
   "plan-answer": planB,
   "plan-draft": `${kid}/draft`,
