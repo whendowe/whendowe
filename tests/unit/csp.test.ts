@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { expect, it } from "vitest";
 import { bytesToBase64 } from "../../src/crypto/base64.js";
 import { createApp } from "../../src/web/app.js";
+import { askDragAssets } from "../../src/web/ask-drag.js";
 import { CONTENT_SECURITY_POLICY, SCRIPT_HASHES } from "../../src/web/csp.js";
 import { SHARE_BUTTONS, ZONE_GUESS } from "../../src/web/layout.js";
 import { pickerAssets } from "../../src/web/picker.js";
@@ -19,6 +20,7 @@ const SHIPPED = [
   pickerAssets().value,
   planAssets().value,
   busyAssets().value,
+  askDragAssets().value,
 ];
 
 function bodyOf(assets: string): string {
