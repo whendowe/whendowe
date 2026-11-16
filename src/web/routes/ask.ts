@@ -5,7 +5,8 @@ import { ZodError } from "zod";
 import { groupDefaults, UnreachableAddressError } from "../../events/participation.js";
 import { PollInputError } from "../../events/poll.js";
 import { holdAction } from "../../held.js";
-import { findGroupForMember } from "../../people/group.js";
+import { findGroupForMember, listMembers } from "../../people/group.js";
+import { type KnownPerson, listKnownPeople } from "../../people/known.js";
 import {
   type AskBody,
   type AskDraft,
@@ -21,6 +22,15 @@ import { MAX_OPTION_EVENTS, MAX_OPTIONS } from "../../plans/plan.js";
 import { addDays, dayLabel } from "../../plans/weeks.js";
 import { askDragAssets } from "../ask-drag.js";
 import { type Html, html } from "../layout.js";
+import {
+  applyPick,
+  type Chip,
+  carriedFilter,
+  NO_LEVERS,
+  peoplePicker,
+  pickerAction,
+  readChips,
+} from "../people-picker.js";
 import { PLAN_STYLE } from "../plan-editor.js";
 import {
   type AppEnv,
@@ -99,14 +109,7 @@ function bodyOf(form: Record<string, unknown>, before: AskBody): AskBody {
       }),
     ),
   );
-  const emails = [
-    ...new Set(
-      str(form, "emails")
-        .split(/[\s,;]+/)
-        .map((e) => e.trim())
-        .filter((e) => e !== ""),
-    ),
-  ].slice(0, MAX_ASK_EMAILS);
+  const { emails, people } = fromChips(readChips(form, MAX_ASK_EMAILS));
   const text = (k: string, max: number) => str(form, k).slice(0, max);
   const opt = (k: string, max: number) => {
     const v = text(k, max).trim();
@@ -119,10 +122,54 @@ function bodyOf(form: Record<string, unknown>, before: AskBody): AskBody {
     tzid: opt("tzid", 64),
     options,
     emails,
+    people,
     defaults: {
       from: TIME.test(str(form, "new_from")) ? str(form, "new_from") : null,
       hours: HOURS.includes(Number(str(form, "new_hours"))) ? Number(str(form, "new_hours")) : 2,
     },
+  };
+}
+
+/** The question's people as chips (rc48): addresses as typed, then people chosen. */
+function chipsOf(body: AskBody): Chip[] {
+  const base = { editTier: "view", visibility: "FULL", ask: "" } as const;
+  return [
+    ...body.emails.map((value): Chip => ({ ...base, kind: "email", value, from: null })),
+    ...(body.people ?? []).map(
+      (p): Chip => ({ ...base, kind: "person", value: p.id, from: p.from }),
+    ),
+  ];
+}
+
+function fromChips(chips: readonly Chip[]): Pick<AskBody, "emails" | "people"> {
+  return {
+    emails: chips.filter((c) => c.kind === "email").map((c) => c.value),
+    people: chips.filter((c) => c.kind === "person").map((c) => ({ id: c.value, from: c.from })),
+  };
+}
+
+/** Who the picker knows of, and the question's own group as a chip naming its members. */
+interface AskPeople {
+  readonly known: readonly KnownPerson[];
+  readonly group: { readonly name: string; readonly members: readonly string[] } | null;
+  /** The group's people, already asked through it. */
+  readonly inGroup: ReadonlySet<string>;
+}
+
+async function askPeople(deps: AuthDeps, me: SignedIn, draft: AskDraft): Promise<AskPeople> {
+  const known = await listKnownPeople(deps.storage, me.personId);
+  const membership =
+    draft.groupId === null
+      ? null
+      : await findGroupForMember(deps.storage, draft.groupId, me.personId);
+  if (membership === null) return { known, group: null, inGroup: new Set() };
+  const members = (await listMembers(deps.storage, membership)).filter(
+    (m) => m.personId !== me.personId,
+  );
+  return {
+    known,
+    group: { name: membership.group.name, members: members.map((m) => m.shown.name) },
+    inGroup: new Set(members.map((m) => m.personId)),
   };
 }
 
@@ -272,7 +319,10 @@ async function askedCount(deps: AuthDeps, me: SignedIn, draft: AskDraft): Promis
           .filter((d) => d.visibility === "FULL" || d.visibility === "DETAILS")
           .map((d) => d.personId)
           .filter((id) => id !== me.personId);
-  return fromGroup.length + draft.body.emails.length;
+  const chosen = new Set(
+    (draft.body.people ?? []).map((p) => p.id).filter((id) => !fromGroup.includes(id)),
+  );
+  return fromGroup.length + chosen.size + draft.body.emails.length;
 }
 
 function readBack(draft: AskDraft, asked: number): Html {
@@ -535,6 +585,9 @@ function askPage(
     readonly from: string;
     /** An option just added by tapping a day (rc46): its Undo. */
     readonly added: number | null;
+    readonly people: AskPeople;
+    /** The group the suggestions are narrowed to. */
+    readonly filter: string | null;
   },
 ): Html {
   const b = draft.body;
@@ -566,7 +619,15 @@ ${b.options.length < MAX_OPTIONS ? html`<p><button type="submit" name="act" valu
 <p><label>Time zone<br /><input name="tzid" list="zones" value="${b.tzid ?? ""}" placeholder="Europe/Prague" /></label></p>
 ${zoneOptions()}
 <h2>Who</h2>
-<p><label>Their email addresses <span class="muted">(spaces, commas or new lines between them)</span><br /><textarea name="emails" rows="3" class="wide">${b.emails.join("\n")}</textarea></label></p>
+${peoplePicker({
+  chips: chipsOf(b),
+  known: input.people.known,
+  levers: NO_LEVERS,
+  filter: input.filter,
+  lead: "Who are you asking? Everyone asked sees the whole question.",
+  group: input.people.group,
+  exclude: input.people.inGroup,
+})}
 <p><label>Note <span class="muted">(optional — everyone asked sees it)</span><br /><textarea name="note" rows="2" maxlength="2000" class="wide">${b.note ?? ""}</textarea></label></p>
 ${readBack(draft, input.asked)}
 <div class="row wrap"><button class="primary" type="submit" name="act" value="ask">${
@@ -650,6 +711,8 @@ export function registerAskRoutes(app: Hono<AppEnv>, deps: AuthDeps): void {
           view: c.req.query("v") === "hours" ? "hours" : "days",
           from: fromOf(draft.body, c.req.query("d") ?? null, deps.now().slice(0, 10)),
           added: addedOf(c.req.query("added"), draft.body),
+          people: await askPeople(deps, me, draft),
+          filter: (c.req.query("f") ?? "").slice(0, 64) || null,
         }),
       ),
     );
@@ -669,7 +732,24 @@ export function registerAskRoutes(app: Hono<AppEnv>, deps: AuthDeps): void {
       return c.redirect("/", 303);
     }
     // Every button saves first: nothing typed is lost by any tap.
-    const body = act(bodyOf(form, draft.body), action);
+    const typed = act(bodyOf(form, draft.body), action);
+    // A picker button (rc48) changes who is asked; the rest of the form is saved with it.
+    const pick = pickerAction(form);
+    let filter = carriedFilter(form);
+    let body = typed;
+    if (pick !== null) {
+      const people = await askPeople(deps, me, draft);
+      const picked = applyPick({
+        chips: chipsOf(typed),
+        action: pick,
+        known: people.known,
+        max: MAX_ASK_EMAILS,
+        filter,
+        exclude: people.inGroup,
+      });
+      body = { ...typed, ...fromChips(picked.chips) };
+      filter = picked.filter;
+    }
     const now = deps.now();
     await saveAskDraft(deps.storage, { id, authorId: me.personId, body, now });
     if (action !== "ask") {
@@ -686,6 +766,7 @@ export function registerAskRoutes(app: Hono<AppEnv>, deps: AuthDeps): void {
         q.set("added", String(body.options.length - 1));
       } else if (/^\d{4}-\d{2}$/.test(month)) q.set("m", month);
       if (view === "hours" && DAY.test(from)) q.set("d", from);
+      if (filter !== null) q.set("f", filter);
       return c.redirect(`${ASK_PATH}/${id}?${q.toString()}`, 303);
     }
     const saved: AskDraft = { ...draft, body, updatedAt: now };
@@ -708,6 +789,8 @@ export function registerAskRoutes(app: Hono<AppEnv>, deps: AuthDeps): void {
             view: str(form, "v") === "hours" ? "hours" : "days",
             from: fromOf(body, str(form, "d"), now.slice(0, 10)),
             added: null,
+            people: await askPeople(deps, me, saved),
+            filter,
           }),
         ),
         400,

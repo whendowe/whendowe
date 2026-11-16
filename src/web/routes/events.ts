@@ -84,12 +84,7 @@ import {
   UNAVAILABLE,
 } from "../../people/capability.js";
 import { findGroupForMember, type GroupMembership, listMembers } from "../../people/group.js";
-import {
-  type EditTier,
-  editTierSchema,
-  type Visibility,
-  visibilitySchema,
-} from "../../people/invite.js";
+import { knownAddresses, listKnownPeople } from "../../people/known.js";
 import { appearanceIn, normalizeEmail } from "../../people/person.js";
 import { createPollThread } from "../../plans/plan.js";
 import {
@@ -118,6 +113,18 @@ import {
   who,
   ZONE_GUESS,
 } from "../layout.js";
+import {
+  applyPick,
+  type Chip,
+  carriedFilter,
+  chipsRefusal,
+  type Levers,
+  leversValid,
+  NO_LEVERS,
+  peoplePicker,
+  pickerAction,
+  readChips,
+} from "../people-picker.js";
 import { pickerAssets } from "../picker.js";
 import {
   type AppEnv,
@@ -613,82 +620,104 @@ function readRequests(form: Record<string, unknown>): Map<string, Request> {
 
 // --- People named on a new event, by email (DESIGN rc15) -------------------------------
 
-/** Rows on a new event's form: enough for a small group, and the most one form takes. */
+/** People on one form, at most: enough for a small group, and the most one form takes. */
 const PEOPLE_ROWS = 20;
 
-interface PersonRow {
-  /** As typed (trimmed), so a refused form shows it back; normalized on use. */
-  readonly email: string;
-  readonly editTier: EditTier;
-  readonly visibility: Visibility;
-  readonly ask: Request | "";
+interface PickerState {
+  readonly chips: readonly Chip[];
+  readonly filter: string | null;
 }
 
-const shownVisibility = visibilitySchema.exclude(["HIDDEN"]);
+const NO_PEOPLE: PickerState = { chips: [], filter: null };
 
-/** The filled-in rows, and any that aren't an email address. Unknown tiers fall back to the defaults. */
-function readPeople(form: Record<string, unknown>): { rows: PersonRow[]; bad: string[] } {
-  const rows: PersonRow[] = [];
-  const bad: string[] = [];
-  for (let i = 0; i < PEOPLE_ROWS; i++) {
-    const email = str(form, `email_${i}`).trim();
-    if (email === "") continue;
-    try {
-      normalizeEmail(email);
-    } catch {
-      bad.push(email);
-    }
-    const tier = editTierSchema.safeParse(form[`tier_${i}`]);
-    const vis = shownVisibility.safeParse(form[`vis_${i}`]);
-    const ask = form[`ask_${i}`];
-    rows.push({
-      email,
-      editTier: tier.success ? tier.data : "view",
-      visibility: vis.success ? vis.data : "FULL",
-      ask: ask === "accept" || ask === "ack" ? ask : "",
-    });
-  }
-  return { rows, bad };
+/** The group's other members: in through the group, so never suggested again. */
+async function othersInGroup(
+  deps: EventRouteDeps,
+  membership: GroupMembership | null,
+  meId: string,
+) {
+  return membership === null
+    ? []
+    : (await listMembers(deps.storage, membership)).filter((m) => m.personId !== meId);
 }
 
-function badPeople(bad: readonly string[]): string {
-  return `Not an email address: ${bad.join(", ")}`;
+/** The people picker (rc48) on a new event or poll: the group it is for as a chip, if any. */
+async function pickerFor(
+  deps: EventRouteDeps,
+  meId: string,
+  membership: GroupMembership | null,
+  state: PickerState,
+  levers: Levers,
+  lead: string,
+): Promise<Html> {
+  const members = await othersInGroup(deps, membership, meId);
+  return peoplePicker({
+    chips: state.chips,
+    known: await listKnownPeople(deps.storage, meId),
+    levers,
+    filter: state.filter,
+    lead,
+    group:
+      membership === null
+        ? null
+        : { name: membership.group.name, members: members.map((m) => m.shown.name) },
+    exclude: new Set(members.map((m) => m.personId)),
+  });
+}
+
+/** A picker button pressed (rc48), or null: the chips it leaves. Nothing is created by it. */
+async function picked(
+  deps: EventRouteDeps,
+  form: Record<string, unknown>,
+  meId: string,
+  chips: readonly Chip[],
+  exclude: readonly string[],
+): Promise<PickerState | null> {
+  const action = pickerAction(form);
+  if (action === null) return null;
+  return applyPick({
+    chips,
+    action,
+    known: await listKnownPeople(deps.storage, meId),
+    max: PEOPLE_ROWS,
+    filter: carriedFilter(form),
+    exclude: new Set(exclude),
+  });
+}
+
+/** Why the chips can't be sent yet, or null. */
+async function peopleRefusal(
+  deps: EventRouteDeps,
+  meId: string,
+  chips: readonly Chip[],
+): Promise<string | null> {
+  return chipsRefusal(chips, await listKnownPeople(deps.storage, meId));
 }
 
 /**
- * Who it's for, by email: each with what they may change, what they see and — on an
- * event, not a poll — what they're asked. Plain fields, so it works without JavaScript.
+ * The chips' people, created if new, and what each was asked. Call once the form is otherwise
+ * valid. A person chosen from the suggestions is checked again here: only someone you still
+ * share a group, event or thread with is found, and their address is used for mail alone.
  */
-function peopleFieldset(
-  rows: readonly PersonRow[],
-  asking: boolean,
-  lead: string,
-  /** False for a poll: everyone in it sees what it says (rc26), so there are no terms to pick. */
-  terms = true,
-): Html {
-  const shown = Math.min(PEOPLE_ROWS, Math.max(3, rows.length + 2));
-  const option = (value: string, label: string, chosen: string) =>
-    html`<option value="${value}" ${value === chosen ? html`selected` : ""}>${label}</option>`;
-  return html`<fieldset style="margin-bottom:1em"><legend>People</legend>
-<p class="muted">${lead}</p>
-${Array.from({ length: shown }, (_, i) => {
-  const r = rows[i] ?? { email: "", editTier: "view", visibility: "FULL", ask: "" };
-  if (!terms)
-    return html`<p><input name="email_${i}" type="email" value="${r.email}" placeholder="their email" aria-label="Email ${i + 1}" style="width:100%" /></p>`;
-  return html`<p><input name="email_${i}" type="email" value="${r.email}" placeholder="their email" aria-label="Email ${i + 1}" style="width:100%" />
-  <select name="tier_${i}" aria-label="Can change it (${i + 1})">${option("view", "can't change it", r.editTier)}${option("propose", "can propose changes", r.editTier)}${option("edit", "can edit it", r.editTier)}</select>
-  <select name="vis_${i}" aria-label="Sees (${i + 1})">${option("FULL", "sees everything", r.visibility)}${option("DETAILS", "sees title, time and place", r.visibility)}${option("BUSY", "sees only that the time is taken", r.visibility)}</select>
-  ${asking ? html`<select name="ask_${i}" aria-label="Ask (${i + 1})">${option("", "asked nothing", r.ask)}${REQUESTS.map((q) => option(q, REQUEST_LABEL[q], r.ask))}</select>` : ""}</p>`;
-})}
-</fieldset>`;
-}
-
-/** The rows' people, created if new, and what each was asked. Call once the form is otherwise valid. */
 async function invitees(
   deps: EventRouteDeps,
-  rows: readonly PersonRow[],
+  meId: string,
+  chips: readonly Chip[],
   from: { readonly senderId: string; readonly groupId: string | null },
 ) {
+  const addresses = await knownAddresses(
+    deps.storage,
+    meId,
+    chips.filter((c) => c.kind === "person").map((c) => c.value),
+  );
+  const rows = chips.map((c) => {
+    const email = c.kind === "email" ? c.value : addresses.get(c.value);
+    if (email === undefined)
+      throw new PollInputError(
+        "Someone chosen is no longer someone you share a group, event or thread with: remove them first.",
+      );
+    return { email, editTier: c.editTier, visibility: c.visibility, ask: c.ask };
+  });
   const people = await resolveInvitees(deps.storage, rows, { now: deps.now(), from });
   const asked = new Map<string, Request>();
   for (const row of rows) {
@@ -1193,6 +1222,8 @@ function peopleSection(
   access: EventAccess,
   people: readonly ParticipantView[],
   csrf: string,
+  /** The people picker for adding more (rc48), drawn only for someone who may. */
+  picker: Html,
 ): Html {
   const { event } = access;
   const editing = access.participation.editTier === "edit";
@@ -1228,26 +1259,7 @@ ${
   editing && TAKES_PEOPLE.has(event.status)
     ? html`<form method="post" action="${EVENTS_PATH}/${event.id}/people">
   <input type="hidden" name="csrf" value="${csrf}" />
-  <label for="add-email">Add someone by email</label>
-  <input id="add-email" name="email" type="email" required />
-  <p>
-    <label>Can change it:
-      <select name="editTier">
-        <option value="view" selected>no — view only</option>
-        <option value="propose">propose changes</option>
-        <option value="edit">yes — edit directly</option>
-      </select>
-    </label>
-  </p>
-  <p>
-    <label>Sees:
-      <select name="visibility">
-        <option value="FULL" selected>everything</option>
-        <option value="DETAILS">title, time and place</option>
-        <option value="BUSY">only that time is taken</option>
-      </select>
-    </label>
-  </p>
+  ${picker}
   <p><button type="submit">Add and email them a link</button></p>
 </form>`
     : ""
@@ -1260,6 +1272,8 @@ async function eventPage(
   access: EventAccess,
   csrf: string,
   notice: string | null = null,
+  /** The add-people picker's chips, when the page is drawn again after one of its buttons. */
+  adding: PickerState = NO_PEOPLE,
 ): Promise<string> {
   const { event, participation } = access;
   const vis = participation.visibility;
@@ -1323,7 +1337,7 @@ ${
 }
 ${await requestsSection(deps, access, csrf)}
 ${await proposalsSection(deps, access, csrf)}
-${people.length === 0 ? "" : peopleSection(access, people, csrf)}
+${people.length === 0 ? "" : peopleSection(access, people, csrf, participation.editTier === "edit" && TAKES_PEOPLE.has(event.status) ? peoplePicker({ chips: adding.chips, known: await listKnownPeople(deps.storage, participation.personId), levers: { terms: true, asking: false }, filter: adding.filter, lead: "Each gets an email with a link to answer, no account needed.", group: null, exclude: new Set(people.map((p) => p.personId)) }) : html``)}
 ${see("participants") ? await appearanceSection(deps.storage, { kind: "event", id: event.id }, { personId: participation.personId, csrfToken: csrf }, `${EVENTS_PATH}/${event.id}/me`, "event") : ""}
 ${event.verifiedAt === null ? ownAnswersForm({ action: `${EVENTS_PATH}/${event.id}/own-answers`, hidden: { csrf }, on: participation.ownAnswersOnly, where: "here" }) : ""}
 ${event.verifiedAt === null && participation.editTier === "edit" ? verifyForm(event.id, csrf, await mayVerify(deps, participation.personId)) : ""}
@@ -1370,7 +1384,7 @@ export function registerEventRoutes(app: Hono<AppEnv>, deps: EventRouteDeps): vo
     membership: GroupMembership | null,
     form: {
       values: FormValues;
-      rows: readonly PersonRow[];
+      people: PickerState;
       asks: ReadonlyMap<string, Request>;
       verified: boolean;
     },
@@ -1382,10 +1396,10 @@ export function registerEventRoutes(app: Hono<AppEnv>, deps: EventRouteDeps): vo
       membership === null
         ? html`<p><a href="/">← Your events</a></p>
 <h1>New event</h1>
-${eventForm(EVENTS_PATH, csrf, form.values, "", error, "Create event", "FULL", html`${peopleFieldset(form.rows, true, LEAD_ALONE)}${verifiedField(form.verified, false, "event", await mayVerify(deps, meId))}`)}`
+${eventForm(EVENTS_PATH, csrf, form.values, "", error, "Create event", "FULL", html`${await pickerFor(deps, meId, null, form.people, { terms: true, asking: true }, LEAD_ALONE)}${verifiedField(form.verified, false, "event", await mayVerify(deps, meId))}`)}`
         : html`<p><a href="/groups/${membership.group.id}">← ${membership.group.name}</a></p>
 <h1>New event for ${membership.group.name}</h1>
-${eventForm(`/groups/${membership.group.id}/events`, csrf, form.values, "", error, "Create event", "FULL", html`${await requestsFieldset(deps, membership, meId, form.asks)}${peopleFieldset(form.rows, true, leadFor(membership))}${verifiedField(form.verified, await groupDefaultVerified(deps.storage, membership.group.id), "event", await mayVerify(deps, meId))}`)}`,
+${eventForm(`/groups/${membership.group.id}/events`, csrf, form.values, "", error, "Create event", "FULL", html`${await requestsFieldset(deps, membership, meId, form.asks)}${await pickerFor(deps, meId, membership, form.people, { terms: true, asking: true }, leadFor(membership))}${verifiedField(form.verified, await groupDefaultVerified(deps.storage, membership.group.id), "event", await mayVerify(deps, meId))}`)}`,
     );
 
   const createEventFrom = async (c: Context<AppEnv>, groupId: string | null) => {
@@ -1398,28 +1412,38 @@ ${eventForm(`/groups/${membership.group.id}/events`, csrf, form.values, "", erro
     if (groupId !== null && membership === null) return c.html(notFound(c), 404);
     const values = readForm(form);
     const asks = readRequests(form);
-    const { rows, bad } = readPeople(form);
+    const chips = readChips(form, PEOPLE_ROWS);
     const verified = form.verified === "on";
-    const again = async (error: string, status: 400 | 403 = 400) =>
+    const again = async (
+      error: string | null,
+      status: 200 | 400 | 403 = 400,
+      people: PickerState = { chips, filter: carriedFilter(form) },
+    ) =>
       c.html(
         await newEventPage(
           c,
           me.csrfToken,
           me.personId,
           membership,
-          { values, rows, asks, verified },
+          { values, people, asks, verified },
           error,
         ),
         status,
       );
-    if (bad.length > 0) return again(badPeople(bad));
+    // A picker button (rc48): the form again with its chips; nothing is created.
+    const others = (await othersInGroup(deps, membership, me.personId)).map((m) => m.personId);
+    const pick = await picked(deps, form, me.personId, chips, others);
+    if (pick !== null) return again(null, 200, pick);
+    if (!leversValid(form, false)) return again("Choose what each person can change and see.");
+    const refusal = await peopleRefusal(deps, me.personId, chips);
+    if (refusal !== null) return again(refusal);
     // rc43: a group's default verifies it whatever the creator holds; asking to needs `verify`.
     if (verified && !(await mayVerify(deps, me.personId))) return again(UNAVAILABLE.verify, 403);
     try {
       const fields = toFields(values);
       // Fully valid BEFORE anyone is created for an address: a refused form creates no one.
       eventFieldsSchema.parse(fields);
-      const { people, asked } = await invitees(deps, rows, {
+      const { people, asked } = await invitees(deps, me.personId, chips, {
         senderId: me.personId,
         groupId: membership?.group.id ?? null,
       });
@@ -1438,7 +1462,12 @@ ${eventForm(`/groups/${membership.group.id}/events`, csrf, form.values, "", erro
     }
   };
 
-  const NOTHING = { values: EMPTY, rows: [], asks: new Map<string, Request>(), verified: false };
+  const NOTHING = {
+    values: EMPTY,
+    people: NO_PEOPLE,
+    asks: new Map<string, Request>(),
+    verified: false,
+  };
 
   app.get(`${EVENTS_PATH}/new`, async (c) => {
     const me = requireSignedIn(c);
@@ -1590,7 +1619,7 @@ ${eventForm(`${EVENTS_PATH}/${access.event.id}`, me.csrfToken, v, html`<input ty
     meId: string,
     membership: GroupMembership | null,
     values: PollFormValues,
-    rows: readonly PersonRow[],
+    people: PickerState,
     error: string | null,
   ) =>
     page(
@@ -1599,10 +1628,10 @@ ${eventForm(`${EVENTS_PATH}/${access.event.id}`, me.csrfToken, v, html`<input ty
       membership === null
         ? html`<p><a href="/">← Your events</a></p>
 <h1>Find a time</h1>
-${pollForm(POLLS_PATH, csrf, values, error, html`${peopleFieldset(rows, false, POLL_ALONE, false)}${verifiedField(values.verified, false, "poll", await mayVerify(deps, meId))}`)}`
+${pollForm(POLLS_PATH, csrf, values, error, html`${await pickerFor(deps, meId, null, people, NO_LEVERS, POLL_ALONE)}${verifiedField(values.verified, false, "poll", await mayVerify(deps, meId))}`)}`
         : html`<p><a href="/groups/${membership.group.id}">← ${membership.group.name}</a></p>
 <h1>Find a time with ${membership.group.name}</h1>
-${pollForm(`/groups/${membership.group.id}/polls`, csrf, values, error, html`${peopleFieldset(rows, false, pollLeadFor(membership), false)}${verifiedField(values.verified, await groupDefaultVerified(deps.storage, membership.group.id), "poll", await mayVerify(deps, meId))}`)}`,
+${pollForm(`/groups/${membership.group.id}/polls`, csrf, values, error, html`${await pickerFor(deps, meId, membership, people, NO_LEVERS, pollLeadFor(membership))}${verifiedField(values.verified, await groupDefaultVerified(deps.storage, membership.group.id), "poll", await mayVerify(deps, meId))}`)}`,
     );
 
   const createPollFrom = async (c: Context<AppEnv>, groupId: string | null) => {
@@ -1614,19 +1643,28 @@ ${pollForm(`/groups/${membership.group.id}/polls`, csrf, values, error, html`${p
       groupId === null ? null : await findGroupForMember(deps.storage, groupId, me.personId);
     if (groupId !== null && membership === null) return c.html(notFound(c), 404);
     const values = readPollForm(form);
-    const { rows, bad } = readPeople(form);
-    const again = async (error: string, status: 400 | 403 = 400) =>
+    const chips = readChips(form, PEOPLE_ROWS);
+    const again = async (
+      error: string | null,
+      status: 200 | 400 | 403 = 400,
+      people: PickerState = { chips, filter: carriedFilter(form) },
+    ) =>
       c.html(
-        await newPollPage(c, me.csrfToken, me.personId, membership, values, rows, error),
+        await newPollPage(c, me.csrfToken, me.personId, membership, values, people, error),
         status,
       );
-    if (bad.length > 0) return again(badPeople(bad));
+    const others = (await othersInGroup(deps, membership, me.personId)).map((m) => m.personId);
+    const pick = await picked(deps, form, me.personId, chips, others);
+    if (pick !== null) return again(null, 200, pick);
+    if (!leversValid(form, false)) return again("Choose what each person can change and see.");
+    const refusal = await peopleRefusal(deps, me.personId, chips);
+    if (refusal !== null) return again(refusal);
     if (values.verified && !(await mayVerify(deps, me.personId)))
       return again(UNAVAILABLE.verify, 403);
     try {
       const input = toPollInput(values);
       validateCandidates(input.fields, input.candidates); // as above: valid before anyone is created
-      const { people } = await invitees(deps, rows, {
+      const { people } = await invitees(deps, me.personId, chips, {
         senderId: me.personId,
         groupId: membership?.group.id ?? null,
       });
@@ -1654,7 +1692,7 @@ ${pollForm(`/groups/${membership.group.id}/polls`, csrf, values, error, html`${p
   app.get(`${POLLS_PATH}/new`, async (c) => {
     const me = requireSignedIn(c);
     if (me instanceof Response) return me;
-    return c.html(await newPollPage(c, me.csrfToken, me.personId, null, NO_POLL, [], null));
+    return c.html(await newPollPage(c, me.csrfToken, me.personId, null, NO_POLL, NO_PEOPLE, null));
   });
 
   app.post(POLLS_PATH, (c) => createPollFrom(c, null));
@@ -1664,7 +1702,9 @@ ${pollForm(`/groups/${membership.group.id}/polls`, csrf, values, error, html`${p
     if (me instanceof Response) return me;
     const membership = await findGroupForMember(deps.storage, c.req.param("groupId"), me.personId);
     if (membership === null) return groupNotVisible(c, deps, c.req.param("groupId"));
-    return c.html(await newPollPage(c, me.csrfToken, me.personId, membership, NO_POLL, [], null));
+    return c.html(
+      await newPollPage(c, me.csrfToken, me.personId, membership, NO_POLL, NO_PEOPLE, null),
+    );
   });
 
   app.post("/groups/:groupId/polls", (c) => createPollFrom(c, c.req.param("groupId")));
@@ -2033,33 +2073,65 @@ ${pollForm(`/groups/${membership.group.id}/polls`, csrf, values, error, html`${p
     const access = await findEventForParticipant(deps.storage, c.req.param("id"), me.personId);
     if (access === null || access.participation.visibility === "HIDDEN")
       return c.html(notFound(c), 404);
-    const editTier = editTierSchema.safeParse(form.editTier);
-    const visibility = visibilitySchema.exclude(["HIDDEN"]).safeParse(form.visibility);
-    let email: string;
-    try {
-      email = normalizeEmail(str(form, "email"));
-    } catch {
+    // The people picker (rc48): a button of its own draws the page again with the chips.
+    const known = await listKnownPeople(deps.storage, me.personId);
+    const chips = readChips(form, PEOPLE_ROWS);
+    const pick = pickerAction(form);
+    if (pick !== null) {
+      const taking = await listParticipants(deps.storage, access.event.id);
+      const next = applyPick({
+        chips,
+        action: pick,
+        known,
+        max: PEOPLE_ROWS,
+        filter: carriedFilter(form),
+        exclude: new Set(taking.map((p) => p.personId)),
+      });
+      return c.html(await eventPage(c, deps, access, me.csrfToken, null, next));
+    }
+    const kept = { chips, filter: carriedFilter(form) };
+    if (!leversValid(form, false))
+      return c.html(await eventPage(c, deps, access, me.csrfToken, "Please try again.", kept), 400);
+    const only = chips.length === 1 ? chips[0] : undefined;
+    if (chips.length === 0 || (only?.kind === "email" && chipsRefusal(chips, known) !== null))
       return c.html(
-        await eventPage(c, deps, access, me.csrfToken, "That isn't an email address."),
+        await eventPage(c, deps, access, me.csrfToken, "That isn't an email address.", kept),
         400,
       );
-    }
-    if (!editTier.success || !visibility.success)
-      return c.html(await eventPage(c, deps, access, me.csrfToken, "Please try again."), 400);
+    const refusal = chipsRefusal(chips, known);
+    if (refusal !== null)
+      return c.html(await eventPage(c, deps, access, me.csrfToken, refusal, kept), 400);
+    const addresses = await knownAddresses(
+      deps.storage,
+      me.personId,
+      chips.filter((t) => t.kind === "person").map((t) => t.value),
+    );
 
-    const added = await addParticipant(deps.storage, access, {
-      email,
-      editTier: editTier.data,
-      visibility: visibility.data,
-      now: deps.now(),
-    });
-    switch (added.kind) {
-      case "forbidden":
+    type Status = 200 | 409 | 422 | 429 | 503;
+    const outcomes: { status: Status; notice: string | null }[] = [];
+    for (const chip of chips) {
+      // Someone chosen from the suggestions is named as they are shown, never by address.
+      const label =
+        chip.kind === "email"
+          ? normalizeEmail(chip.value)
+          : (known.find((k) => k.personId === chip.value)?.shown.name ?? "Someone");
+      const email = chip.kind === "email" ? label : addresses.get(chip.value);
+      if (email === undefined) {
+        outcomes.push({ status: 422, notice: `Couldn't add ${label}.` });
+        continue;
+      }
+      const added = await addParticipant(deps.storage, access, {
+        email,
+        editTier: chip.editTier,
+        visibility: chip.visibility,
+        now: deps.now(),
+      });
+      if (added.kind === "forbidden")
         return c.html(
           page(c, "Not allowed", html`<h1>Only people who can edit it add people</h1>`),
           403,
         );
-      case "closed":
+      if (added.kind === "closed")
         return c.html(
           await eventPage(
             c,
@@ -2070,70 +2142,58 @@ ${pollForm(`/groups/${membership.group.id}/polls`, csrf, values, error, html`${p
           ),
           409,
         );
-      case "already":
-        return c.html(
-          await eventPage(c, deps, access, me.csrfToken, `${email} is already taking part.`),
-          409,
-        );
-      case "rate_limited":
-        return c.html(
-          await eventPage(
-            c,
-            deps,
-            access,
-            me.csrfToken,
-            "Too many people added to this event today. Please try again tomorrow.",
-          ),
-          429,
-        );
-      case "unreachable":
-        return c.html(
-          await eventPage(c, deps, access, me.csrfToken, `Couldn't add ${email}.`),
-          422,
-        );
-      case "added":
+      if (added.kind === "already") {
+        outcomes.push({ status: 409, notice: `${label} is already taking part.` });
+        continue;
+      }
+      if (added.kind === "rate_limited") {
+        outcomes.push({
+          status: 429,
+          notice: "Too many people added to this event today. Please try again tomorrow.",
+        });
         break;
-    }
-
-    const issued = await issueResponseLinks(deps.storage, access, {
-      now: deps.now(),
-      only: added.personId,
-    });
-    const link = issued.kind === "issued" ? issued.links[0] : undefined;
-    if (link === undefined)
-      return c.html(
-        await eventPage(
-          c,
-          deps,
-          access,
-          me.csrfToken,
-          `Added ${added.email}. There's nothing to ask them yet, so no email was sent.`,
-        ),
-      );
-    try {
-      await sendResponseLink(deps.mail, {
-        link,
-        access,
-        from: await nameIn(deps.storage, access, me.personId),
-        publicBaseUrl: deps.publicBaseUrl,
+      }
+      if (added.kind !== "added") {
+        // Unreachable (an opt-out, rc24).
+        outcomes.push({ status: 422, notice: `Couldn't add ${label}.` });
+        continue;
+      }
+      const issued = await issueResponseLinks(deps.storage, access, {
+        now: deps.now(),
+        only: added.personId,
       });
-    } catch (error) {
-      // Withdraw the unsent link so "Email everyone a link" isn't throttled for them.
-      await revokeUndeliveredLink(deps.storage, link);
-      return c.html(
-        await eventPage(
-          c,
-          deps,
+      const link = issued.kind === "issued" ? issued.links[0] : undefined;
+      if (link === undefined) {
+        outcomes.push({
+          status: 200,
+          notice: `Added ${label}. There's nothing to ask them yet, so no email was sent.`,
+        });
+        continue;
+      }
+      try {
+        await sendResponseLink(deps.mail, {
+          link,
           access,
-          me.csrfToken,
-          error instanceof MailCapReachedError
-            ? `Added ${added.email}, but couldn't email them. ${cappedText(error, deps.now(), true)}`
-            : `Added ${added.email}, but couldn't email them. Use "Email everyone a link" to try again later.`,
-        ),
-        503,
-      );
+          from: await nameIn(deps.storage, access, me.personId),
+          publicBaseUrl: deps.publicBaseUrl,
+        });
+        outcomes.push({ status: 200, notice: null });
+      } catch (error) {
+        // Withdraw the unsent link so "Email everyone a link" isn't throttled for them.
+        await revokeUndeliveredLink(deps.storage, link);
+        outcomes.push({
+          status: 503,
+          notice:
+            error instanceof MailCapReachedError
+              ? `Added ${label}, but couldn't email them. ${cappedText(error, deps.now(), true)}`
+              : `Added ${label}, but couldn't email them. Use "Email everyone a link" to try again later.`,
+        });
+      }
     }
-    return c.redirect(`${EVENTS_PATH}/${access.event.id}`, 303);
+    const notices = outcomes.flatMap((o) => (o.notice === null ? [] : [o.notice]));
+    if (notices.length === 0) return c.redirect(`${EVENTS_PATH}/${access.event.id}`, 303);
+    const status = outcomes.find((o) => o.status !== 200)?.status ?? 200;
+    return c.html(await eventPage(c, deps, access, me.csrfToken, notices.join(" ")), status);
   });
 
   app.post(`${EVENTS_PATH}/:id/people/remove`, async (c) => {
