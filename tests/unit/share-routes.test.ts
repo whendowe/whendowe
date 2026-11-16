@@ -217,7 +217,7 @@ describe("the shared link's page (rc25, rc29)", () => {
     expect(text).toContain("already goes by that name");
     // What was typed and chosen comes back with the problem.
     expect(text).toContain('value=" kestrel "');
-    expect(text).toMatch(new RegExp(`name="plan_${plan?.id}" value="no"\\s+checked`));
+    expect(text).toContain(`name="plan_${plan?.id}" value="none" aria-pressed="true">No<`);
   });
 
   it("nothing chosen, or a blank name, is sent back without joining anyone", async () => {
@@ -517,8 +517,8 @@ describe("one time on the shared page (rc33)", () => {
     );
     expect(res.status).toBe(200);
     const after = await res.text();
-    expect(after).toContain(`value="yes" aria-pressed="true">Yes</button>`);
-    expect(after).toContain("You said Yes.");
+    expect(after).toContain(`value="none" aria-pressed="true">Yes</button>`);
+    expect(after).toContain("Saved: yes. Tap it again to take it back.");
     expect(await votesOf(org, threadId, await guestIdIn(org, threadId, "Kestrel"))).toEqual([
       "yes",
     ]);

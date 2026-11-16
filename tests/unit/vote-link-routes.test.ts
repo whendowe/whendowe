@@ -129,15 +129,16 @@ it("a vote is saved and comes back checked; a form with no answer is refused", a
   expect(stray.status).toBe(400);
   expect(stray.headers.get("cache-control")).toBe("no-store");
   expect(stray.headers.get("referrer-policy")).toBe("no-referrer");
-  expect(await stray.text()).toContain("Pick an answer first.");
+  expect(await stray.text()).toContain("Tap an answer, or write a note first.");
   const res = await vote(b, f.token(0), { [`plan_${early}`]: "ifneedbe", [`plan_${late}`]: "no" });
   expect(res.status).toBe(303);
   expect(res.headers.get("location")).toBe(`${f.link(0)}&saved=1`);
   const text = await (await b.request(res.headers.get("location") ?? "")).text();
   expect(text).toContain("Thanks — your vote is saved.");
-  expect(text).toMatch(new RegExp(`name="plan_${early}" value="ifneedbe" checked`));
-  expect(text).toMatch(new RegExp(`name="plan_${late}" value="no" checked`));
-  expect(text).not.toMatch(new RegExp(`name="plan_${early}" value="yes" checked`));
+  // rc46: each answer is a button; the one given is pressed, and tapping it takes it back.
+  expect(text).toContain(`name="plan_${early}" value="none" aria-pressed="true">If need be<`);
+  expect(text).toContain(`name="plan_${late}" value="none" aria-pressed="true">No<`);
+  expect(text).toContain(`name="plan_${early}" value="yes" aria-pressed="false">Yes<`);
   expect(text).not.toContain("📍");
   expect((await vote(b, f.token(0), {})).status).toBe(400);
   expect((await vote(b, "nope", { [`plan_${early}`]: "yes" })).status).toBe(404);
@@ -200,18 +201,18 @@ it("one time is one tap: each answer its own button, the note going with it (rc3
   expect(guard).toBeLessThan(page.indexOf(`name="plan_${only}"`));
   // The note sits above the buttons, so the tap sends it.
   expect(page.indexOf('name="note"')).toBeLessThan(guard);
-  expect(page).not.toContain("You said");
+  expect(page).toContain("<strong>Not answered</strong>");
 
   const res = await vote(b, f.token(0), { [`plan_${only}`]: "ifneedbe", note: "Late by ten" });
   expect(res.status).toBe(303);
   const after = await (await b.request(res.headers.get("location") ?? "")).text();
-  expect(after).toContain(`value="ifneedbe" aria-pressed="true">If need be</button>`);
+  expect(after).toContain(`value="none" aria-pressed="true">If need be</button>`);
   expect(after).toContain(`value="yes" aria-pressed="false">Yes</button>`);
-  expect(after).toContain("You said If need be. Tap another to change it.");
+  expect(after).toContain("Saved: if need be. Tap it again to take it back.");
   expect(after).toContain("Late by ten");
 });
 
-it("one plan of several events alone on the table keeps a mark and a send (rc33)", async () => {
+it("one plan of several events alone on the table is asked by name, with buttons saved per tap (rc46)", async () => {
   const b = await browser({ now: () => NOW });
   const f = await pollWith(b, ["david", "ana"], "Picnic", NO_PLACE, SATURDAY);
   const mara = await f.as(f.mara.id);
@@ -233,9 +234,10 @@ it("one plan of several events alone on the table keeps a mark and a send (rc33)
   const text = await (await b.request(f.link(0))).text();
   expect(text).toMatch(/ · 2 events, /);
   expect(text).toContain("Which of these work for you?");
-  expect(text).toContain('type="radio"');
-  expect(text).toContain("Send my answer");
-  expect(text).not.toContain(ENTER_GUARD);
+  expect(text).not.toContain('type="radio"');
+  expect(text).not.toContain("Send my answer");
+  expect(text).toContain("Each tap is saved as you make it.");
+  expect(text).toContain("Add the note");
 });
 
 it("decided meanwhile, or left: the link says so", async () => {
@@ -435,7 +437,7 @@ it("the vote link takes a note, with the votes or alone, and shows everyone's, e
   // A blank note is no note: alone it answers nothing; with votes it is dropped.
   const blank = await vote(b, f.token(1), { note: "   " });
   expect(blank.status).toBe(400);
-  expect(await blank.text()).toContain("Pick an answer first.");
+  expect(await blank.text()).toContain("Tap an answer, or write a note first.");
   expect((await vote(b, f.token(1), { [`plan_${early}`]: "yes", note: "  " })).status).toBe(303);
   // A note on one day says the day once.
   await b.storage.batch([
