@@ -45,7 +45,7 @@ it("a new question: one time to fill in, the status line, a read-back; GET write
   const page = await (await b.request(f.path)).text();
   expect(b.writes).toBe(writes);
   expect(page).toContain("<strong>Draft</strong> · step 1 of 4 · nobody has been told");
-  expect(page).toContain('<span class="letter">A</span>');
+  expect(page).toMatch(/<legend><span class="letter" style="background:var\(--o0\)">A<\/span>/);
   expect(page).toContain('name="o0e0day"');
   expect(page).not.toContain('name="o1e0day"');
   expect(page).toContain("Asking emails nobody yet — add people below one question");
@@ -73,7 +73,7 @@ it("every button saves first; the read-back and the button say who and what", as
   const two = await (await b.request(f.path)).text();
   expect(two).toContain('value="Pizza night"');
   expect(two).toContain('<p class="or">or</p>');
-  expect(two).toContain('<span class="letter">B</span>');
+  expect(two).toMatch(/<legend><span class="letter" style="background:var\(--o1\)">B<\/span>/);
   expect(two).toContain(
     "does <strong>A or B</strong> suit for “Pizza night”? One of them will happen.",
   );
@@ -226,13 +226,99 @@ it("one person; no times; a time with no end kept as typed; ten options and no m
   ]);
   await f.send({ ...PIZZA, act: "drop:0:0" });
   const none = await (await b.request(f.path)).text();
-  expect(none).toContain('<p class="muted">No times yet.</p>');
+  expect(none).toContain('<p class="muted">No times yet. Tap a day to add one.</p>');
   expect(none).toContain("does nothing yet suit for “Pizza”? </p>");
   for (let i = 0; i < 11; i++) await f.send({ ...PIZZA, act: "option" });
   const ten = await (await b.request(f.path)).text();
-  expect(ten).toContain('<span class="letter">J</span>');
+  expect(ten).toMatch(/<legend><span class="letter" style="background:var\(--o1\)">J<\/span>/);
   expect(ten).not.toContain('value="option"');
   expect(
     (await findAskDraft(b.storage, { id: f.id, authorId: f.mara }))?.body.options,
   ).toHaveLength(10);
+});
+
+// --- the Days view (rc46): tap a free day to add; tap an option for its card ------------
+
+it("tapping a free day adds an option of the defaults, says so with Undo, and keeps the month", async () => {
+  const b = await browser({ now: () => NOW });
+  const f = await start(b);
+  const page = await (await b.request(f.path)).text();
+  // December 2101: Monday-first whole weeks, so 28–30 November open it, dashed.
+  expect(page).toContain("<strong>December 2101</strong>");
+  expect(page).toContain('value="add:2101-11-28" aria-label="Add 2101-11-28">28</button>');
+  expect(page).toMatch(/<button class="day out" type="submit" name="act" value="add:2101-11-28"/);
+  expect(page).toContain('class="day today"');
+  const res = await f.send({
+    ...PIZZA,
+    o0e0day: "",
+    new_from: "18:30",
+    new_hours: "3",
+    act: "add:2101-12-24",
+  });
+  expect(res.headers.get("location")).toBe(`${f.path}?saved=1&m=2101-12&added=1`);
+  const after = await (await b.request(res.headers.get("location") ?? "")).text();
+  expect(after).toContain(
+    'Added Sat 24 Dec as B <button class="link" type="submit" name="act" value="remove:1">Undo</button>',
+  );
+  expect(after).toMatch(/<a class="letter" href="#o1"[^>]*>B<\/a>/);
+  expect(after).not.toContain('value="add:2101-12-24"'); // a day with an option isn't free
+  expect((await findAskDraft(b.storage, { id: f.id, authorId: f.mara }))?.body.options[1]).toEqual([
+    { allDay: false, startLocal: "2101-12-24T18:30", endLocal: "2101-12-24T21:30" },
+  ]);
+  // Undo takes it away again.
+  await f.send({ ...PIZZA, o0e0day: "", act: "remove:1" });
+  expect(
+    (await findAskDraft(b.storage, { id: f.id, authorId: f.mara }))?.body.options,
+  ).toHaveLength(1);
+});
+
+it("no time makes a tapped day all day; late evenings run past midnight; stretches mark every day", async () => {
+  const b = await browser({ now: () => NOW });
+  const f = await start(b);
+  await f.send({ ...PIZZA, new_from: "", act: "add:2101-12-10" });
+  await f.send({
+    ...PIZZA,
+    new_from: "23:00",
+    new_hours: "2",
+    o1e0day: "2101-12-10",
+    act: "add:2101-12-11",
+  });
+  const opts = (await findAskDraft(b.storage, { id: f.id, authorId: f.mara }))?.body.options;
+  expect(opts?.[1]).toEqual([{ allDay: true, startLocal: "2101-12-10", endLocal: "2101-12-11" }]);
+  expect(opts?.[2]).toEqual([
+    { allDay: false, startLocal: "2101-12-11T23:00", endLocal: "2101-12-12T01:00" },
+  ]);
+  // A two-day stretch is drawn on both of its days.
+  await f.send({
+    ...PIZZA,
+    o0e0day: "2101-12-20",
+    o0e0from: "",
+    o0e0last: "2101-12-21",
+    o1e0day: "2101-12-10",
+    o2e0day: "2101-12-11",
+    o2e0from: "23:00",
+    o2e0to: "01:00",
+    act: "save",
+  });
+  const page = await (await b.request(f.path)).text();
+  expect(page.match(/<a class="letter" href="#o0"/g)).toHaveLength(2);
+});
+
+it("the month buttons save first and move; a month asked for is kept by Save; ten options leave no free day", async () => {
+  const b = await browser({ now: () => NOW });
+  const f = await start(b);
+  const res = await f.send({ ...PIZZA, title: "Moved on", act: "month:2102-01" });
+  expect(res.headers.get("location")).toBe(`${f.path}?saved=1&m=2102-01`);
+  const jan = await (await b.request(res.headers.get("location") ?? "")).text();
+  expect(jan).toContain("<strong>January 2102</strong>");
+  expect(jan).toContain('value="Moved on"');
+  expect(jan).toContain('name="m" value="2102-01"');
+  expect((await f.send({ ...PIZZA, m: "2102-01", act: "save" })).headers.get("location")).toBe(
+    `${f.path}?saved=1&m=2102-01`,
+  );
+  for (let i = 0; i < 9; i++) await f.send({ ...PIZZA, act: "option" });
+  const full = await (await b.request(`${f.path}?m=2101-12`)).text();
+  expect(full).not.toContain('value="add:');
+  // An Undo for an option that isn't there shows nothing.
+  expect(await (await b.request(`${f.path}?added=40`)).text()).not.toContain("Added ");
 });

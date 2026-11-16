@@ -34,6 +34,10 @@ export const askBodySchema = z.object({
   options: z.array(z.array(eventSchema).max(MAX_OPTION_EVENTS)).max(MAX_OPTIONS),
   /** People named by address, as typed; a group's people come from the group. */
   emails: z.array(z.string().max(320)).max(MAX_ASK_EMAILS),
+  /** What a day tapped on the calendar becomes (rc46): a time and length, or all day. */
+  defaults: z
+    .object({ from: z.string().max(5).nullable(), hours: z.number().int().min(1).max(12) })
+    .optional(),
 });
 export type AskBody = z.infer<typeof askBodySchema>;
 

@@ -210,6 +210,19 @@ export const PLAN_STYLE = html`<style>
   .pl.ask .or, .pl.ask .and { margin: 2px 0; font-size: .75rem; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
   .pl.ask .or { text-align: center; }
   .pl.ask .row.wrap { flex-wrap: wrap; align-items: end; gap: 8px; }
+  .pl.ask .days { display: grid; gap: 4px; }
+  .pl.ask .days .nav { justify-content: space-between; align-items: center; }
+  .pl.ask .days .nav button { min-width: 44px; min-height: 44px; }
+  .pl.ask .wkrow { display: grid; grid-template-columns: 1.4rem repeat(7, minmax(0, 1fr)); gap: 4px; }
+  .pl.ask .wkrow.head span, .pl.ask .wk { font-size: .7rem; color: var(--muted); text-align: center; align-self: center; }
+  .pl.ask .day { min-height: 44px; border-radius: 8px; border: 0; background: var(--tile); color: inherit; font: inherit;
+    display: flex; flex-wrap: wrap; gap: 2px; align-items: center; justify-content: center; padding: 2px; }
+  .pl.ask .day.out { background: transparent; border: 1px dashed var(--line); color: var(--muted); }
+  .pl.ask .day.today { outline: 2px solid var(--fg); outline-offset: -2px; }
+  .pl.ask .day.has b { width: 100%; text-align: center; font-weight: 400; font-size: .8rem; }
+  .pl.ask .day .letter { color: Canvas; text-decoration: none; }
+  .pl.ask .undo { border-radius: 10px; padding: 6px 12px; background: var(--fg); color: Canvas; }
+  .pl.ask .undo .link { color: Canvas; font-weight: 700; }
   .pl.ask .readback { border-radius: 10px; padding: 10px 12px; background: var(--accent-soft); }
   .pl .vh { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 </style>`;

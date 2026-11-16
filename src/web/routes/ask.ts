@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import type { Context, Hono } from "hono";
+import { Temporal } from "temporal-polyfill";
 import { ZodError } from "zod";
 import { groupDefaults, UnreachableAddressError } from "../../events/participation.js";
 import { PollInputError } from "../../events/poll.js";
@@ -17,7 +18,7 @@ import {
   startAskDraft,
 } from "../../plans/ask.js";
 import { MAX_OPTION_EVENTS, MAX_OPTIONS } from "../../plans/plan.js";
-import { addDays } from "../../plans/weeks.js";
+import { addDays, dayLabel } from "../../plans/weeks.js";
 import { type Html, html } from "../layout.js";
 import { PLAN_STYLE } from "../plan-editor.js";
 import {
@@ -117,11 +118,39 @@ function bodyOf(form: Record<string, unknown>, before: AskBody): AskBody {
     tzid: opt("tzid", 64),
     options,
     emails,
+    defaults: {
+      from: TIME.test(str(form, "new_from")) ? str(form, "new_from") : null,
+      hours: HOURS.includes(Number(str(form, "new_hours"))) ? Number(str(form, "new_hours")) : 2,
+    },
+  };
+}
+
+/** Lengths a tapped day can take (rc46: "New ones are 19:00, 2 h"). */
+const HOURS = [1, 2, 3, 4, 5, 6];
+
+/** A day tapped on the calendar, as an event of the defaults: a time and length, or all day. */
+function tappedEvent(day: string, body: AskBody): AskBody["options"][number][number] {
+  const from = body.defaults?.from ?? null;
+  if (from === null) return eventOf({ day, from: "", to: "", last: "" });
+  const start = Temporal.PlainDateTime.from(`${day}T${from}`);
+  const end = start.add({ hours: body.defaults?.hours ?? 2 });
+  // Past midnight is the next day: kept as a timed event that ends then.
+  return {
+    allDay: false,
+    startLocal: `${day}T${from}`,
+    endLocal: end.toString().slice(0, 16),
   };
 }
 
 /** The one thing a button does after the save. */
 function act(body: AskBody, action: string): AskBody {
+  // rc46: a free day tapped on the calendar becomes a new option, of the defaults.
+  const add = /^add:(\d{4}-\d{2}-\d{2})$/.exec(action);
+  if (add !== null && body.options.length < MAX_OPTIONS)
+    return { ...body, options: [...body.options, [tappedEvent(add[1] ?? "", body)]] };
+  const remove = /^remove:(\d+)$/.exec(action);
+  if (remove !== null)
+    return { ...body, options: body.options.filter((_, k) => k !== Number(remove[1])) };
   if (action === "option" && body.options.length < MAX_OPTIONS)
     return { ...body, options: [...body.options, [EMPTY_EVENT]] };
   const and = /^and:(\d+)$/.exec(action);
@@ -180,6 +209,85 @@ function readBack(draft: AskDraft, asked: number): Html {
   }</p>`;
 }
 
+const MONTHS = [
+  "January",
+  "February",
+  "March",
+  "April",
+  "May",
+  "June",
+  "July",
+  "August",
+  "September",
+  "October",
+  "November",
+  "December",
+];
+
+/** The month shown: asked for, else the first option's, else today's. */
+function monthOf(body: AskBody, asked: string | null, today: string): string {
+  if (asked !== null && /^\d{4}-\d{2}$/.test(asked)) return asked;
+  const first = body.options.flat().find((e) => DAY.test(e.startLocal.slice(0, 10)));
+  return (first?.startLocal ?? today).slice(0, 7);
+}
+
+/**
+ * The Days view (rc46), drawn by the server so it works without JavaScript: one Monday-first
+ * month in whole weeks, with week numbers. A free day is a button that adds an option of the
+ * defaults; a day with options links to each one's card, the sheet. Moving a month is a button
+ * too, so it saves first like every other.
+ */
+function daysView(body: AskBody, month: string, today: string): Html {
+  const first = Temporal.PlainDate.from(`${month}-01`);
+  const start = first.subtract({ days: first.dayOfWeek - 1 });
+  const last = first.add({ months: 1 }).subtract({ days: 1 });
+  const end = last.add({ days: 7 - last.dayOfWeek });
+  const onDay = new Map<string, number[]>();
+  body.options.forEach((events, i) => {
+    for (const e of events) {
+      const a = e.startLocal.slice(0, 10);
+      if (!DAY.test(a)) continue;
+      const z = e.allDay && DAY.test(e.endLocal) ? addDays(e.endLocal, -1) : a;
+      for (let d = a; d <= z; d = addDays(d, 1))
+        onDay.set(d, [...new Set([...(onDay.get(d) ?? []), i])]);
+    }
+  });
+  const weeks: Html[] = [];
+  for (let w = start; Temporal.PlainDate.compare(w, end) <= 0; w = w.add({ days: 7 })) {
+    const cells: Html[] = [html`<span class="wk">${String(w.weekOfYear ?? "")}</span>`];
+    for (let k = 0; k < 7; k++) {
+      const d = w.add({ days: k });
+      const key = d.toString();
+      const out = d.month !== first.month ? " out" : "";
+      const here = onDay.get(key);
+      const label = `${d.day}`;
+      cells.push(
+        here !== undefined
+          ? html`<span class="day has${out}"><b>${label}</b>${here.map(
+              (i) =>
+                html`<a class="letter" href="#o${i}" style="background:var(--o${i % 8})" aria-label="Option ${LETTERS[i] ?? ""}">${LETTERS[i] ?? ""}</a>`,
+            )}</span>`
+          : body.options.length < MAX_OPTIONS
+            ? html`<button class="day${out}${key === today ? " today" : ""}" type="submit" name="act" value="add:${key}" aria-label="Add ${key}">${label}</button>`
+            : html`<span class="day${out}">${label}</span>`,
+      );
+    }
+    weeks.push(html`<div class="wkrow">${cells}</div>`);
+  }
+  const prev = first.subtract({ months: 1 }).toString().slice(0, 7);
+  const next = first.add({ months: 1 }).toString().slice(0, 7);
+  const d = body.defaults;
+  return html`<div class="days">
+<div class="row nav"><button type="submit" name="act" value="month:${prev}" aria-label="Earlier month">‹</button><strong>${MONTHS[first.month - 1] ?? ""} ${String(first.year)}</strong><button type="submit" name="act" value="month:${next}" aria-label="Later month">›</button></div>
+<div class="wkrow head"><span></span>${["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"].map((x) => html`<span>${x}</span>`)}</div>
+${weeks}
+<p class="row wrap newones"><span class="muted">A day you tap is</span> <label><span class="vh">From</span><input type="time" name="new_from" value="${d === undefined ? "19:00" : (d.from ?? "")}" /></label> <label><span class="vh">For</span><select name="new_hours">${HOURS.map(
+    (h) =>
+      html`<option value="${String(h)}"${(d?.hours ?? 2) === h ? html` selected` : ""}>${String(h)} h</option>`,
+  )}</select></label> <span class="muted small">(no time: all day)</span></p>
+</div>`;
+}
+
 function eventRow(i: number, j: number, r: EventRow, many: boolean): Html {
   const k = `o${i}e${j}`;
   return html`<div class="ev">${j > 0 ? html`<p class="and">and</p>` : ""}<div class="row wrap">
@@ -190,15 +298,31 @@ function eventRow(i: number, j: number, r: EventRow, many: boolean): Html {
 ${many ? html`<button class="link" type="submit" name="act" value="drop:${i}:${j}">Remove</button>` : ""}</div></div>`;
 }
 
+/** Right after a day was tapped (rc46): what it became, and Undo. */
+function addedBar(b: AskBody, added: number | null): Html | "" {
+  if (added === null) return "";
+  const e = b.options[added]?.[0];
+  if (e === undefined) return "";
+  return html`<p class="undo">Added ${dayLabel(e.startLocal.slice(0, 10))} as ${LETTERS[added] ?? ""} <button class="link" type="submit" name="act" value="remove:${String(added)}">Undo</button></p>`;
+}
+
 function askPage(
   draft: AskDraft,
   me: SignedIn,
-  input: { readonly asked: number; readonly saved: boolean; readonly problem: string | null },
+  input: {
+    readonly asked: number;
+    readonly saved: boolean;
+    readonly problem: string | null;
+    readonly month: string;
+    readonly today: string;
+    /** An option just added by tapping a day (rc46): its Undo. */
+    readonly added: number | null;
+  },
 ): Html {
   const b = draft.body;
   const options = b.options.map(
     (events, i) =>
-      html`${i > 0 ? html`<p class="or">or</p>` : ""}<fieldset class="option"><legend><span class="letter">${LETTERS[i] ?? "?"}</span></legend>
+      html`${i > 0 ? html`<p class="or">or</p>` : ""}<fieldset class="option" id="o${i}"><legend><span class="letter" style="background:var(--o${i % 8})">${LETTERS[i] ?? "?"}</span></legend>
 ${events.map((e, j) => eventRow(i, j, rowOf(e), events.length > 1 || b.options.length > 1))}
 ${events.length < MAX_OPTION_EVENTS ? html`<p><button type="submit" name="act" value="and:${i}">+ and</button> <span class="muted small">another event, in this option</span></p>` : ""}
 </fieldset>`,
@@ -208,11 +332,14 @@ ${events.length < MAX_OPTION_EVENTS ? html`<p><button type="submit" name="act" v
 ${input.problem === null ? "" : html`<p class="error">${input.problem}</p>`}
 <form method="post" action="${ASK_PATH}/${draft.id}">
 <input type="hidden" name="csrf" value="${me.csrfToken}" />
+<input type="hidden" name="m" value="${input.month}" />
 <button type="submit" name="act" value="save" hidden></button>
 <p><label>What<br /><input name="title" maxlength="200" value="${b.title}" class="wide" required /></label></p>
 <p><label>Where <span class="muted">(optional)</span><br /><input name="location" maxlength="200" value="${b.location ?? ""}" class="wide" /></label></p>
 <h2>When could it be</h2>
-${b.options.length === 0 ? html`<p class="muted">No times yet.</p>` : options}
+${daysView(b, input.month, input.today)}
+${addedBar(b, input.added)}
+${b.options.length === 0 ? html`<p class="muted">No times yet. Tap a day to add one.</p>` : options}
 ${b.options.length < MAX_OPTIONS ? html`<p><button type="submit" name="act" value="option">+ A time</button> <span class="muted small">another option to choose between</span></p>` : ""}
 <p><label>Time zone<br /><input name="tzid" list="zones" value="${b.tzid ?? ""}" placeholder="Europe/Prague" /></label></p>
 ${zoneOptions()}
@@ -240,6 +367,11 @@ export async function askDraftsSection(deps: AuthDeps, me: SignedIn): Promise<Ht
         (d) =>
           html`<li><a href="${ASK_PATH}/${d.id}">${d.body.title.trim() === "" ? "Untitled question" : d.body.title}</a> <span class="muted">· ${d.body.options.length} ${d.body.options.length === 1 ? "time" : "times"}</span></li>`,
       )}</ul>`;
+}
+
+function addedOf(value: string | undefined, body: AskBody): number | null {
+  const i = Number.parseInt(value ?? "", 10);
+  return Number.isInteger(i) && i >= 0 && i < body.options.length ? i : null;
 }
 
 function problem(err: unknown): string | null {
@@ -291,6 +423,9 @@ export function registerAskRoutes(app: Hono<AppEnv>, deps: AuthDeps): void {
           asked: await askedCount(deps, me, draft),
           saved: c.req.query("saved") === "1",
           problem: null,
+          month: monthOf(draft.body, c.req.query("m") ?? null, deps.now().slice(0, 10)),
+          today: deps.now().slice(0, 10),
+          added: addedOf(c.req.query("added"), draft.body),
         }),
       ),
     );
@@ -313,7 +448,17 @@ export function registerAskRoutes(app: Hono<AppEnv>, deps: AuthDeps): void {
     const body = act(bodyOf(form, draft.body), action);
     const now = deps.now();
     await saveAskDraft(deps.storage, { id, authorId: me.personId, body, now });
-    if (action !== "ask") return c.redirect(`${ASK_PATH}/${id}?saved=1`, 303);
+    if (action !== "ask") {
+      // The month stays where it was shown; a tapped day's month, and its Undo, come back too.
+      const q = new URLSearchParams({ saved: "1" });
+      const month = /^month:(\d{4}-\d{2})$/.exec(action)?.[1] ?? str(form, "m");
+      const tapped = /^add:(\d{4}-\d{2})/.exec(action)?.[1];
+      if (tapped !== undefined && body.options.length > draft.body.options.length) {
+        q.set("m", tapped);
+        q.set("added", String(body.options.length - 1));
+      } else if (/^\d{4}-\d{2}$/.test(month)) q.set("m", month);
+      return c.redirect(`${ASK_PATH}/${id}?${q.toString()}`, 303);
+    }
     const saved: AskDraft = { ...draft, body, updatedAt: now };
     let asked: Awaited<ReturnType<typeof askDraft>>;
     try {
@@ -329,6 +474,9 @@ export function registerAskRoutes(app: Hono<AppEnv>, deps: AuthDeps): void {
             asked: await askedCount(deps, me, saved),
             saved: true,
             problem: message,
+            month: monthOf(body, null, now.slice(0, 10)),
+            today: now.slice(0, 10),
+            added: null,
           }),
         ),
         400,
