@@ -40,9 +40,11 @@ import {
   type Plan,
   type PlanEvent,
   PlanInputError,
+  retractVote,
 } from "../../plans/plan.js";
 import {
   answerThreadRequest,
+  decidesByConsensus,
   listThreadRequests,
   memberName,
   recordUnsentThreadReceipt,
@@ -326,10 +328,19 @@ export function noteList(
  * One plan on the table, as the link's person votes on it: a card, then the choices.
  * `personId` is "" for someone not in the thread yet (a shared link, rc25).
  */
-type Voter = Pick<ThreadAccess, "members" | "personId">;
+type Voter = Pick<ThreadAccess, "members" | "personId"> & {
+  /** Two people deciding together (rc26): a yes may agree it, and its button says so (rc46). */
+  readonly consensus?: boolean;
+};
 
-function mineOf(voter: Voter, p: Plan, chosen: ReadonlyMap<string, Answer>): Answer | null {
-  return chosen.get(p.id) ?? p.votes.find((v) => v.personId === voter.personId)?.answer ?? null;
+/** A vote form's value: an answer, or null to take one back (rc46). */
+export type VoteValue = Answer | null;
+
+function mineOf(voter: Voter, p: Plan, chosen: ReadonlyMap<string, VoteValue>): Answer | null {
+  const typed = chosen.get(p.id);
+  return typed !== undefined
+    ? typed
+    : (p.votes.find((v) => v.personId === voter.personId)?.answer ?? null);
 }
 
 /** A plan on the table: when, or its name and span, then who suggested it and the counts. */
@@ -346,48 +357,66 @@ function planSummary(access: Voter, p: Plan): Html {
   return html`${what}<br /><span class="muted">${author === undefined ? "" : `from ${memberName(author)} · `}${n("yes")} yes · ${n("ifneedbe")} if need be · ${n("no")} no</span>`;
 }
 
-function votePlan(
-  access: Voter,
-  p: Plan,
-  /** What the form had chosen, when it comes back with a problem. */
-  chosen: ReadonlyMap<string, Answer> = new Map(),
-): Html {
-  const mine = mineOf(access, p, chosen);
-  return html`<li>${planSummary(access, p)}<br />
-${answerSchema.options.map(
-  (a) =>
-    html`<label style="margin-right:.8em"><input type="radio" name="plan_${p.id}" value="${a}" ${mine === a ? html`checked` : ""} /> ${ANSWER_LABEL[a]}</label>`,
-)}</li>`;
+/**
+ * One plan's answer buttons (rc46): each a submit that saves at once. Tapping the answer you
+ * gave again takes it back. In a pair, a yes the other has already given agrees the time,
+ * and the button says so before it is tapped.
+ */
+function answerButtons(voter: Voter, p: Plan, mine: Answer | null): Html {
+  const theyAgreed =
+    voter.consensus === true &&
+    p.votes.some((v) => v.personId !== voter.personId && v.answer === "yes");
+  return html`<div class="seg" role="group" aria-label="Your answer">${answerSchema.options.map(
+    (a) =>
+      html`<button type="submit" name="plan_${p.id}" value="${mine === a ? "none" : a}" aria-pressed="${String(mine === a)}">${
+        a === "yes" && theyAgreed && mine !== "yes" ? "Yes, and agree it" : ANSWER_LABEL[a]
+      }</button>`,
+  )}</div>`;
+}
+
+/** Under a plan's buttons: saved, or not answered — and Undo right after taking one back. */
+function answerState(p: Plan, mine: Answer | null, took: Answer | undefined): Html {
+  if (took !== undefined && mine === null)
+    return html`<p class="small">Took back your ${VOTE_WORD[took]}. <button class="link" type="submit" name="plan_${p.id}" value="${took}">Undo</button></p>`;
+  return mine === null
+    ? html`<p class="small"><strong>Not answered</strong></p>`
+    : html`<p class="small muted">Saved: ${VOTE_WORD[mine]}. Tap it again to take it back.</p>`;
 }
 
 /**
- * The answer part of a vote form, after any name. One time on the table (one plan of one
- * event) is an easy decision, so it is one tap (rc31): each answer is its own submit button, sending the
- * note with it. More than one is a mark each and a send. The first submit button is a
- * disabled, hidden one, so Enter in a field submits nothing rather than picking "Yes".
+ * The answer part of a vote form, after any name (rc46): every plan on the table has its
+ * own buttons, and each tap is saved — there is no send for answers. One time on the table
+ * is asked as one question (rc33). The note goes with a tap, or alone with its own button.
+ * The first submit button is a disabled, hidden one, so Enter in a field submits nothing
+ * rather than picking "Yes".
  */
 export function answerPart(
   voter: Voter,
   onTable: readonly Plan[],
   note: Html,
-  send: Html,
-  chosen: ReadonlyMap<string, Answer> = new Map(),
+  sendNote: Html,
+  chosen: ReadonlyMap<string, VoteValue> = new Map(),
+  /** A plan whose answer was just taken back, and what it was: for its Undo. */
+  took: ReadonlyMap<string, Answer> = new Map(),
 ): Html {
   const [only] = onTable;
-  if (only === undefined || oneTime(onTable) === null)
-    return html`<h2>Which of these work for you?</h2>
-  <ul class="stack" style="list-style:none;padding:0;margin:0">${onTable.map((p) => votePlan(voter, p, chosen))}</ul>
-  ${note}
-  <p>${send}</p>`;
-  const mine = mineOf(voter, only, chosen);
-  return html`<h2>Does this work for you?</h2>
+  const card = (p: Plan) => {
+    const mine = mineOf(voter, p, chosen);
+    return html`${answerButtons(voter, p, mine)}${answerState(p, mine, took.get(p.id))}`;
+  };
+  const saved = html`<p class="muted small">Each tap is saved as you make it.</p>`;
+  // One time: the note sits above the buttons, so it goes with the tap (rc33).
+  if (only !== undefined && oneTime(onTable) !== null)
+    return html`<h2>Does this work for you?</h2>
   <p>${planSummary(voter, only)}</p>
   ${note}
-  <div class="seg" role="group" aria-label="Your answer"><button type="submit" disabled hidden></button>${answerSchema.options.map(
-    (a) =>
-      html`<button type="submit" name="plan_${only.id}" value="${a}" aria-pressed="${String(mine === a)}">${ANSWER_LABEL[a]}</button>`,
-  )}</div>
-  ${mine === null ? "" : html`<p class="muted">You said ${ANSWER_LABEL[mine]}. Tap another to change it.</p>`}`;
+  <button type="submit" disabled hidden></button>${card(only)}${saved}`;
+  return html`<button type="submit" disabled hidden></button><h2>Which of these work for you?</h2>
+  <ul class="stack" style="list-style:none;padding:0;margin:0">${onTable.map(
+    (p) => html`<li>${planSummary(voter, p)}${card(p)}</li>`,
+  )}</ul>${saved}
+  ${note}
+  <p>${sendNote}</p>`;
 }
 
 /**
@@ -409,6 +438,8 @@ async function votePage(
   givenBy: string | null,
   /** Whether this link was mailed to them: only then may it change their own switch (rc42). */
   mailed: boolean,
+  /** A plan whose answer was just taken back (rc46), for its Undo. */
+  took: ReadonlyMap<string, Answer> = new Map(),
 ): Promise<string> {
   const plans = await listPlans(storage, access);
   const ownSwitch =
@@ -429,11 +460,13 @@ async function votePage(
       : html`<form class="stack" method="post" action="${VOTE_PATH}">
   <input type="hidden" name="t" value="${token}" />
   ${answerPart(
-    access,
+    { ...access, consensus: decidesByConsensus(access) },
     onTable,
     html`<p><label>Anything to add? <span class="muted">(optional — everyone in it sees it, e.g. "Thursday's bad next week")</span><br />
   <textarea name="note" rows="2" maxlength="500" class="wide"></textarea></label></p>`,
-    html`<button type="submit">Send my answer</button>`,
+    html`<button type="submit">Add the note</button>`,
+    new Map(),
+    took,
   )}
 </form>`;
   return linkPage(
@@ -457,15 +490,33 @@ function voteGivenBy(link: ResolvedVoteLink): string | null {
   return by === undefined ? "Someone" : memberName(by);
 }
 
-/** plan_<id> fields → answers; anything else is ignored. */
-export function readVotes(form: Record<string, unknown>): Map<string, Answer> {
-  const votes = new Map<string, Answer>();
+/** plan_<id> fields → answers, or null for "none" (take it back, rc46); anything else is ignored. */
+export function readVotes(form: Record<string, unknown>): Map<string, VoteValue> {
+  const votes = new Map<string, VoteValue>();
   for (const [key, value] of Object.entries(form)) {
     const id = /^plan_([0-9a-f-]{1,64})$/.exec(key)?.[1];
+    if (id === undefined) continue;
+    if (value === "none") {
+      votes.set(id, null);
+      continue;
+    }
     const answer = answerSchema.safeParse(value);
-    if (id !== undefined && answer.success) votes.set(id, answer.data);
+    if (answer.success) votes.set(id, answer.data);
   }
   return votes;
+}
+
+/** `took=<plan id>:<answer>` on a page after a take-back (rc46): what its Undo gives again. */
+export function readTook(value: string | undefined): Map<string, Answer> {
+  const m = /^([0-9a-f-]{1,64}):(yes|ifneedbe|no)$/.exec(value ?? "");
+  const answer = answerSchema.safeParse(m?.[2]);
+  return m?.[1] === undefined || !answer.success ? new Map() : new Map([[m[1], answer.data]]);
+}
+
+/** The query that carries a take-back to the page after the redirect, or null for none. */
+export function tookParam(recorded: readonly VoteReceiptLine[]): string | null {
+  const back = recorded.find((l) => l.kind === "vote" && l.answer === null && l.previous !== null);
+  return back?.kind === "vote" && back.previous !== null ? `${back.planId}:${back.previous}` : null;
 }
 
 export function readToken(value: unknown): string | null {
@@ -474,7 +525,7 @@ export function readToken(value: unknown): string | null {
 }
 
 export interface Answers {
-  readonly votes: ReadonlyMap<string, Answer>;
+  readonly votes: ReadonlyMap<string, VoteValue>;
   readonly note: string;
 }
 
@@ -517,9 +568,16 @@ export async function applyAnswers(
     }
   }
   for (const [planId, answer] of answers.votes) {
+    if (answer === null) {
+      const back = await retractVote(storage, access, { planId, arrival });
+      if (back.kind === "taken")
+        recorded.push({ kind: "vote", planId, answer: null, previous: back.previous });
+      if (back.kind === "closed" || back.kind === "forbidden") closed = true;
+      continue;
+    }
     const result = await castVote(storage, access, { planId, answer, now, arrival });
     if (result.kind === "accepted" || result.kind === "recorded")
-      recorded.push({ kind: "vote", planId, answer });
+      recorded.push({ kind: "vote", planId, answer, previous: null });
     if (result.kind === "accepted") agreed = true;
     if (result.kind === "closed" || result.kind === "invalid" || result.kind === "forbidden")
       closed = true;
@@ -537,9 +595,17 @@ export async function applyAnswers(
   };
 }
 
-/** One line of a vote receipt: a vote on a plan, or a note (rc42). */
+/**
+ * One line of a vote receipt: a vote on a plan, or a note (rc42). A vote of null is an answer
+ * taken back (rc46), and `previous` says which.
+ */
 export type VoteReceiptLine =
-  | { readonly kind: "vote"; readonly planId: string; readonly answer: Answer }
+  | {
+      readonly kind: "vote";
+      readonly planId: string;
+      readonly answer: Answer | null;
+      readonly previous: Answer | null;
+    }
   | { readonly kind: "note" };
 
 const VOTE_WORD: Record<Answer, string> = { yes: "yes", ifneedbe: "if need be", no: "no" };
@@ -595,7 +661,9 @@ export async function sendThreadReceipt(
         ...input.recorded.map((line) =>
           line.kind === "note"
             ? "- You added a note"
-            : `- "${nameOf(line.planId)}": ${VOTE_WORD[line.answer]}`,
+            : line.answer === null
+              ? `- "${nameOf(line.planId)}": took back ${line.previous === null ? "the answer" : VOTE_WORD[line.previous]}`
+              : `- "${nameOf(line.planId)}": ${VOTE_WORD[line.answer]}`,
         ),
         "",
         `When: ${input.now.slice(0, 16).replace("T", " ")} UTC`,
@@ -859,6 +927,7 @@ export function registerRespondRoutes(app: Hono<AppEnv>, deps: RespondRouteDeps)
         ownLink(c, access),
         voteGivenBy(link),
         link.arrival?.via === "mailed",
+        readTook(c.req.query("took")),
       ),
     );
   });
@@ -886,7 +955,7 @@ export function registerRespondRoutes(app: Hono<AppEnv>, deps: RespondRouteDeps)
         ),
         status,
       );
-    if (answers === null) return refuse("Pick an answer first.", 400);
+    if (answers === null) return refuse("Tap an answer, or write a note first.", 400);
     const { refused, recorded } = await applyAnswers(
       deps.storage,
       access,
@@ -898,7 +967,9 @@ export function registerRespondRoutes(app: Hono<AppEnv>, deps: RespondRouteDeps)
     if (refused !== null) return refuse(refused.message, refused.status);
     const back = new URL(VOTE_PATH, "http://placeholder");
     back.searchParams.set("t", token);
-    back.searchParams.set("saved", "1");
+    const took = tookParam(recorded);
+    if (took === null) back.searchParams.set("saved", "1");
+    else back.searchParams.set("took", took);
     return c.redirect(`${back.pathname}${back.search}`, 303);
   });
 }

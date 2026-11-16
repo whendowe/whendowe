@@ -217,7 +217,7 @@ describe("the shared link's page (rc25, rc29)", () => {
     expect(text).toContain("already goes by that name");
     // What was typed and chosen comes back with the problem.
     expect(text).toContain('value=" kestrel "');
-    expect(text).toMatch(new RegExp(`name="plan_${plan?.id}" value="no"\\s+checked`));
+    expect(text).toContain(`name="plan_${plan?.id}" value="none" aria-pressed="true">No<`);
   });
 
   it("nothing chosen, or a blank name, is sent back without joining anyone", async () => {
@@ -517,8 +517,8 @@ describe("one time on the shared page (rc33)", () => {
     );
     expect(res.status).toBe(200);
     const after = await res.text();
-    expect(after).toContain(`value="yes" aria-pressed="true">Yes</button>`);
-    expect(after).toContain("You said Yes.");
+    expect(after).toContain(`value="none" aria-pressed="true">Yes</button>`);
+    expect(after).toContain("Saved: yes. Tap it again to take it back.");
     expect(await votesOf(org, threadId, await guestIdIn(org, threadId, "Kestrel"))).toEqual([
       "yes",
     ]);
@@ -925,3 +925,28 @@ async function maraPoll2(b: Browser) {
   });
   return { threadId };
 }
+
+describe("taking an answer back on the shared page (rc46)", () => {
+  it("a guest's own answer tapped again goes, with Undo on the page after", async () => {
+    const org = await browser({ now: () => NOW });
+    const f = await maraPoll(org);
+    const { path, token } = await share(org, f.threadId);
+    const [early = ""] = f.planIds;
+    const phone = org.another();
+    await phone.request(SHARE_PATH, post({ t: token, name: "Kestrel", [`plan_${early}`]: "no" }));
+    const kestrel = await guestIdIn(org, f.threadId, "Kestrel");
+    expect(await votesOf(org, f.threadId, kestrel)).toEqual(["no", null]);
+    // The page answers as Kestrel now; "No" is pressed, and tapping it sends none.
+    expect(await (await phone.request(path)).text()).toContain(
+      `name="plan_${early}" value="none" aria-pressed="true">No<`,
+    );
+    const res = await phone.request(SHARE_PATH, post({ t: token, [`plan_${early}`]: "none" }));
+    expect(res.status).toBe(303);
+    const back = res.headers.get("location") ?? "";
+    expect(back).toContain(`took=${early}%3Ano`);
+    expect(await votesOf(org, f.threadId, kestrel)).toEqual([null, null]);
+    expect(await (await phone.request(back)).text()).toContain(
+      `Took back your no. <button class="link" type="submit" name="plan_${early}" value="no">Undo</button>`,
+    );
+  });
+});

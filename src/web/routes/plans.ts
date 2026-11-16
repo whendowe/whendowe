@@ -35,6 +35,7 @@ import {
   type PlanEventInput,
   PlanInputError,
   removeDraftEvent,
+  retractVote,
   sendDraft,
   setDraftDetails,
   startDraft,
@@ -745,6 +746,8 @@ interface PlanQuery {
   readonly confirm: boolean;
   readonly sent: boolean;
   readonly more: number;
+  /** rc46: the answer just taken back, for its Undo. */
+  readonly took: Answer | null;
 }
 
 const DAY = /^\d{4}-\d{2}-\d{2}$/;
@@ -758,6 +761,7 @@ function planQuery(c: Context<AppEnv>): PlanQuery {
     confirm: c.req.query("confirm") === "1",
     sent: c.req.query("sent") === "1",
     more: Number.isFinite(more) && more > 0 && more < 52 ? more : 0,
+    took: answerSchema.safeParse(c.req.query("took")).data ?? null,
   };
 }
 
@@ -868,10 +872,23 @@ ${shareBox("Message to paste", html`${t.name}: I've proposed “${p.name}” (${
     }. Other plans for the same time are replaced by it.</p>
 <div class="row"><form method="post" action="${here}/accept">${csrf}<button class="primary" type="submit">Yes, accept</button></form><a class="btn" href="${here}">Cancel</a></div></div>`;
   }
+  // rc46: each tap is saved; your answer tapped again takes it back. In a pair, a yes the
+  // other has given already agrees the time, and the button says so.
+  const theyAgreed =
+    decidesByConsensus(v.access) &&
+    p.votes.some((x) => x.personId !== v.access.personId && x.answer === "yes");
   const voteButton = (a: Answer, label: string) =>
-    html`<button type="submit" name="answer" value="${a}" aria-pressed="${mine === a ? "true" : "false"}">${label}</button>`;
+    html`<button type="submit" name="answer" value="${mine === a ? "none" : a}" aria-pressed="${mine === a ? "true" : "false"}">${
+      a === "yes" && theyAgreed && mine !== "yes" ? "Yes, and agree it" : label
+    }</button>`;
+  const state =
+    q.took !== null && mine === null
+      ? html`<p class="small">Took back your ${ANSWER_WORD[q.took]}. <button class="link" type="submit" name="answer" value="${q.took}">Undo</button></p>`
+      : mine === null
+        ? html`<p class="small"><strong>Not answered</strong></p>`
+        : html`<p class="small muted">Saved: ${ANSWER_WORD[mine]}. Tap it again to take it back.</p>`;
   return html`${sent}${about}${busyClash(p.events, true)}
-<form method="post" action="${here}/vote" class="seg" role="group" aria-label="Your vote">${csrf}${voteButton("yes", "Yes")}${voteButton("ifneedbe", "If need be")}${voteButton("no", "No")}</form>
+<form method="post" action="${here}/vote">${csrf}<div class="seg" role="group" aria-label="Your vote">${voteButton("yes", "Yes")}${voteButton("ifneedbe", "If need be")}${voteButton("no", "No")}</div>${state}</form>
 <details class="suggest"><summary>Add a note</summary><form method="post" action="${threadPath(t.id)}/notes">${csrf}<input type="hidden" name="back" value="${p.id}" />
 <p><textarea name="note" rows="2" maxlength="500" class="wide" aria-label="Note" placeholder="Thursday's bad next week"></textarea></p>
 <p><button type="submit">Add it</button> <span class="small muted">Everyone in it sees it, on the days on the table.</span></p></form></details>
@@ -1787,10 +1804,30 @@ ${
   app.post(`${PLANS_PATH}/:thread/p/:plan/vote`, async (c) => {
     const r = await posting(c);
     if (r instanceof Response) return r;
-    const answer = answerSchema.safeParse(str(r.form, "answer"));
     const planId = c.req.param("plan");
-    if (!answer.success) return c.redirect(planPath(r.access.thread.id, planId), 303);
     const now = deps.now();
+    // rc46: your answer tapped again takes it back, with Undo on the page after.
+    if (str(r.form, "answer") === "none") {
+      const back = await retractVote(deps.storage, r.access, { planId, arrival: SIGNED_IN });
+      if (back.kind === "taken") {
+        await sendThreadReceipt(deps, r.access, {
+          recorded: [{ kind: "vote", planId, answer: null, previous: back.previous }],
+          arrival: SIGNED_IN,
+          now,
+        });
+        return c.redirect(`${planPath(r.access.thread.id, planId)}?took=${back.previous}`, 303);
+      }
+      if (back.kind === "none") return c.redirect(planPath(r.access.thread.id, planId), 303);
+      const v = await load(deps, r.access, r.me);
+      const p = v.plans.find((x) => x.id === planId);
+      if (p === undefined) return notFound(c);
+      return c.html(
+        page(c, p.name, planPage(v, p, planQuery(c), deps, "This plan is no longer on the table.")),
+        409,
+      );
+    }
+    const answer = answerSchema.safeParse(str(r.form, "answer"));
+    if (!answer.success) return c.redirect(planPath(r.access.thread.id, planId), 303);
     const result = await castVote(deps.storage, r.access, {
       planId,
       answer: answer.data,
@@ -1799,7 +1836,7 @@ ${
     });
     if (result.kind === "recorded" || result.kind === "accepted")
       await sendThreadReceipt(deps, r.access, {
-        recorded: [{ kind: "vote", planId, answer: answer.data }],
+        recorded: [{ kind: "vote", planId, answer: answer.data, previous: null }],
         arrival: SIGNED_IN,
         now,
       });

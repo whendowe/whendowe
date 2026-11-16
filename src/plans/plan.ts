@@ -820,6 +820,43 @@ export async function castVote(
 }
 
 /**
+ * Take an answer back (rc46): the person's own vote on a plan still on the table goes, so they
+ * are "not answered" again. The same guard as castVote: in a verified thread, or for someone
+ * who takes answers only from their own email, only signed in or a mailed link counts.
+ * `taken` carries the answer that went, for the page's Undo.
+ */
+export async function retractVote(
+  storage: StoragePort,
+  access: ThreadAccess,
+  input: { readonly planId: string; readonly arrival: Arrival | null },
+): Promise<
+  | { readonly kind: "taken"; readonly previous: Answer }
+  | { readonly kind: "none" }
+  | { readonly kind: "forbidden" }
+  | { readonly kind: "closed" }
+> {
+  const guarded =
+    access.thread.verifiedAt !== null ||
+    access.members.some((m) => m.personId === access.personId && m.ownAnswersOnly);
+  const via = input.arrival?.via;
+  if (guarded && via !== "session" && via !== "mailed") return { kind: "forbidden" };
+  const [plan] = await storage.query({
+    sql: "SELECT status FROM plan WHERE id = ? AND thread_id = ?",
+    params: [input.planId, access.thread.id],
+  });
+  if (plan?.status !== "on_table") return { kind: "closed" };
+  const [gone] = await storage.query({
+    sql: `DELETE FROM plan_vote WHERE plan_id = ? AND person_id = ?
+            AND EXISTS (SELECT 1 FROM plan WHERE id = ? AND thread_id = ? AND status = 'on_table')
+          RETURNING answer`,
+    params: [input.planId, access.personId, input.planId, access.thread.id],
+  });
+  if (gone === undefined) return { kind: "none" };
+  const previous = answerSchema.safeParse(gone.answer);
+  return previous.success ? { kind: "taken", previous: previous.data } : { kind: "none" };
+}
+
+/**
  * The organizer accepts a plan as a whole (more than two members). With two, a plan is
  * accepted only by both saying yes — there is nobody to decide over the other.
  */

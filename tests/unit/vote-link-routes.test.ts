@@ -129,15 +129,16 @@ it("a vote is saved and comes back checked; a form with no answer is refused", a
   expect(stray.status).toBe(400);
   expect(stray.headers.get("cache-control")).toBe("no-store");
   expect(stray.headers.get("referrer-policy")).toBe("no-referrer");
-  expect(await stray.text()).toContain("Pick an answer first.");
+  expect(await stray.text()).toContain("Tap an answer, or write a note first.");
   const res = await vote(b, f.token(0), { [`plan_${early}`]: "ifneedbe", [`plan_${late}`]: "no" });
   expect(res.status).toBe(303);
   expect(res.headers.get("location")).toBe(`${f.link(0)}&saved=1`);
   const text = await (await b.request(res.headers.get("location") ?? "")).text();
   expect(text).toContain("Thanks — your vote is saved.");
-  expect(text).toMatch(new RegExp(`name="plan_${early}" value="ifneedbe" checked`));
-  expect(text).toMatch(new RegExp(`name="plan_${late}" value="no" checked`));
-  expect(text).not.toMatch(new RegExp(`name="plan_${early}" value="yes" checked`));
+  // rc46: each answer is a button; the one given is pressed, and tapping it takes it back.
+  expect(text).toContain(`name="plan_${early}" value="none" aria-pressed="true">If need be<`);
+  expect(text).toContain(`name="plan_${late}" value="none" aria-pressed="true">No<`);
+  expect(text).toContain(`name="plan_${early}" value="yes" aria-pressed="false">Yes<`);
   expect(text).not.toContain("📍");
   expect((await vote(b, f.token(0), {})).status).toBe(400);
   expect((await vote(b, "nope", { [`plan_${early}`]: "yes" })).status).toBe(404);
@@ -200,18 +201,18 @@ it("one time is one tap: each answer its own button, the note going with it (rc3
   expect(guard).toBeLessThan(page.indexOf(`name="plan_${only}"`));
   // The note sits above the buttons, so the tap sends it.
   expect(page.indexOf('name="note"')).toBeLessThan(guard);
-  expect(page).not.toContain("You said");
+  expect(page).toContain("<strong>Not answered</strong>");
 
   const res = await vote(b, f.token(0), { [`plan_${only}`]: "ifneedbe", note: "Late by ten" });
   expect(res.status).toBe(303);
   const after = await (await b.request(res.headers.get("location") ?? "")).text();
-  expect(after).toContain(`value="ifneedbe" aria-pressed="true">If need be</button>`);
+  expect(after).toContain(`value="none" aria-pressed="true">If need be</button>`);
   expect(after).toContain(`value="yes" aria-pressed="false">Yes</button>`);
-  expect(after).toContain("You said If need be. Tap another to change it.");
+  expect(after).toContain("Saved: if need be. Tap it again to take it back.");
   expect(after).toContain("Late by ten");
 });
 
-it("one plan of several events alone on the table keeps a mark and a send (rc33)", async () => {
+it("one plan of several events alone on the table is asked by name, with buttons saved per tap (rc46)", async () => {
   const b = await browser({ now: () => NOW });
   const f = await pollWith(b, ["david", "ana"], "Picnic", NO_PLACE, SATURDAY);
   const mara = await f.as(f.mara.id);
@@ -233,9 +234,10 @@ it("one plan of several events alone on the table keeps a mark and a send (rc33)
   const text = await (await b.request(f.link(0))).text();
   expect(text).toMatch(/ · 2 events, /);
   expect(text).toContain("Which of these work for you?");
-  expect(text).toContain('type="radio"');
-  expect(text).toContain("Send my answer");
-  expect(text).not.toContain(ENTER_GUARD);
+  expect(text).not.toContain('type="radio"');
+  expect(text).not.toContain("Send my answer");
+  expect(text).toContain("Each tap is saved as you make it.");
+  expect(text).toContain("Add the note");
 });
 
 it("decided meanwhile, or left: the link says so", async () => {
@@ -435,7 +437,7 @@ it("the vote link takes a note, with the votes or alone, and shows everyone's, e
   // A blank note is no note: alone it answers nothing; with votes it is dropped.
   const blank = await vote(b, f.token(1), { note: "   " });
   expect(blank.status).toBe(400);
-  expect(await blank.text()).toContain("Pick an answer first.");
+  expect(await blank.text()).toContain("Tap an answer, or write a note first.");
   expect((await vote(b, f.token(1), { [`plan_${early}`]: "yes", note: "  " })).status).toBe(303);
   // A note on one day says the day once.
   await b.storage.batch([
@@ -1063,4 +1065,101 @@ it("without `verify`: a thread's decider and the new-plan form show it disabled,
     303,
   );
   expect(await (await b.request(f.thread)).text()).toContain("Answers here are verified:");
+});
+
+// --- answers saved per tap, taken back by tapping again (rc46) ---------------------------
+
+it("by the link: tapping your answer again takes it back, with Undo that gives it again", async () => {
+  const b = await browser({ now: () => NOW });
+  const f = await pollWith(b, ["david", "ana"], "Picnic", NO_PLACE);
+  const [early = "", late = ""] = f.planIds;
+  await vote(b, f.token(0), { [`plan_${early}`]: "ifneedbe", [`plan_${late}`]: "no" });
+  const res = await vote(b, f.token(0), { [`plan_${early}`]: "none" });
+  expect(res.status).toBe(303);
+  expect(res.headers.get("location")).toBe(`${f.link(0)}&took=${early}%3Aifneedbe`);
+  const after = await (await b.request(res.headers.get("location") ?? "")).text();
+  expect(after).toContain(
+    `Took back your if need be. <button class="link" type="submit" name="plan_${early}" value="ifneedbe">Undo</button>`,
+  );
+  expect(after).toContain(`name="plan_${early}" value="ifneedbe" aria-pressed="false">If need be<`);
+  expect(after).toContain(`name="plan_${late}" value="none" aria-pressed="true">No<`); // untouched
+  const davids = async () =>
+    (await listPlans(b.storage, await f.as(f.mara.id))).flatMap((p) =>
+      p.votes.filter((v) => v.personId === f.rest[0]?.id).map((v) => v.answer),
+    );
+  expect(await davids()).toEqual(["no"]);
+
+  // Undo is the same tap as giving the answer: it comes back, saved.
+  const undo = await vote(b, f.token(0), { [`plan_${early}`]: "ifneedbe" });
+  expect(undo.headers.get("location")).toBe(`${f.link(0)}&saved=1`);
+  expect((await davids()).sort()).toEqual(["ifneedbe", "no"]);
+  // Taking back what isn't there is no error, and leaves nothing to undo.
+  await vote(b, f.token(1), { [`plan_${early}`]: "none" });
+  expect(await (await b.request(f.link(1))).text()).not.toContain("Took back");
+  // A forged took= for an answer still given shows no Undo.
+  expect(await (await b.request(`${f.link(0)}&took=${early}%3Ayes`)).text()).not.toContain(
+    "Took back",
+  );
+});
+
+it("in a pair, the yes that agrees it says so before it is tapped", async () => {
+  const b = await browser({ now: () => NOW });
+  const f = await pollWith(b, ["david"], "Picnic", NO_PLACE);
+  const [early = ""] = f.planIds;
+  // Made by Mara, the poll carries her yes to every time: David's yes agrees it.
+  const page = await (await b.request(f.link(0))).text();
+  expect(page).toContain(
+    `name="plan_${early}" value="yes" aria-pressed="false">Yes, and agree it<`,
+  );
+  expect(page).toContain(`value="ifneedbe" aria-pressed="false">If need be<`);
+  // The plan's own page says it the same way; the other answers keep their own values.
+  await addAccount(b, "david@example.org");
+  const onPage = await (await b.request(`${PLANS_PATH}/${f.threadId}/p/${early}`)).text();
+  expect(onPage).toContain('name="answer" value="yes" aria-pressed="false">Yes, and agree it<');
+  expect(onPage).toContain('name="answer" value="ifneedbe" aria-pressed="false">If need be<');
+  expect(onPage).toContain('name="answer" value="no" aria-pressed="false">No<');
+  // Said yes already (it agreed it, so the page is the accepted plan): no button says it.
+  // Said if need be: the yes still agrees it, so it still says so.
+  const csrf = (await home(b)).csrf;
+  await b.request(
+    `${PLANS_PATH}/${f.threadId}/p/${early}/vote`,
+    post({ csrf, answer: "ifneedbe" }),
+  );
+  const maybe = await (await b.request(`${PLANS_PATH}/${f.threadId}/p/${early}`)).text();
+  expect(maybe).toContain('value="none" aria-pressed="true">If need be<');
+  expect(maybe).toContain('value="yes" aria-pressed="false">Yes, and agree it<');
+  // In a group, nobody's yes agrees it alone.
+  const c = await browser({ now: () => NOW });
+  const g = await pollWith(c, ["david", "ana"], "Picnic", NO_PLACE);
+  expect(await (await c.request(g.link(0))).text()).not.toContain("and agree it");
+});
+
+it("on the plan's page: tap it again to take it back, Undo, and a receipt that says so when verified", async () => {
+  const b = await browser({ now: () => NOW });
+  const f = await signedInPoll(b, ["david", "ana"]);
+  const [early = ""] = f.planIds;
+  const csrf = async () => (await home(b)).csrf;
+  const planPage = `${f.thread}/p/${early}`;
+  // Mara's poll carries her yes; it is pressed, and tapping it sends none.
+  const before = await (await b.request(planPage)).text();
+  expect(before).toContain('name="answer" value="none" aria-pressed="true">Yes<');
+  expect(before).toContain("Saved: yes. Tap it again to take it back.");
+  await b.request(`${f.thread}/verify`, post({ csrf: await csrf() }));
+  const res = await b.request(`${planPage}/vote`, post({ csrf: await csrf(), answer: "none" }));
+  expect(res.status).toBe(303);
+  expect(res.headers.get("location")).toBe(`${planPage}?took=yes`);
+  const after = await (await b.request(res.headers.get("location") ?? "")).text();
+  expect(after).toContain(
+    'Took back your yes. <button class="link" type="submit" name="answer" value="yes">Undo</button>',
+  );
+  const receipt = b.sent.filter((m) => m.subject.startsWith("Your answer")).at(-1);
+  expect(receipt?.text).toMatch(/- "[^"]+": took back yes\n/);
+  // Nothing to take back: back to the page, no Undo.
+  const again = await b.request(`${planPage}/vote`, post({ csrf: await csrf(), answer: "none" }));
+  expect(again.headers.get("location")).toBe(planPage);
+  expect(await (await b.request(planPage)).text()).toContain("<strong>Not answered</strong>");
+  // Decided: it can't be taken back.
+  await acceptPlan(b.storage, await f.as(f.mara.id), { planId: f.planIds[1] ?? "", now: NOW });
+  const closed = await b.request(`${planPage}/vote`, post({ csrf: await csrf(), answer: "none" }));
+  expect(closed.status).toBe(409);
 });

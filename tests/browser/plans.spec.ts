@@ -95,7 +95,10 @@ test("the shared link, on a phone with no account: a name and the votes, one for
   const errors = await open(page, "share-guest");
   await expect(page.getByLabel("Your name")).toBeVisible();
   await expect(page.getByRole("heading", { name: "Which of these work for you?" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Send my answer" })).toBeVisible();
+  // rc46: every plan has its own buttons, each tap saved; a note alone has its own.
+  await expect(page.getByRole("group", { name: "Your answer" })).toHaveCount(2);
+  await expect(page.getByRole("button", { name: "Send my answer" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Add the note" })).toBeVisible();
   await expect(page.getByText("Signed in as")).toHaveCount(0);
   // The card a chat draws (rc25): a plan of several events is its count and span, never
   // its name, which here names Lea.
@@ -234,7 +237,7 @@ test.describe("busy times while you choose (rc41)", () => {
   test("a guest's page never asks", async ({ page }) => {
     await answerBusy(page, { status: 200, busy: BUSY });
     const errors = await open(page, "share-guest");
-    await expect(page.getByRole("button", { name: "Send my answer" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Add the note" })).toBeVisible();
     expect(await asked(page)).toEqual([]);
     await expect(page.locator(".clash:visible")).toHaveCount(0);
     expect(errors).toEqual([]);
