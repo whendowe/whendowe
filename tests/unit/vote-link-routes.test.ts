@@ -1112,6 +1112,22 @@ it("in a pair, the yes that agrees it says so before it is tapped", async () => 
     `name="plan_${early}" value="yes" aria-pressed="false">Yes, and agree it<`,
   );
   expect(page).toContain(`value="ifneedbe" aria-pressed="false">If need be<`);
+  // The plan's own page says it the same way; the other answers keep their own values.
+  await addAccount(b, "david@example.org");
+  const onPage = await (await b.request(`${PLANS_PATH}/${f.threadId}/p/${early}`)).text();
+  expect(onPage).toContain('name="answer" value="yes" aria-pressed="false">Yes, and agree it<');
+  expect(onPage).toContain('name="answer" value="ifneedbe" aria-pressed="false">If need be<');
+  expect(onPage).toContain('name="answer" value="no" aria-pressed="false">No<');
+  // Said yes already (it agreed it, so the page is the accepted plan): no button says it.
+  // Said if need be: the yes still agrees it, so it still says so.
+  const csrf = (await home(b)).csrf;
+  await b.request(
+    `${PLANS_PATH}/${f.threadId}/p/${early}/vote`,
+    post({ csrf, answer: "ifneedbe" }),
+  );
+  const maybe = await (await b.request(`${PLANS_PATH}/${f.threadId}/p/${early}`)).text();
+  expect(maybe).toContain('value="none" aria-pressed="true">If need be<');
+  expect(maybe).toContain('value="yes" aria-pressed="false">Yes, and agree it<');
   // In a group, nobody's yes agrees it alone.
   const c = await browser({ now: () => NOW });
   const g = await pollWith(c, ["david", "ana"], "Picnic", NO_PLACE);

@@ -314,6 +314,31 @@ export function runPlansContract(makePort: () => Promise<StoragePort>): void {
       expect(await retractVote(port, guarded, { planId, arrival: SHARED_LINK })).toEqual({
         kind: "forbidden",
       });
+      expect(await retractVote(port, guarded, { planId, arrival: null })).toEqual({
+        kind: "forbidden",
+      }); // a link from before rc42 counts as no way at all
+      expect(await answers()).toHaveLength(2);
+      // Cat's switch is hers: Bob, by a shared link, is not held to it.
+      await castVote(port, b, { planId, answer: "no", now: T1, arrival: SIGNED_IN });
+      const bob2 = await gate(port, thread.id, bob.id);
+      expect((await retractVote(port, bob2, { planId, arrival: SHARED_LINK })).kind).toBe("taken");
+      // Her own mailed link counts.
+      expect(
+        await retractVote(port, guarded, { planId, arrival: { via: "mailed", by: null } }),
+      ).toEqual({ kind: "taken", previous: "no" });
+      await castVote(port, c, { planId, answer: "no", now: T1, arrival: SIGNED_IN });
+
+      // A verified thread: a shared link can't take anyone's back, a mailed one can.
+      await port.batch([
+        {
+          sql: "UPDATE plan_thread SET verified_at = ? WHERE id = ?",
+          params: [T1, thread.id],
+        },
+      ]);
+      const ver = await gate(port, thread.id, ann.id);
+      expect(await retractVote(port, ver, { planId, arrival: SHARED_LINK })).toEqual({
+        kind: "forbidden",
+      });
       expect(await answers()).toHaveLength(2);
 
       // Decided: nothing to take back any more.
