@@ -362,20 +362,39 @@ function planSummary(access: Voter, p: Plan): Html {
  * gave again takes it back. In a pair, a yes the other has already given agrees the time,
  * and the button says so before it is tapped.
  */
-function answerButtons(voter: Voter, p: Plan, mine: Answer | null): Html {
-  const theyAgreed =
+/** In a pair, whether this person's yes would agree the plan (rc26): the other said yes. */
+function agreesIt(voter: Voter, p: Plan, mine: Answer | null): boolean {
+  return (
     voter.consensus === true &&
-    p.votes.some((v) => v.personId !== voter.personId && v.answer === "yes");
+    mine !== "yes" &&
+    p.votes.some((v) => v.personId !== voter.personId && v.answer === "yes")
+  );
+}
+
+function answerButtons(voter: Voter, p: Plan, mine: Answer | null): Html {
+  const theyAgreed = agreesIt(voter, p, mine);
   return html`<div class="seg" role="group" aria-label="Your answer">${answerSchema.options.map(
     (a) =>
       html`<button type="submit" name="plan_${p.id}" value="${mine === a ? "none" : a}" aria-pressed="${String(mine === a)}">${
-        a === "yes" && theyAgreed && mine !== "yes" ? "Yes, and agree it" : ANSWER_LABEL[a]
+        a === "yes" && theyAgreed ? "Yes, and agree it" : ANSWER_LABEL[a]
       }</button>`,
   )}</div>`;
 }
 
 /** Under a plan's buttons: saved, or not answered — and Undo right after taking one back. */
-function answerState(p: Plan, mine: Answer | null, took: Answer | undefined): Html {
+function answerState(
+  p: Plan,
+  mine: Answer | null,
+  took: Answer | undefined,
+  agrees: boolean,
+): Html {
+  const line = agrees
+    ? html`<p class="small muted">Your yes agrees it, and emails you both.</p>`
+    : "";
+  return html`${answerStateLine(p, mine, took)}${line}`;
+}
+
+function answerStateLine(p: Plan, mine: Answer | null, took: Answer | undefined): Html {
   if (took !== undefined && mine === null)
     return html`<p class="small">Took back your ${VOTE_WORD[took]}. <button class="link" type="submit" name="plan_${p.id}" value="${took}">Undo</button></p>`;
   return mine === null
@@ -402,7 +421,7 @@ export function answerPart(
   const [only] = onTable;
   const card = (p: Plan) => {
     const mine = mineOf(voter, p, chosen);
-    return html`${answerButtons(voter, p, mine)}${answerState(p, mine, took.get(p.id))}`;
+    return html`${answerButtons(voter, p, mine)}${answerState(p, mine, took.get(p.id), agreesIt(voter, p, mine))}`;
   };
   const saved = html`<p class="muted small">Each tap is saved as you make it.</p>`;
   // One time: the note sits above the buttons, so it goes with the tap (rc33).
@@ -552,9 +571,11 @@ export async function applyAnswers(
   readonly refused: { readonly message: string; readonly status: 400 | 409 } | null;
   /** What went in, for a receipt (rc42). */
   readonly recorded: readonly VoteReceiptLine[];
+  /** rc46: the plan a yes here agreed, for the result email; null for none. */
+  readonly agreed: string | null;
 }> {
   let closed = false;
-  let agreed = false;
+  let agreed: string | null = null;
   const recorded: VoteReceiptLine[] = [];
   if (answers.note.trim() !== "") {
     try {
@@ -563,7 +584,7 @@ export async function applyAnswers(
       else recorded.push({ kind: "note" });
     } catch (err) {
       if (err instanceof PlanInputError)
-        return { refused: { message: err.message, status: 400 }, recorded };
+        return { refused: { message: err.message, status: 400 }, recorded, agreed: null };
       throw err;
     }
   }
@@ -578,20 +599,21 @@ export async function applyAnswers(
     const result = await castVote(storage, access, { planId, answer, now, arrival });
     if (result.kind === "accepted" || result.kind === "recorded")
       recorded.push({ kind: "vote", planId, answer, previous: null });
-    if (result.kind === "accepted") agreed = true;
+    if (result.kind === "accepted") agreed = planId;
     if (result.kind === "closed" || result.kind === "invalid" || result.kind === "forbidden")
       closed = true;
   }
   // A yes here that agreed a time replaced the rest of its question: not a refusal.
   return {
     refused:
-      closed && !agreed
+      closed && agreed === null
         ? {
             message: "Something you answered was decided meanwhile. Your other answers are saved.",
             status: 409,
           }
         : null,
     recorded,
+    agreed,
   };
 }
 
@@ -956,7 +978,7 @@ export function registerRespondRoutes(app: Hono<AppEnv>, deps: RespondRouteDeps)
         status,
       );
     if (answers === null) return refuse("Tap an answer, or write a note first.", 400);
-    const { refused, recorded } = await applyAnswers(
+    const { refused, recorded, agreed } = await applyAnswers(
       deps.storage,
       access,
       answers,
@@ -964,6 +986,8 @@ export function registerRespondRoutes(app: Hono<AppEnv>, deps: RespondRouteDeps)
       link.arrival,
     );
     await sendThreadReceipt(deps, access, { recorded, arrival: link.arrival, now });
+    // rc46: two people just agreed it — both are told, one more layer of paper trail.
+    if (agreed !== null) await sendResultMail(deps, access, { planId: agreed, how: "agreed" });
     if (refused !== null) return refuse(refused.message, refused.status);
     const back = new URL(VOTE_PATH, "http://placeholder");
     back.searchParams.set("t", token);

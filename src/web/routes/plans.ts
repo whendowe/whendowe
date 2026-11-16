@@ -996,6 +996,10 @@ ${shareBox("Message to paste", html`${t.name}: I've proposed “${p.name}” (${
     html`<button type="submit" name="answer" value="${mine === a ? "none" : a}" aria-pressed="${mine === a ? "true" : "false"}">${
       a === "yes" && theyAgreed && mine !== "yes" ? "Yes, and agree it" : label
     }</button>`;
+  const agreesLine =
+    theyAgreed && mine !== "yes"
+      ? html`<p class="small muted">Your yes agrees it, and emails you both.</p>`
+      : "";
   const state =
     q.took !== null && mine === null
       ? html`<p class="small">Took back your ${ANSWER_WORD[q.took]}. <button class="link" type="submit" name="answer" value="${q.took}">Undo</button></p>`
@@ -1003,7 +1007,7 @@ ${shareBox("Message to paste", html`${t.name}: I've proposed “${p.name}” (${
         ? html`<p class="small"><strong>Not answered</strong></p>`
         : html`<p class="small muted">Saved: ${ANSWER_WORD[mine]}. Tap it again to take it back.</p>`;
   return html`${sent}${about}${busyClash(p.events, true)}
-<form method="post" action="${here}/vote">${csrf}<div class="seg" role="group" aria-label="Your vote">${voteButton("yes", "Yes")}${voteButton("ifneedbe", "If need be")}${voteButton("no", "No")}</div>${state}</form>
+<form method="post" action="${here}/vote">${csrf}<div class="seg" role="group" aria-label="Your vote">${voteButton("yes", "Yes")}${voteButton("ifneedbe", "If need be")}${voteButton("no", "No")}</div>${state}${agreesLine}</form>
 <details class="suggest"><summary>Add a note</summary><form method="post" action="${threadPath(t.id)}/notes">${csrf}<input type="hidden" name="back" value="${p.id}" />
 <p><textarea name="note" rows="2" maxlength="500" class="wide" aria-label="Note" placeholder="Thursday's bad next week"></textarea></p>
 <p><button type="submit">Add it</button> <span class="small muted">Everyone in it sees it, on the days on the table.</span></p></form></details>
@@ -1955,6 +1959,8 @@ ${
         arrival: SIGNED_IN,
         now,
       });
+    // rc46: two people just agreed it — both are told, one more layer of paper trail.
+    if (result.kind === "accepted") await sendResultMail(deps, r.access, { planId, how: "agreed" });
     if (result.kind === "closed" || result.kind === "invalid" || result.kind === "forbidden") {
       const v = await load(deps, r.access, r.me);
       const p = v.plans.find((x) => x.id === planId);
