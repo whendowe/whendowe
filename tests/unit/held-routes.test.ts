@@ -136,3 +136,21 @@ it("while a pass is running it, the page says sending, with no Undo", async () =
   expect(page).toContain("<strong>Emailing vote links</strong> — sending…");
   expect(page).not.toContain("/undo");
 });
+
+it("someone who opted out is counted apart, not as sent, and their link is withdrawn", async () => {
+  const b = await browser({ now: () => NOW });
+  const f = await poll(b);
+  const { suppress } = await import("../../src/privacy/suppression.js");
+  await suppress(b.storage, "ana@example.org", { kind: "all" }, NOW);
+  await f.press();
+  await b.pass();
+  expect(linkMail(b).map((m) => m.to)).toEqual(["david@example.org"]);
+  expect(await f.page()).toMatch(
+    /<strong>Emailing vote links:<\/strong> Sent to 1 person\. 1 opted out of email from here, so wasn(&#39;|')t sent one\./,
+  );
+  const tokens = await b.storage.query({
+    sql: "SELECT p.email FROM plan_vote_token t JOIN person p ON p.id = t.person_id WHERE t.thread_id = ?",
+    params: [f.threadId],
+  });
+  expect(tokens.map((r) => r.email)).toEqual(["david@example.org"]);
+});

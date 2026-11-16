@@ -91,6 +91,7 @@ import {
   whenText,
   whoText,
 } from "../../plans/weeks.js";
+import { isSuppressed } from "../../privacy/suppression.js";
 import {
   cappedText,
   copiedLink,
@@ -2215,9 +2216,22 @@ export function voteLinksRunner(deps: PlanRouteDeps): HeldRunner {
     const from = me === undefined ? "Someone" : memberName(me);
     const onTable = (await listPlans(deps.storage, access)).filter((p) => p.status === "on_table");
     let sent = 0;
+    let optedOut = 0;
     let failed = 0;
     let capped: MailCapReachedError | null = null;
     for (const link of issued.links) {
+      // The mail seam would drop it silently; asked here first, so "sent" is true (rc24), and
+      // the link they'll never get is withdrawn like an undelivered one.
+      if (
+        await isSuppressed(deps.storage, link.email, {
+          senderId: access.personId,
+          groupId: access.thread.groupId,
+        })
+      ) {
+        await revokeUndeliveredVoteLink(deps.storage, link);
+        optedOut += 1;
+        continue;
+      }
       if (capped === null) {
         try {
           await sendVoteLink(deps.mail, {
@@ -2239,6 +2253,9 @@ export function voteLinksRunner(deps: PlanRouteDeps): HeldRunner {
     }
     return [
       `Sent to ${sent} ${sent === 1 ? "person" : "people"}.`,
+      optedOut === 0
+        ? ""
+        : `${optedOut} opted out of email from here, so ${optedOut === 1 ? "wasn't" : "weren't"} sent one.`,
       issued.throttled > 0 ? `${issued.throttled} already got a link in the last hour.` : "",
       failed === 0
         ? ""
