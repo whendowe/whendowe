@@ -404,6 +404,93 @@ function shell(body: Html, editor = false, busyTz: string | null = null): Html {
 
 // --- the thread -----------------------------------------------------------------------
 
+/** With more people than this, the grid folds to one bar per option (rc46). */
+export const GRID_MAX_PEOPLE = 15;
+
+/** How many can come to an option: a yes or an if need be (rc46). */
+function canCome(p: Plan): number {
+  return p.votes.filter((x) => x.answer !== "no").length;
+}
+
+/**
+ * The option that leads, or null: most who can come, then most yeses. A tie leads nothing —
+ * the page doesn't pick between two the answers haven't told apart (rc31: don't assume).
+ */
+function leading(options: readonly Plan[]): string | null {
+  const score = (p: Plan) => [canCome(p), p.votes.filter((x) => x.answer === "yes").length];
+  const ranked = [...options].sort((a, b) => {
+    const [ca = 0, ya = 0] = score(a);
+    const [cb = 0, yb = 0] = score(b);
+    return cb - ca || yb - ya;
+  });
+  const [first, second] = ranked;
+  if (first === undefined || canCome(first) === 0) return null;
+  if (second !== undefined && score(second).join() === score(first).join()) return null;
+  return first.id;
+}
+
+/** An option's column head: its time for one event, else its name and how many events. */
+function optionLabel(p: Plan): string {
+  const [e, ...more] = p.events;
+  return e !== undefined && more.length === 0
+    ? whenText(e)
+    : `${p.name} · ${p.events.length} events`;
+}
+
+const CELL: Readonly<Record<Answer, string>> = { yes: "Yes", ifneedbe: "If need be", no: "No" };
+
+/**
+ * Where it stands (rc46): people down, the options on the table across, each cell filled by
+ * the answer — solid yes, grey if need be, empty no, dashed nothing yet — with how many can
+ * come under each and the leading option outlined. Everyone in the thread already sees every
+ * vote by name (the plan pages), so this shows nothing new, only all of it at once. With more
+ * than GRID_MAX_PEOPLE it folds to a bar per option; the names are on each option's page.
+ */
+function answersGrid(v: View): Html | "" {
+  const options = v.plans.filter((p) => p.status === "on_table");
+  if (options.length === 0) return "";
+  const lead = leading(options);
+  const people = [
+    ...v.access.members.filter((m) => m.personId === v.access.personId),
+    ...v.access.members.filter((m) => m.personId !== v.access.personId),
+  ];
+  const head = (p: Plan) =>
+    html`<a href="${planPath(v.access.thread.id, p.id)}">${chip(p)} <span>${optionLabel(p)}</span></a>`;
+  const waiting = people.filter(
+    (m) => !options.some((p) => p.votes.some((x) => x.personId === m.personId)),
+  );
+  const waitingLine =
+    waiting.length === 0
+      ? ""
+      : html`<p class="small muted">Not answered yet: ${waiting.map(memberName).join(", ")}</p>`;
+  if (people.length > GRID_MAX_PEOPLE) {
+    const n = people.length;
+    const pct = (k: number) => `${Math.round((k / n) * 100)}%`;
+    return html`<section class="stands"><h3>Where it stands</h3><ul class="bars">${options.map(
+      (p) => {
+        const yes = p.votes.filter((x) => x.answer === "yes").length;
+        const maybe = p.votes.filter((x) => x.answer === "ifneedbe").length;
+        return html`<li${p.id === lead ? html` class="lead"` : ""}>${head(p)}<span class="bar" role="img" aria-label="${yes} yes, ${maybe} if need be, of ${n}"><span class="y" style="width:${pct(yes)}"></span><span class="m" style="width:${pct(maybe)}"></span></span><span class="n">${canCome(p)}</span></li>`;
+      },
+    )}</ul><p class="small muted">${n} people. Each option's page has the names.</p>${waitingLine}</section>`;
+  }
+  return html`<section class="stands"><h3>Where it stands</h3><div class="scroll"><table class="answers"><thead><tr><th scope="col"><span class="vh">Who</span></th>${options.map(
+    (p) => html`<th scope="col"${p.id === lead ? html` class="lead"` : ""}>${head(p)}</th>`,
+  )}</tr></thead><tbody>${people.map((m) => {
+    const me = m.personId === v.access.personId;
+    return html`<tr><th scope="row">${memberName(m)}${me ? html` <span class="muted">you</span>` : ""}</th>${options.map(
+      (p) => {
+        const a = p.votes.find((x) => x.personId === m.personId)?.answer;
+        return a === undefined
+          ? html`<td class="a-none"><span aria-hidden="true">–</span><span class="vh">no answer yet</span></td>`
+          : html`<td class="a-${a}">${CELL[a]}</td>`;
+      },
+    )}</tr>`;
+  })}</tbody><tfoot><tr><th scope="row">Can come</th>${options.map(
+    (p) => html`<td${p.id === lead ? html` class="lead"` : ""}>${canCome(p)}</td>`,
+  )}</tr></tfoot></table></div>${waitingLine}</section>`;
+}
+
 function planRow(v: View, p: Plan): Html {
   const ans = baseOf(v, p);
   return html`<div class="msg ${p.status}${p.authorId === v.access.personId ? " mine" : ""}"><a href="${planPath(v.access.thread.id, p.id)}"><span class="t1">${chip(p)}<span>${p.name}</span></span>
@@ -669,6 +756,7 @@ function threadPage(v: View, day: string | null, notice: string | null = null): 
       // An address only where shown: its owner chose to (rc21), or the thread is verified (rc42).
       .map((m) => (m.shown.email === null ? memberName(m) : `${memberName(m)} (${m.shown.email})`))
       .join(", ")} · ${decideHint(v)}</div></div><span></span></div>
+${answersGrid(v)}
 ${
   waiting.length > 0
     ? html`<h3>Waiting for your vote</h3><div class="choose">${waiting.map(
