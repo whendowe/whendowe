@@ -258,7 +258,7 @@ it("tapping a free day adds an option of the defaults, says so with Undo, and ke
   expect(res.headers.get("location")).toBe(`${f.path}?saved=1&m=2101-12&added=1`);
   const after = await (await b.request(res.headers.get("location") ?? "")).text();
   expect(after).toContain(
-    'Added Sat 24 Dec as B <button class="link" type="submit" name="act" value="remove:1">Undo</button>',
+    'Added Sat 24 Dec, 18:30 as B <button class="link" type="submit" name="act" value="remove:1">Undo</button>',
   );
   expect(after).toMatch(/<a class="letter" href="#o1"[^>]*>B<\/a>/);
   expect(after).not.toContain('value="add:2101-12-24"'); // a day with an option isn't free
