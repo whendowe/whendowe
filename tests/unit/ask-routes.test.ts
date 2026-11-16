@@ -248,7 +248,9 @@ it("tapping a free day adds an option of the defaults, says so with Undo, and ke
   const page = await (await b.request(f.path)).text();
   // December 2101: Monday-first whole weeks, so 28–30 November open it, dashed.
   expect(page).toContain("<strong>December 2101</strong>");
-  expect(page).toContain('value="add:2101-11-28" aria-label="Add 2101-11-28">28</button>');
+  expect(page).toContain(
+    'value="add:2101-11-28" aria-label="Add 2101-11-28" data-day="2101-11-28">28</button>',
+  );
   expect(page).toMatch(/<button class="day out" type="submit" name="act" value="add:2101-11-28"/);
   expect(page).toContain('class="day today"');
   const res = await f.send({
@@ -337,7 +339,11 @@ it("Hours shows four days by the hour; a free hour adds an option of the length 
   expect(page).toContain('value="view:hours" aria-pressed="true">Hours');
   // From the first option's day, four days: 17–20 Dec. A covers 19:00 and 20:00 there.
   expect(page).toContain("<strong>Sat 17 Dec – Tue 20 Dec</strong>");
-  expect(page.match(/<span class="hour has"><a class="letter" href="#o0"/g)).toHaveLength(2);
+  expect(
+    page.match(
+      /<span class="hour has" data-at="[^"]+">(<span class="grip"[^>]*><\/span>)?<a class="letter" href="#o0"/g,
+    ),
+  ).toHaveLength(2);
   expect(page).toContain('value="addh:2101-12-18T12:00" aria-label="Add 2101-12-18 12:00"');
   expect(page).toContain('name="v" value="hours"');
   const res = await f.send({
