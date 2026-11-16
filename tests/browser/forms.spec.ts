@@ -250,8 +250,9 @@ test.describe("without JavaScript (DESIGN rc15: every form works without it)", (
       await expect(page.locator('[name="allDay"]')).toBeVisible();
       const firstStart = name === "event-new" ? "start" : "start_0";
       await expect(page.locator(`[name="${firstStart}"]`)).toBeVisible();
-      // The form's own button: the page header has buttons too (rc18).
-      await expect(form(page).locator('button[type="submit"]')).toBeVisible();
+      // The form's own button: the page header has buttons too (rc18), and the people
+      // picker's are its own (rc48).
+      await expect(form(page).locator('button[type="submit"]:not([name="pp"])')).toBeVisible();
       await shot(page, `${name}-no-js.png`);
     });
   }
