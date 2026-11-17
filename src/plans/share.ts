@@ -5,7 +5,7 @@ import { uuidv7 } from "../ids.js";
 import { handleSchema } from "../people/person.js";
 import { hashToken, issueToken } from "../people/tokens.js";
 import { listNotes, type PlanNote } from "./note.js";
-import { listPlans, type Plan } from "./plan.js";
+import { listPlans, type Plan, type QuestionStep, questionStep } from "./plan.js";
 import {
   findThreadById,
   findThreadForMember,
@@ -145,6 +145,8 @@ export async function questionAsOutsider(
   question: SharedQuestion,
 ): Promise<{
   readonly onTable: readonly Plan[];
+  /** Where the question stands (rc50); never Decided, since no one's held choice shows here. */
+  readonly step: QuestionStep;
   readonly notes: readonly PlanNote[];
   readonly members: readonly ThreadMember[];
 }> {
@@ -154,8 +156,14 @@ export async function questionAsOutsider(
     shown: { ...m.shown, email: null },
   }));
   const nobody: ThreadAccess = { thread: question.thread, personId: "", members };
-  const onTable = (await listPlans(storage, nobody)).filter((p) => p.status === "on_table");
-  return { onTable, notes: await listNotes(storage, nobody), members };
+  const plans = await listPlans(storage, nobody);
+  const onTable = plans.filter((p) => p.status === "on_table");
+  return {
+    onTable,
+    step: questionStep(plans, false),
+    notes: await listNotes(storage, nobody),
+    members,
+  };
 }
 
 export type JoinResult =

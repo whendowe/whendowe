@@ -6,7 +6,7 @@ import type { Answer } from "../../events/poll.js";
 import { SHARED_LINK, SIGNED_IN } from "../../events/response.js";
 import { LOGIN_TOKEN_TTL_MS } from "../../people/login.js";
 import { normalizeEmail } from "../../people/person.js";
-import type { Plan } from "../../plans/plan.js";
+import type { Plan, QuestionStep } from "../../plans/plan.js";
 import {
   claimName,
   joinByShareLink,
@@ -25,7 +25,7 @@ import {
   type ThreadMember,
 } from "../../plans/thread.js";
 import { type Html, html, PLANS_PATH } from "../layout.js";
-import { busyAssets, busyAttrs, PLAN_STYLE } from "../plan-editor.js";
+import { busyAssets, busyAttrs, PLAN_STYLE, statusLine } from "../plan-editor.js";
 import { type AppEnv, page, rejectedPage, type SignedIn, verifyFormCsrf } from "../session.js";
 import { type AuthDeps, notSent, sendSignInLink } from "./auth.js";
 import {
@@ -144,6 +144,7 @@ type Answering =
 
 interface Shown {
   readonly onTable: readonly Plan[];
+  readonly step: QuestionStep;
   readonly notes: Html | string;
   readonly members: readonly ThreadMember[];
 }
@@ -157,6 +158,7 @@ async function shown(storage: StoragePort, q: SharedQuestion): Promise<Shown> {
   const names = new Map(seen.members.map((m) => [m.personId, memberName(m)]));
   return {
     onTable: seen.onTable,
+    step: seen.step,
     notes: noteList(seen.notes, (id) => names.get(id) ?? "someone"),
     members: seen.members,
   };
@@ -243,6 +245,7 @@ async function sharePage(
   // Busy times (rc41) are the signed-in account's own, so only it sees them; never a guest.
   const busy = who.kind === "account" && q.open ? q.thread.tzid : null;
   const content = html`${PLAN_STYLE}<div class="pl"${busyAttrs(busy)}>${notice}<h1>${q.thread.name}</h1>
+${statusLine(s.step)}
 ${move}${body}
 ${keep}
 ${s.notes === "" ? "" : html`<h2>Notes</h2>${s.notes}`}

@@ -34,6 +34,7 @@ import {
   type PlanEvent,
   type PlanEventInput,
   PlanInputError,
+  questionStep,
   removeDraftEvent,
   retractVote,
   sendDraft,
@@ -110,6 +111,7 @@ import {
   busyDay,
   PLAN_STYLE,
   planAssets,
+  statusLine,
 } from "../plan-editor.js";
 import {
   type AppEnv,
@@ -739,6 +741,16 @@ ${others.map((m) =>
 
 const chooseArgs = z.object({ planId: z.string() });
 
+/** Where the question stands for this viewer (rc50): Decided only for their own waiting choice. */
+function stepLine(v: View): Html {
+  return statusLine(
+    questionStep(
+      v.plans,
+      v.held.some((h) => h.kind === "choose" && h.outcome === null),
+    ),
+  );
+}
+
 /** What a held action is called on the page, as "<what> — in about a minute". */
 function heldWhat(v: View, h: HeldAction): string {
   switch (h.kind) {
@@ -805,6 +817,7 @@ function threadPage(v: View, day: string | null, notice: string | null = null): 
       // An address only where shown: its owner chose to (rc21), or the thread is verified (rc42).
       .map((m) => (m.shown.email === null ? memberName(m) : `${memberName(m)} (${m.shown.email})`))
       .join(", ")} · ${decideHint(v)}</div></div><span></span></div>
+${stepLine(v)}
 ${answersGrid(v)}
 ${
   waiting.length > 0
@@ -1088,6 +1101,7 @@ function planPage(
   const link = `${deps.publicBaseUrl}${here}`;
   return shell(
     html`${header(v, p, base, model, { seeing, here })}
+${stepLine(v)}
 ${notice === null ? "" : html`<p class="notice error">${notice}</p>`}
 ${
   card ??
@@ -1298,6 +1312,7 @@ function draftPage(v: View, d: Plan, q: DraftQuery, error: string | null): Html 
         : `${here}?day=${k}#w-${k}`;
   return shell(
     html`${header(v, d, base, model, { seeing, here })}
+${stepLine(v)}
 <div data-plan-editor data-sel="${sel?.sid ?? ""}" data-grab="${q.grab ?? ""}">
 ${weeksHtml(
   blocks,

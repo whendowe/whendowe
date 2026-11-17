@@ -33,7 +33,7 @@ import {
   pickerAction,
   readChips,
 } from "../people-picker.js";
-import { editorScript, PLAN_STYLE } from "../plan-editor.js";
+import { editorScript, PLAN_STYLE, statusLine } from "../plan-editor.js";
 import {
   type AppEnv,
   page,
@@ -773,7 +773,7 @@ ${events.map((e, j) => eventRow(i, j, { ...rowOf(e), name: e.title ?? "" }, even
 </fieldset>`,
   );
   return html`${PLAN_STYLE}<div class="pl ask" data-ask-drag>
-<p class="askstatus"><strong>Draft</strong> · step 1 of 4 · nobody has been told${input.saved ? html` · <span class="muted">Saved</span>` : ""}</p>
+${statusLine("draft", input.saved ? html` · <span class="muted">Saved</span>` : "")}
 ${input.problem === null ? "" : html`<p class="error">${input.problem}</p>`}
 <form method="post" action="${ASK_PATH}/${draft.id}" id="ask">
 <input type="hidden" name="csrf" value="${me.csrfToken}" />
