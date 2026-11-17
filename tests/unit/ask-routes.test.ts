@@ -13,6 +13,20 @@ import { addAccount, type Browser, browser, home, post } from "../property/one-b
 
 const NOW = "2101-12-01T09:00:00.000Z";
 
+type Stored = { readonly sid?: string; readonly title?: string | null };
+
+/**
+ * The times of one stored option. rc49: every event also has an identity from when it was made
+ * — checked here — and a name of its own, which these tests leave empty.
+ */
+function timesOf<E extends Stored>(events: readonly E[] | undefined) {
+  return events?.map(({ sid, title, ...time }) => {
+    expect(sid).toMatch(/^[0-9a-f-]{36}$/);
+    expect(title ?? null).toBeNull();
+    return time;
+  });
+}
+
 async function start(b: Browser) {
   await addAccount(b, "mara@example.org");
   const h = await home(b);
@@ -98,7 +112,7 @@ it("+ and makes an option several events; Remove takes one, and an empty option 
     act: "save",
   });
   const draft = await findAskDraft(b.storage, { id: f.id, authorId: f.mara });
-  expect(draft?.body.options).toEqual([
+  expect(draft?.body.options.map(timesOf)).toEqual([
     [
       { allDay: false, startLocal: "2101-12-17T19:00", endLocal: "2101-12-17T21:00" },
       { allDay: true, startLocal: "2101-12-18", endLocal: "2101-12-20" }, // two days, end exclusive
@@ -106,9 +120,9 @@ it("+ and makes an option several events; Remove takes one, and an empty option 
   ]);
   expect(await (await b.request(f.path)).text()).toContain('name="o0e1last" value="2101-12-19"');
   await f.send({ ...PIZZA, o0e1day: "2101-12-18", act: "drop:0:0" });
-  expect((await findAskDraft(b.storage, { id: f.id, authorId: f.mara }))?.body.options).toEqual([
-    [{ allDay: true, startLocal: "2101-12-18", endLocal: "2101-12-19" }],
-  ]);
+  expect(
+    (await findAskDraft(b.storage, { id: f.id, authorId: f.mara }))?.body.options.map(timesOf),
+  ).toEqual([[{ allDay: true, startLocal: "2101-12-18", endLocal: "2101-12-19" }]]);
 });
 
 it("asking makes the thread, holds the email a minute with Undo, and the draft is gone from home", async () => {
@@ -228,7 +242,7 @@ it("one person; no times; a time with no end kept as typed; ten options and no m
   expect(one).toContain(">Ask 1 person by email</button>");
   expect(one).toContain('name="o0e0to" value=""');
   const draft = await findAskDraft(b.storage, { id: f.id, authorId: f.mara });
-  expect(draft?.body.options).toEqual([
+  expect(draft?.body.options.map(timesOf)).toEqual([
     [{ allDay: false, startLocal: "2101-12-17T19:00", endLocal: "" }],
   ]);
   await f.send({ ...PIZZA, act: "drop:0:0" });
@@ -271,9 +285,9 @@ it("tapping a free day adds an option of the defaults, says so with Undo, and ke
   );
   expect(after).toMatch(/<a class="letter" href="#o1"[^>]*>B<\/a>/);
   expect(after).not.toContain('value="add:2101-12-24"'); // a day with an option isn't free
-  expect((await findAskDraft(b.storage, { id: f.id, authorId: f.mara }))?.body.options[1]).toEqual([
-    { allDay: false, startLocal: "2101-12-24T18:30", endLocal: "2101-12-24T21:30" },
-  ]);
+  expect(
+    timesOf((await findAskDraft(b.storage, { id: f.id, authorId: f.mara }))?.body.options[1]),
+  ).toEqual([{ allDay: false, startLocal: "2101-12-24T18:30", endLocal: "2101-12-24T21:30" }]);
   // Undo takes it away again.
   await f.send({ ...PIZZA, o0e0day: "", act: "remove:1" });
   expect(
@@ -293,8 +307,10 @@ it("no time makes a tapped day all day; late evenings run past midnight; stretch
     act: "add:2101-12-11",
   });
   const opts = (await findAskDraft(b.storage, { id: f.id, authorId: f.mara }))?.body.options;
-  expect(opts?.[1]).toEqual([{ allDay: true, startLocal: "2101-12-10", endLocal: "2101-12-11" }]);
-  expect(opts?.[2]).toEqual([
+  expect(timesOf(opts?.[1])).toEqual([
+    { allDay: true, startLocal: "2101-12-10", endLocal: "2101-12-11" },
+  ]);
+  expect(timesOf(opts?.[2])).toEqual([
     { allDay: false, startLocal: "2101-12-11T23:00", endLocal: "2101-12-12T01:00" },
   ]);
   // A two-day stretch is drawn on both of its days.
@@ -362,9 +378,9 @@ it("Hours shows four days by the hour; a free hour adds an option of the length 
   );
   const after = await (await b.request(res.headers.get("location") ?? "")).text();
   expect(after).toContain("Added Sun 18 Dec, 12:00 as B");
-  expect((await findAskDraft(b.storage, { id: f.id, authorId: f.mara }))?.body.options[1]).toEqual([
-    { allDay: false, startLocal: "2101-12-18T12:00", endLocal: "2101-12-18T13:00" },
-  ]);
+  expect(
+    timesOf((await findAskDraft(b.storage, { id: f.id, authorId: f.mara }))?.body.options[1]),
+  ).toEqual([{ allDay: false, startLocal: "2101-12-18T12:00", endLocal: "2101-12-18T13:00" }]);
   // The defaults keep their time though Hours never uses it: switching back finds it.
   expect(after).toContain('name="new_from" value="19:00"');
 });
@@ -422,9 +438,9 @@ it("a drag along a week's empty days adds one all-day option over them, with Und
   expect(res.headers.get("location")).toBe(`${f.path}?saved=1&m=2101-12&added=1`);
   const after = await (await b.request(res.headers.get("location") ?? "")).text();
   expect(after).toContain("Added Wed 14 Dec – Fri 16 Dec as B");
-  expect((await findAskDraft(b.storage, { id: f.id, authorId: f.mara }))?.body.options[1]).toEqual([
-    { allDay: true, startLocal: "2101-12-14", endLocal: "2101-12-17" },
-  ]);
+  expect(
+    timesOf((await findAskDraft(b.storage, { id: f.id, authorId: f.mara }))?.body.options[1]),
+  ).toEqual([{ allDay: true, startLocal: "2101-12-14", endLocal: "2101-12-17" }]);
   // Its first and last days carry a grip on B's letter; the day between doesn't.
   expect(after).toContain(
     'aria-label="Option B" data-grip="1:0" data-ends="start" draggable="false"',
@@ -450,7 +466,7 @@ it("dragging an all-day event's first or last day moves that end, never past the
   const f = await start(b);
   const allDay = { ...PIZZA, o0e0from: "", o0e0day: "2101-12-10", o0e0last: "2101-12-12" };
   const opts = async () =>
-    (await findAskDraft(b.storage, { id: f.id, authorId: f.mara }))?.body.options[0];
+    timesOf((await findAskDraft(b.storage, { id: f.id, authorId: f.mara }))?.body.options[0]);
   await f.send({ ...allDay, act: "save" });
   const one = await (await b.request(f.path)).text();
   expect(one).toContain('data-grip="0:0" data-ends="start"');
@@ -487,7 +503,7 @@ it("in Hours a timed event has a grip at each end; dragging one moves it by whol
   const b = await browser({ now: () => NOW });
   const f = await start(b);
   const opts = async () =>
-    (await findAskDraft(b.storage, { id: f.id, authorId: f.mara }))?.body.options[0];
+    timesOf((await findAskDraft(b.storage, { id: f.id, authorId: f.mara }))?.body.options[0]);
   const hours = { ...PIZZA, v: "hours", d: "2101-12-17" };
   await f.send({ ...hours, act: "save" });
   const page = await (await b.request(`${f.path}?v=hours&d=2101-12-17`)).text();
