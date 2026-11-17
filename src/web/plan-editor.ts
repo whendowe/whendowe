@@ -14,7 +14,7 @@ import { BUSY_PATH, type Html, html } from "./layout.js";
 export const PLAN_STYLE = html`<style>
   .pl { --fg: CanvasText; --muted: light-dark(#5d6b69, #9aa9a6); --line: light-dark(#c9d1cf, #3a4644);
     --tile: light-dark(#eef2f1, #222b2a); --card: light-dark(#ffffff, #1a2221); --accent: light-dark(#0e6b66, #4fc0b6);
-    --accent-soft: light-dark(#d9efec, #173936); --on: light-dark(#ffffff, #062523); --hi: light-dark(#fff4cc, #3a3214);
+    --on: light-dark(#ffffff, #062523); --hi: light-dark(#fff4cc, #3a3214);
     --ok: light-dark(#1f6b2e, #7fd08e); --bad: light-dark(#9a2a1f, #f19185);
     --o0: light-dark(#0e6b66, #4fc0b6); --o1: light-dark(#b4511f, #f08a52); --o2: light-dark(#5b4bb3, #a99bf0);
     --o3: light-dark(#8a6a00, #e2c050); --o4: light-dark(#a3336b, #ef7db4); --o5: light-dark(#2a6a9e, #7fb6e6);
@@ -43,12 +43,14 @@ export const PLAN_STYLE = html`<style>
   .pl .stack { display: grid; gap: 12px; }
   .pl .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
   .pl .spread { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
-  .pl .notice { padding: 8px 10px; border-radius: 8px; background: var(--accent-soft); }
+  .pl .notice { padding: 8px 10px; border-radius: 8px; background: var(--tile); }
   .pl .error { color: var(--bad); font-weight: 700; }
   .pl label.f { display: grid; gap: 2px; font-size: .85rem; font-weight: 700; }
 
   .pl .head { position: sticky; top: 0; z-index: 2; background: Canvas; padding: 6px 0; border-bottom: 1px solid var(--line);
     display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 8px; align-items: center; }
+  .pl .head.waits { padding-left: 12px; }
+  .pl li.waits { padding-left: 12px; }
   .pl .head .l1 { font-weight: 700; display: flex; gap: 6px; align-items: center; min-width: 0; }
   .pl .head .l2 { font-size: .85rem; color: var(--muted); display: flex; flex-wrap: wrap; gap: 6px; align-items: center; min-width: 0; }
   .pl .head .l3 { grid-column: 1 / -1; display: flex; justify-content: space-between; align-items: start; gap: 8px; font-size: .85rem; font-weight: 700; }
@@ -57,14 +59,16 @@ export const PLAN_STYLE = html`<style>
   .pl .head .l3 ul { font-weight: 400; }
   .pl .status { font-size: .68rem; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; padding: 1px 6px;
     border-radius: 999px; border: 1px solid currentColor; white-space: nowrap; }
-  .pl .status.on_table { color: var(--accent); } .pl .status.accepted { color: var(--ok); }
+  .pl .status.on_table { color: var(--fg); } .pl .status.accepted { color: var(--ok); }
   .pl .status.replaced, .pl .status.withdrawn { color: var(--muted); } .pl .status.draft { border-style: dashed; }
   .pl .letter { display: inline-grid; place-items: center; width: 1.35rem; height: 1.35rem; border-radius: 5px; font-weight: 700;
     font-size: .78rem; color: Canvas; background: var(--muted); flex: 0 0 auto; }
 
   .pl .seg { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 4px; padding: 3px; border-radius: 999px; border: 1px solid var(--line); }
   .pl .seg button { border: 0; border-radius: 999px; padding: .35rem; background: transparent; font-size: .9rem; }
-  .pl .seg button[aria-pressed=true] { background: var(--accent); color: var(--on); font-weight: 700; }
+  /* rc50: your answer is fill, in the neutral ink; only a choice of view is an action's colour. */
+  .pl .seg button[aria-pressed=true] { background: var(--fg); color: Canvas; font-weight: 700; }
+  .pl .seg.viewswitch button[aria-pressed=true] { background: var(--accent); color: var(--on); }
 
   .pl .weeks { display: grid; gap: 8px; }
   .pl .week { scroll-margin-top: 150px; border: 1px solid var(--line); border-radius: 10px; padding: 6px; background: var(--card); display: grid; gap: 5px; }
@@ -76,15 +80,14 @@ export const PLAN_STYLE = html`<style>
   .pl .dh b { font-size: .92rem; color: var(--fg); }
   .pl .dh.we b { font-weight: 800; }
   .pl .dh.today { border-color: var(--fg); }
-  .pl .dh.picked { outline: 3px solid var(--accent); outline-offset: 1px; }
+  .pl .dh.picked { outline: 3px solid var(--fg); outline-offset: 1px; }
   .pl .dh.sel-end { background: var(--ev); } .pl .dh.sel-end, .pl .dh.sel-end b { color: var(--on); }
   .pl .dh.sel-mid { background: color-mix(in srgb, var(--ev) 35%, var(--tile)); }
   .pl .dh.grab { outline: 3px dashed var(--fg); outline-offset: 2px; z-index: 1; animation: pl-held 1s ease-in-out infinite alternate; }
   @keyframes pl-held { to { outline-offset: 4px; } }
   @media (prefers-reduced-motion: reduce) { .pl .dh.grab { animation: none; } }
-  /* Busy (rc41): a dot in the corner, in the neutral ink, so no option's colour claims it. */
-  .pl .dh.busy::after { content: ""; position: absolute; top: 3px; right: 3px; width: 6px; height: 6px; border-radius: 50%;
-    background: var(--fg); box-shadow: 0 0 0 1.5px var(--tile); }
+  /* Busy (rc41): hatching in the neutral ink (rc50), so no option's colour claims it. */
+  .pl .dh.busy { background-image: repeating-linear-gradient(135deg, color-mix(in srgb, var(--fg) 30%, transparent) 0 1.5px, transparent 1.5px 6px); }
   .pl .clash { font-weight: 700; }
   .pl span.clash::before { content: " · "; font-weight: 400; }
   .pl .rib { box-sizing: border-box; display: block; min-width: 0; padding: 3px 6px; border-radius: 6px; font-size: .78rem; line-height: 1.25;
@@ -114,7 +117,7 @@ export const PLAN_STYLE = html`<style>
   .pl .rib.sel { --cw: calc((100% - (var(--n) - 1) * 3px) / var(--n)); }
   .pl .grip.s { left: calc(var(--a) * (var(--cw) + 3px)); }
   .pl .grip.e { left: calc((var(--b) + 1) * (var(--cw) + 3px) - 3px - 24px); }
-  .pl .grip.on::after { width: 9px; height: 100%; background: var(--accent); }
+  .pl .grip.on::after { width: 9px; height: 100%; background: var(--fg); }
   .pl .rib.sel.gs { padding-left: 26px; } .pl .rib.sel.ge { padding-right: 26px; }
   .pl .rib.sel.one { padding-left: calc(var(--cw) + 8px); padding-right: 6px; }
   .pl .rib.sel.one.right { padding-left: 6px; padding-right: calc(var(--cw) + 8px); }
@@ -152,7 +155,7 @@ export const PLAN_STYLE = html`<style>
   .pl .vote.no { border-color: var(--bad); color: var(--bad); }
   .pl .vote.ifneedbe { border-style: dashed; }
   .pl .vote.none { color: var(--muted); }
-  .pl .confirm { padding: 8px 10px; border-radius: 8px; border: 2px solid var(--accent); background: var(--accent-soft); display: grid; gap: 8px; }
+  .pl .confirm { padding: 8px 10px; border-radius: 8px; border: 2px solid var(--fg); background: var(--tile); display: grid; gap: 8px; }
   .pl .paste { font-family: ui-monospace, monospace; font-size: .8rem; }
 
   .pl .ed { display: grid; gap: 8px; }
@@ -170,7 +173,7 @@ export const PLAN_STYLE = html`<style>
   .pl .whorow label:has(input:checked) { background: var(--fg); color: Canvas; border-color: var(--fg); }
 
   .pl .msg { border: 1px solid var(--line); border-radius: 10px; background: var(--card); display: grid; grid-template-columns: minmax(0, 1fr) auto; }
-  .pl .msg.mine { border-color: var(--accent); }
+  .pl .msg.mine { border-color: var(--fg); }
   .pl .msg.replaced, .pl .msg.withdrawn { opacity: .8; border-style: dashed; }
   .pl .msg > a { display: grid; gap: 2px; padding: 8px 10px; min-width: 0; text-decoration: none; }
   .pl .msg .t1 { font-weight: 700; display: flex; gap: 6px; align-items: center; min-width: 0; overflow-wrap: anywhere; }
@@ -238,7 +241,7 @@ export const PLAN_STYLE = html`<style>
   .pl.ask .hour .letter { color: Canvas; text-decoration: none; }
   .pl.ask .undo { border-radius: 10px; padding: 6px 12px; background: var(--fg); color: Canvas; }
   .pl.ask .undo .link { color: Canvas; font-weight: 700; }
-  .pl.ask .readback { border-radius: 10px; padding: 10px 12px; background: var(--accent-soft); }
+  .pl.ask .readback { border-radius: 10px; padding: 10px 12px; background: var(--tile); }
   .pl .vh { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 </style>`;
 

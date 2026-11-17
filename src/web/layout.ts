@@ -327,7 +327,12 @@ ${
 <meta property="og:description" content="${preview.description}" />
 `
 }<style>
-  :root { color-scheme: light dark; }
+  /* rc50: one attention colour for what waits for you, used for nothing else; as a mark beside
+     words (.attn) or a bar along a card (.waits), never as the words' own colour. */
+  :root { color-scheme: light dark; --attn: light-dark(#e09a00, #ffc247); }
+  .attn::before { content: ""; display: inline-block; width: .6em; height: .6em; border-radius: 50%;
+    background: var(--attn); margin-right: .4em; vertical-align: .02em; }
+  .waits { box-shadow: inset 4px 0 0 var(--attn); }
   body { font: 16px/1.6 system-ui, sans-serif; max-width: 34rem; margin: 3rem auto; padding: 0 1.25rem; }
   input[type=email] { font: inherit; padding: .5rem; width: 100%; box-sizing: border-box; }
   button { font: inherit; padding: .5rem 1rem; cursor: pointer; }

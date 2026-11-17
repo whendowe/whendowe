@@ -480,8 +480,11 @@ function answersGrid(v: View): Html | "" {
     ...v.access.members.filter((m) => m.personId === v.access.personId),
     ...v.access.members.filter((m) => m.personId !== v.access.personId),
   ];
+  // rc50: an option you haven't answered carries the attention mark on its card.
   const head = (p: Plan) =>
-    html`<a href="${planPath(v.access.thread.id, p.id)}">${chip(p)} <span>${optionLabel(p)}</span></a>`;
+    html`<a href="${planPath(v.access.thread.id, p.id)}">${chip(p)} <span${
+      p.votes.some((x) => x.personId === v.access.personId) ? "" : html` class="attn"`
+    }>${optionLabel(p)}</span></a>`;
   const waiting = people.filter(
     (m) => !options.some((p) => p.votes.some((x) => x.personId === m.personId)),
   );
@@ -823,7 +826,7 @@ ${
   waiting.length > 0
     ? html`<h3>Waiting for your vote</h3><div class="choose">${waiting.map(
         (p) =>
-          html`<a class="btn" href="${planPath(t.id, p.id)}">${chip(p)}<span><strong>${p.name}</strong> <span class="muted small">${v.nameOf(p.authorId)}, ${spanText(p.events)}</span></span></a>`,
+          html`<a class="btn waits" href="${planPath(t.id, p.id)}">${chip(p)}<span><strong>${p.name}</strong> <span class="muted small">${v.nameOf(p.authorId)}, ${spanText(p.events)}</span></span></a>`,
       )}</div>`
     : ""
 }
@@ -945,7 +948,12 @@ function header(
             ? html`<details><summary>${model.changes} change${model.changes > 1 ? "s" : ""} from ${base.letter}${settled}</summary>${lineList(all)}</details>`
             : html`<span>Same as ${base.letter}${settled}</span>`
         }<a class="btn small" href="${opts.here}${opts.here.includes("?") ? "&" : "?"}see=base">See ${base.letter}</a></div>`;
-  return html`<div class="head"><div><div class="l1">${l1}</div><div class="l2">${l2}</div></div>
+  // rc50: the week rows' header carries the attention mark while this option waits for you.
+  const waits =
+    !opts.seeing &&
+    focus.status === "on_table" &&
+    !focus.votes.some((x) => x.personId === v.access.personId);
+  return html`<div class="head${waits ? " waits" : ""}"><div><div class="l1">${l1}</div><div class="l2">${l2}</div></div>
 <a class="btn" href="${threadPath(t.id)}">${t.name}${onTable > 0 ? ` (${onTable})` : ""}</a>${l3}</div>`;
 }
 
@@ -1041,7 +1049,7 @@ ${shareBox("Message to paste", html`${t.name}: I've proposed “${p.name}” (${
     q.took !== null && mine === null
       ? html`<p class="small">Took back your ${ANSWER_WORD[q.took]}. <button class="link" type="submit" name="answer" value="${q.took}">Undo</button></p>`
       : mine === null
-        ? html`<p class="small"><strong>Not answered</strong></p>`
+        ? html`<p class="small"><strong class="attn">Not answered</strong></p>`
         : html`<p class="small muted">Saved: ${ANSWER_WORD[mine]}. Tap it again to take it back.</p>`;
   return html`${sent}${about}${busyClash(p.events, true)}
 <form method="post" action="${here}/vote">${csrf}<div class="seg" role="group" aria-label="Your vote">${voteButton("yes", "Yes")}${voteButton("ifneedbe", "If need be")}${voteButton("no", "No")}</div>${state}${agreesLine}</form>
@@ -1384,7 +1392,7 @@ export async function yourPlans(storage: StoragePort, personId: string): Promise
           (t) =>
             html`<li><a href="${threadPath(t.id)}">${t.name}</a>${
               t.waiting > 0
-                ? html` · <strong>${t.waiting} waiting for your vote</strong>`
+                ? html` · <strong class="attn">${t.waiting} waiting for your vote</strong>`
                 : t.onTable > 0
                   ? html` <span class="muted">· ${t.onTable} on the table</span>`
                   : ""

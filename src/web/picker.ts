@@ -29,13 +29,14 @@ const PICKER_STYLE = html`<style>
   .wd-we { font-weight: 700; }
   .wd-out { background: transparent; border: 1px dashed light-dark(#c9d1cf, #3a4644); opacity: .75; }
   .wd-today { border-color: currentColor; }
-  .wd-on { background: light-dark(#0e6b66, #4fc0b6); color: light-dark(#fff, #062523); border-color: transparent; opacity: 1; }
-  .wd-span { background: light-dark(#d9efec, #173936); opacity: 1; }
-  .wd-pending { border: 2px dashed light-dark(#0e6b66, #4fc0b6); }
+  /* rc50: what is picked is in the neutral ink; the brand colour is for actions only. */
+  .wd-on { background: light-dark(#17201f, #e6eeec); color: light-dark(#fff, #111716); border-color: transparent; opacity: 1; }
+  .wd-span { background: light-dark(#dfe5e4, #2c3634); opacity: 1; }
+  .wd-pending { border: 2px dashed light-dark(#17201f, #e6eeec); }
   .wd-row { display: flex; flex-wrap: wrap; gap: .75rem; }
   .wd-field { display: grid; gap: .25rem; font-weight: 700; font-size: .9rem; }
   .wd-field input, .wd-field select { font: inherit; padding: .4rem; }
-  .wd-summary { font-weight: 700; font-size: 1.1rem; padding: .6rem .8rem; border-radius: 8px; background: light-dark(#d9efec, #173936); }
+  .wd-summary { font-weight: 700; font-size: 1.1rem; padding: .6rem .8rem; border-radius: 8px; background: light-dark(#eef2f1, #222b2a); }
   .wd-summary small { display: block; font-weight: 400; font-size: .85rem; opacity: .8; }
   .wd-hint { margin: 0; font-size: .9rem; }
   .wd-tz { margin: 0; font-size: .9rem; opacity: .85; }
@@ -67,16 +68,16 @@ const PICKER_STYLE = html`<style>
   .wd-opts small { display: block; font-weight: 400; font-size: .8rem; opacity: .8; }
   .wd-opts input[type=time] { padding: .3rem .4rem; font: inherit; font-size: .9rem; }
   .wd-x { background: none; border: 0; padding: 4px 6px; color: inherit; opacity: .7; font: inherit; font-size: 1.1rem; line-height: 1; }
-  .wd-chooser { display: grid; gap: 8px; padding: 10px 12px; border-radius: 8px; border: 2px solid light-dark(#0e6b66, #4fc0b6);
-    background: light-dark(#d9efec, #173936); }
+  .wd-chooser { display: grid; gap: 8px; padding: 10px 12px; border-radius: 8px; border: 2px solid light-dark(#17201f, #e6eeec);
+    background: light-dark(#eef2f1, #222b2a); }
   .wd-chooser p { margin: 0; font-weight: 700; }
   .wd-chips { display: flex; flex-wrap: wrap; gap: 6px; }
   .wd-chips button { font: inherit; font-size: .85rem; padding: .3rem .75rem; border-radius: 999px;
     border: 1px solid light-dark(#c9d1cf, #3a4644); background: light-dark(#fff, #1a2221); color: inherit; }
   .wd-headrow { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
   .wd-headrow h3 { margin: 0; font-size: 1rem; }
-  .wd-busy::after { content: ""; position: absolute; top: 4px; right: 4px; width: 7px; height: 7px; border-radius: 50%;
-    background: light-dark(#17201f, #e6eeec); box-shadow: 0 0 0 2px light-dark(#fff, #111716); }
+  /* Busy (rc41) is hatching in the neutral ink (rc50), over whatever else the day shows. */
+  .wd-busy { background-image: repeating-linear-gradient(135deg, color-mix(in srgb, currentColor 30%, transparent) 0 1.5px, transparent 1.5px 6px); }
   .wd-busyline { margin: 0; font-size: .9rem; }
   .wd-busynote { margin: 0; font-size: .9rem; }
   .wd-opts .wd-clash { font-weight: 700; opacity: 1; }
