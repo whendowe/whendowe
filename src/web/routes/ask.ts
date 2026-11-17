@@ -33,7 +33,7 @@ import {
   pickerAction,
   readChips,
 } from "../people-picker.js";
-import { PLAN_STYLE } from "../plan-editor.js";
+import { editorScript, PLAN_STYLE } from "../plan-editor.js";
 import {
   type AppEnv,
   page,
@@ -604,51 +604,115 @@ function drawn(e: AskBody["options"][number][number], title: string): PlanEventL
   };
 }
 
+/** An option's events as the week rows draw them: those with a time to draw. */
+function drawnOf(body: AskBody, o: AskBody["options"][number] | undefined): PlanEventLike[] {
+  return (o ?? []).flatMap((e) => {
+    const d = drawn(e, body.title);
+    return d === null ? [] : [d];
+  });
+}
+
+/**
+ * Option i's week rows (rc49): compared with A when it was made like A, or A alone instead
+ * when seeing A. On the Ask page hue is the option (rc46): every event drawn is in its colour.
+ */
+function optionModel(
+  body: AskBody,
+  i: number,
+  today: string,
+  opts: { readonly seeing: boolean; readonly selected: string | null },
+) {
+  const a = drawnOf(body, body.options[0]);
+  const here = drawnOf(body, body.options[i]);
+  const first = body.options[0];
+  const like = i > 0 && first !== undefined && madeLike(first, body.options[i] ?? []);
+  const model = compareModel({
+    agreed: [],
+    events: opts.seeing ? a : here,
+    base: like && !opts.seeing ? a : null,
+    nameOf: () => "",
+  });
+  const hue = opts.seeing ? 0 : i % 8;
+  const colours = new Map([...a, ...here].map((e) => [colourKey(e), hue]));
+  const blocks = weekBlocks(model, {
+    today,
+    colours,
+    nameOf: () => "",
+    selected: opts.selected,
+    picked: null,
+    agreedOnly: false,
+    more: 0,
+  });
+  return { model, blocks, hue, like };
+}
+
+/** "N changes from A", listed; or that it is the same as A. */
+function changesFromA(model: ReturnType<typeof optionModel>["model"]): Html {
+  const changes = model.lines.filter((l) => l.kind !== "warn" && l.primary);
+  return model.changes === 0
+    ? html`<span>Same as A — change something to make it a choice.</span>`
+    : html`<details><summary>${String(model.changes)} change${model.changes > 1 ? "s" : ""} from A</summary>${lineList(changes)}</details>`;
+}
+
 /**
  * An option made like A (rc49), drawn as week rows of that option alone, its changes from A
  * marked and listed; "See A" draws A in its place instead. One option at a time, never two
  * layers blended (§10 *Plans*). The list of its events below stays the editor.
  */
 function likeA(body: AskBody, i: number, today: string, seeing: boolean): Html {
-  const events = (o: AskBody["options"][number] | undefined) =>
-    (o ?? []).flatMap((e) => {
-      const d = drawn(e, body.title);
-      return d === null ? [] : [d];
-    });
-  const a = events(body.options[0]);
-  const here = events(body.options[i]);
-  const model = compareModel({
-    agreed: [],
-    events: seeing ? a : here,
-    base: seeing ? null : a,
-    nameOf: () => "",
-  });
-  // On the Ask page hue is the option (rc46): every event drawn is in its option's colour.
-  const hue = seeing ? 0 : i % 8;
-  const colours = new Map([...a, ...here].map((e) => [colourKey(e), hue]));
-  const blocks = weekBlocks(model, {
-    today,
-    colours,
-    nameOf: () => "",
-    selected: null,
-    picked: null,
-    agreedOnly: false,
-    more: 0,
-  });
+  const { model, blocks } = optionModel(body, i, today, { seeing, selected: null });
   const letter = LETTERS[i] ?? "";
-  const changes = model.lines.filter((l) => l.kind !== "warn" && l.primary);
   const head = seeing
     ? html`<p class="row wrap"><span>Showing <strong>A</strong>, which ${letter} is like.</span> <button type="submit" name="act" value="see:">Back to ${letter}</button></p>`
-    : html`<div class="row wrap">${
-        model.changes === 0
-          ? html`<span>Same as A — change something to make it a choice.</span>`
-          : html`<details><summary>${String(model.changes)} change${model.changes > 1 ? "s" : ""} from A</summary>${lineList(changes)}</details>`
-      } <button type="submit" name="act" value="see:${String(i)}">See A</button></div>`;
+    : html`<div class="row wrap">${changesFromA(model)} <button type="submit" name="act" value="see:${String(i)}">See A</button></div>`;
   return html`<div class="like">${head}${weeksHtml(
     blocks,
     { day: () => `#o${i}`, ribbon: () => `#o${i}` },
     { compareLetter: seeing ? null : "A", selColour: null, editing: false },
   )}</div>`;
+}
+
+/** The option being edited on its week rows (rc49, A5b), and the event chosen in it. */
+interface Editing {
+  readonly i: number;
+  readonly sid: string | null;
+}
+
+/**
+ * The week-row editor behind an option's Edit (rc49, A5b; P4's): the option's week rows, one
+ * of its events chosen. With JavaScript its first or last day is picked up and put down, or
+ * dragged, and the script writes that event's own fields below and sends the form; a timed
+ * one moves to the day tapped. Without it, those fields are the editor, as everywhere here.
+ * Tapping another event chooses it: a button, so what was typed is saved first.
+ */
+function editWeeks(body: AskBody, editing: Editing, today: string): Html {
+  const { i } = editing;
+  const { model, blocks, hue, like } = optionModel(body, i, today, {
+    seeing: false,
+    selected: editing.sid,
+  });
+  const events = body.options[i] ?? [];
+  const j = events.findIndex((e) => e.sid === editing.sid);
+  const sel = events[j];
+  const k = `o${i}e${j}`;
+  const hint =
+    sel === undefined
+      ? "Its events show here once they have a day and a time. Tap one to move it."
+      : sel.allDay
+        ? "Tap its first or last day to pick it up, then tap where it goes. Or drag an end."
+        : "Tap a day to move it there; its times are below.";
+  return html`<div class="like edit">${like ? html`<div class="row wrap">${changesFromA(model)}</div>` : ""}
+<p class="small muted" data-hint>${hint}</p>
+<div data-plan-editor data-sel="${sel === undefined ? "" : (editing.sid ?? "")}" data-grab="" data-form="ask" data-kind="${sel?.allDay ? "days" : "time"}" data-from="${k}day" data-to="${k}last" data-day="${k}day">${weeksHtml(
+    blocks,
+    {
+      day: () => `#o${i}`,
+      ribbon: () => `#o${i}`,
+      act: (r) => (r.kind === "plan" ? `edit:${String(i)}:${r.sid}` : null),
+    },
+    { compareLetter: like ? "A" : null, selColour: `var(--o${hue})`, editing: sel !== undefined },
+  )}</div>
+<p><button type="submit" name="act" value="edit:">Done</button></p></div>`;
 }
 
 /** Right after a day was tapped (rc46): what it became, and Undo. */
@@ -684,6 +748,8 @@ function askPage(
     readonly filter: string | null;
     /** rc49: the option made like A that is showing A instead. */
     readonly seeing: number | null;
+    /** rc49 (A5b): the option being edited on its week rows. */
+    readonly editing: Editing | null;
   },
 ): Html {
   const b = draft.body;
@@ -691,20 +757,31 @@ function askPage(
   const options = b.options.map(
     (events, i) =>
       html`${i > 0 ? html`<p class="or">or</p>` : ""}<fieldset class="option" id="o${i}"><legend><span class="letter" style="background:var(--o${i % 8})">${LETTERS[i] ?? "?"}</span>${i > 0 && first !== undefined && madeLike(first, events) ? " like A" : ""}</legend>
-${i > 0 && first !== undefined && madeLike(first, events) ? likeA(b, i, input.today, input.seeing === i) : ""}
+${
+  input.editing?.i === i
+    ? editWeeks(b, input.editing, input.today)
+    : i > 0 && first !== undefined && madeLike(first, events)
+      ? likeA(b, i, input.today, input.seeing === i)
+      : ""
+}
 ${events.map((e, j) => eventRow(i, j, { ...rowOf(e), name: e.title ?? "" }, events.length > 1 || b.options.length > 1, b.title))}
-${events.length < MAX_OPTION_EVENTS ? html`<p><button type="submit" name="act" value="and:${i}">+ and</button> <span class="muted small">another event, in this option</span></p>` : ""}
+<p class="row wrap">${events.length < MAX_OPTION_EVENTS ? html`<button type="submit" name="act" value="and:${i}">+ and</button> <span class="muted small">another event, in this option</span>` : ""}${
+        input.editing?.i === i
+          ? ""
+          : html` <button type="submit" name="act" value="edit:${String(i)}">Edit on the weeks</button>`
+      }</p>
 </fieldset>`,
   );
   return html`${PLAN_STYLE}<div class="pl ask" data-ask-drag>
 <p class="askstatus"><strong>Draft</strong> · step 1 of 4 · nobody has been told${input.saved ? html` · <span class="muted">Saved</span>` : ""}</p>
 ${input.problem === null ? "" : html`<p class="error">${input.problem}</p>`}
-<form method="post" action="${ASK_PATH}/${draft.id}">
+<form method="post" action="${ASK_PATH}/${draft.id}" id="ask">
 <input type="hidden" name="csrf" value="${me.csrfToken}" />
 <input type="hidden" name="m" value="${input.month}" />
 <input type="hidden" name="v" value="${input.view}" />
 <input type="hidden" name="d" value="${input.from}" />
 ${input.seeing === null ? "" : html`<input type="hidden" name="s" value="${String(input.seeing)}" />`}
+${input.editing === null ? "" : html`<input type="hidden" name="x" value="${String(input.editing.i)}" /><input type="hidden" name="e" value="${input.editing.sid ?? ""}" />`}
 <button type="submit" name="act" value="save" hidden></button>
 <button type="submit" name="act" value="save" hidden data-drag-act></button>
 <p><label>What<br /><input name="title" maxlength="200" value="${b.title}" class="wide" required /></label></p>
@@ -736,7 +813,7 @@ ${readBack(draft, input.asked)}
   }</button><button type="submit" name="act" value="save">Save</button></div>
 <p class="muted small">Asking emails them a minute later; until then you can undo it.</p>
 <p class="discard"><button class="link" type="submit" name="act" value="discard">Throw this question away</button></p>
-</form></div>${askDragAssets()}`;
+</form></div>${askDragAssets()}${input.editing === null ? "" : editorScript()}`;
 }
 
 /** Unsent questions on home (rc46): found again, never lost. */
@@ -763,6 +840,55 @@ function seeingOf(value: string | undefined, body: AskBody): number | null {
     madeLike(first, o)
     ? i
     : null;
+}
+
+/**
+ * rc49 (A5b): the option being edited, if it is still there, and its event chosen — by
+ * identity, never by position. No event named: its first with a time to draw. An event named
+ * that is no longer in the option closes the editor, rather than edit something else.
+ */
+function editingOf(x: string | undefined, sid: string | undefined, body: AskBody): Editing | null {
+  const i = Number.parseInt(x ?? "", 10);
+  const o = body.options[i];
+  if (!Number.isInteger(i) || o === undefined) return null;
+  const drawable = drawnOf(body, o);
+  if (sid === undefined || sid === "") return { i, sid: drawable[0]?.sid ?? null };
+  if (!o.some((e) => e.sid === sid)) return null;
+  return { i, sid: drawable.some((e) => e.sid === sid) ? sid : (drawable[0]?.sid ?? null) };
+}
+
+/** Where option i is after an action that removes an option, or null if it was that one. */
+function optionAfter(i: number, action: string, before: AskBody): number | null {
+  const remove = /^remove:(\d+)$/.exec(action);
+  const drop = /^drop:(\d+):\d+$/.exec(action);
+  const k = Number(remove?.[1] ?? drop?.[1] ?? -1);
+  const gone = remove !== null || (drop !== null && before.options[k]?.length === 1);
+  if (!gone) return i;
+  if (k === i) return null;
+  return k < i ? i - 1 : i;
+}
+
+/** The editor after a button: opened or closed by Edit and Done, else carried, if still there. */
+function editingNext(
+  form: Record<string, unknown>,
+  action: string,
+  before: AskBody,
+  after: AskBody,
+  seeing: boolean,
+): Editing | null {
+  const edit = /^edit:(\d*)(?::(.+))?$/.exec(action);
+  if (edit !== null) return editingOf(edit[1], edit[2], after);
+  if (seeing) return null;
+  const i = Number.parseInt(str(form, "x"), 10);
+  if (!Number.isInteger(i)) return null;
+  const now = optionAfter(i, action, before);
+  if (now === null) return null;
+  // Its chosen event removed from the list: the editor stays, on the option's first.
+  const sid = str(form, "e");
+  const dropped =
+    action.startsWith(`drop:${String(i)}:`) &&
+    !(after.options[now] ?? []).some((e) => e.sid === sid);
+  return editingOf(String(now), dropped ? "" : sid, after);
 }
 
 function addedOf(value: string | undefined, body: AskBody): number | null {
@@ -827,6 +953,7 @@ export function registerAskRoutes(app: Hono<AppEnv>, deps: AuthDeps): void {
           people: await askPeople(deps, me, draft),
           filter: (c.req.query("f") ?? "").slice(0, 64) || null,
           seeing: seeingOf(c.req.query("s"), draft.body),
+          editing: editingOf(c.req.query("x"), c.req.query("e"), draft.body),
         }),
       ),
     );
@@ -882,11 +1009,21 @@ export function registerAskRoutes(app: Hono<AppEnv>, deps: AuthDeps): void {
       } else if (/^\d{4}-\d{2}$/.test(month)) q.set("m", month);
       if (view === "hours" && DAY.test(from)) q.set("d", from);
       if (filter !== null) q.set("f", filter);
-      // rc49: "See A" is a view of one option, kept like the month until "Back".
+      // rc49: "See A" is a view of one option, kept like the month until "Back"; the editor
+      // behind Edit (A5b) is kept the same way until "Done". One at a time: each ends the other.
       const see = /^see:(\d*)$/.exec(action);
-      const seeing = seeingOf(see === null ? str(form, "s") : see[1], body);
+      const edit = /^edit:(\d*)(?::(.+))?$/.exec(action);
+      const seeing = edit === null ? seeingOf(see === null ? str(form, "s") : see[1], body) : null;
+      const editing = editingNext(form, action, draft.body, body, see !== null);
       if (seeing !== null) q.set("s", String(seeing));
-      return c.redirect(`${ASK_PATH}/${id}?${q.toString()}`, 303);
+      if (editing !== null) {
+        q.set("x", String(editing.i));
+        if (editing.sid !== null) q.set("e", editing.sid);
+      }
+      return c.redirect(
+        `${ASK_PATH}/${id}?${q.toString()}${editing === null ? "" : `#o${editing.i}`}`,
+        303,
+      );
     }
     const saved: AskDraft = { ...draft, body, updatedAt: now };
     let asked: Awaited<ReturnType<typeof askDraft>>;
@@ -911,6 +1048,7 @@ export function registerAskRoutes(app: Hono<AppEnv>, deps: AuthDeps): void {
             people: await askPeople(deps, me, saved),
             filter,
             seeing: seeingOf(str(form, "s"), body),
+            editing: editingOf(str(form, "x"), str(form, "e"), body),
           }),
         ),
         400,

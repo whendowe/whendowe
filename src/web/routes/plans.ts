@@ -320,6 +320,11 @@ export function lineList(lines: readonly Line[]): Html {
 export interface Links {
   readonly day: (key: string) => string;
   readonly ribbon: (r: Ribbon) => string;
+  /**
+   * (rc49) The Ask page's: a ribbon that is a button of its form, sending this action, so
+   * choosing it saves what was typed first; null keeps it a link.
+   */
+  readonly act?: (r: Ribbon) => string | null;
 }
 
 function weekHtml(
@@ -343,13 +348,17 @@ function weekHtml(
     const g = r.grips;
     const cls = `rib ${r.kind}${r.one ? ` one${r.right ? " right" : ""}` : ""}${r.selected ? ` sel${g?.start ? " gs" : ""}${g?.end ? " ge" : ""}` : ""}`;
     const style = `grid-column:${r.colStart} / ${r.colEnd};grid-row:${r.row};--x:var(--o${r.colour})${g === null ? "" : `;--n:${g.n};--a:${g.a};--b:${g.b}`}`;
-    return html`<a class="${cls}" style="${style}" href="${links.ribbon(r)}" data-sid="${r.sid}" data-kind="${r.kind}" data-k="${r.day}" aria-label="${r.aria}">${
+    const inner = html`${
       g?.start ? html`<span class="grip s" data-grip="start" aria-hidden="true"></span>` : ""
     }${g?.end ? html`<span class="grip e" data-grip="end" aria-hidden="true"></span>` : ""}${r.head ? "" : "‹ "}${
       r.time === null ? "" : html`<small>${r.time}</small> `
     }${r.title}${r.who === null ? "" : html` <small class="who">${r.who}</small>`}${r.tail ? "" : " ›"}${
       r.badge === null ? "" : html`<span class="badge">${r.badge}</span>`
-    }${r.kind === "agreed" ? html`<span class="lock" aria-hidden="true">✓</span>` : ""}</a>`;
+    }${r.kind === "agreed" ? html`<span class="lock" aria-hidden="true">✓</span>` : ""}`;
+    const act = links.act?.(r) ?? null;
+    return act === null
+      ? html`<a class="${cls}" style="${style}" href="${links.ribbon(r)}" data-sid="${r.sid}" data-kind="${r.kind}" data-k="${r.day}" aria-label="${r.aria}">${inner}</a>`
+      : html`<button type="submit" name="act" value="${act}" class="${cls}" style="${style}" data-sid="${r.sid}" data-kind="${r.kind}" data-k="${r.day}" aria-label="${r.aria}">${inner}</button>`;
   })}</div>
 ${warn.length > 0 ? lineList(warn) : ""}
 ${

@@ -23,9 +23,9 @@ const ASK_DRAG_STYLE = html`<style>
   .pl.ask.drag-on .wkrow { touch-action: pan-y; }
   .pl.ask.drag-on .day .letter[data-grip] { cursor: ew-resize; }
   .pl.ask .day.drag, .pl.ask .hour.drag { outline: 2px dashed var(--fg); outline-offset: -2px; }
-  .pl.ask .grip { display: none; }
-  .pl.ask.drag-on .grip { display: block; flex: 0 0 100%; height: 14px; touch-action: none; cursor: ns-resize; position: relative; }
-  .pl.ask.drag-on .grip::before { content: ""; position: absolute; left: 25%; right: 25%; top: 5px; height: 4px; border-radius: 2px; background: var(--fg); opacity: .45; }
+  .pl.ask .hour .grip { display: none; }
+  .pl.ask.drag-on .hour .grip { display: block; flex: 0 0 100%; height: 14px; touch-action: none; cursor: ns-resize; position: relative; }
+  .pl.ask.drag-on .hour .grip::before { content: ""; position: absolute; left: 25%; right: 25%; top: 5px; height: 4px; border-radius: 2px; background: var(--fg); opacity: .45; }
 </style>`;
 
 const ASK_DRAG_SCRIPT = html`<script>
