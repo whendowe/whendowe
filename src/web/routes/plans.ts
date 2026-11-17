@@ -311,13 +311,13 @@ function decideHint(v: View): string {
     : `${v.nameOf(v.access.thread.organizerId)} decides`;
 }
 
-function lineList(lines: readonly Line[]): Html {
+export function lineList(lines: readonly Line[]): Html {
   return html`<ul class="wl">${lines.map((l) => html`<li class="${l.kind}">${parts(l.parts)}</li>`)}</ul>`;
 }
 
 // --- week rows ------------------------------------------------------------------------
 
-interface Links {
+export interface Links {
   readonly day: (key: string) => string;
   readonly ribbon: (r: Ribbon) => string;
 }
@@ -360,7 +360,7 @@ ${
 </section>`;
 }
 
-function weeksHtml(
+export function weeksHtml(
   blocks: readonly Block[],
   links: Links,
   opts: { compareLetter: string | null; selColour: string | null; editing: boolean },
@@ -397,6 +397,19 @@ function dayRows(
 /** The plan this one is compared with: what it answers. */
 function baseOf(v: View, p: Plan): Plan | null {
   return v.plans.find((x) => x.id === p.answersId && x.status !== "draft") ?? null;
+}
+
+/**
+ * rc49: an option asked like A — sent with A in the same question, at the same moment, by the
+ * same person — is "like A"; any later plan compared with A answers it.
+ */
+function likeBase(p: Plan, base: Plan): boolean {
+  return (
+    p.questionId === base.questionId &&
+    p.authorId === base.authorId &&
+    p.sentAt !== null &&
+    p.sentAt === base.sentAt
+  );
 }
 
 /** busyTz: the thread's zone, on the pages where you choose (rc41); null where you don't. */
@@ -511,7 +524,7 @@ function chooseButton(v: View, options: readonly Plan[], lead: string | null): H
 function planRow(v: View, p: Plan): Html {
   const ans = baseOf(v, p);
   return html`<div class="msg ${p.status}${p.authorId === v.access.personId ? " mine" : ""}"><a href="${planPath(v.access.thread.id, p.id)}"><span class="t1">${chip(p)}<span>${p.name}</span></span>
-<span class="t2">${v.nameOf(p.authorId)} · ${instant(v, p.sentAt)}${ans === null ? "" : ` · answers ${ans.letter}`} · ${spanText(p.events)}</span>${
+<span class="t2">${v.nameOf(p.authorId)} · ${instant(v, p.sentAt)}${ans === null ? "" : ` · ${likeBase(p, ans) ? "like" : "answers"} ${ans.letter}`} · ${spanText(p.events)}</span>${
     p.status === "on_table" ? html`<span class="t2">${tally(v, p)}</span>` : ""
   }</a><span></span></div>`;
 }
@@ -895,9 +908,10 @@ function header(
     : isDraft
       ? html`<span>Your draft${focus.name === "" ? "" : `: ${focus.name}`}</span>`
       : html`${chip(focus)}<span>${v.nameOf(focus.authorId)}: ${focus.name}</span>`;
-  const word = isDraft ? (focus.restOf ? "the rest of" : "changes to") : "answers";
+  const like = !isDraft && base !== null && likeBase(focus, base);
+  const word = isDraft ? (focus.restOf ? "the rest of" : "changes to") : like ? "like" : "answers";
   const l2 = opts.seeing
-    ? html`<span>Showing the plan this answers.</span> <a href="${opts.here}">Back to ${isDraft ? "your draft" : focus.letter}</a>`
+    ? html`<span>${like ? "Showing the option this is like." : "Showing the plan this answers."}</span> <a href="${opts.here}">Back to ${isDraft ? "your draft" : focus.letter}</a>`
     : html`<span>${base === null ? "compared with what is agreed" : `${word} ${base.letter} · ${v.nameOf(base.authorId)}: ${base.name}`}</span>${statusBadge(focus)}`;
   const all = model.lines.filter((l) => l.kind !== "warn" && l.primary);
   const settled = model.settled > 0 ? ", apart from what is agreed since" : "";

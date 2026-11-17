@@ -5,6 +5,7 @@ import { ZodError } from "zod";
 import { groupDefaults, UnreachableAddressError } from "../../events/participation.js";
 import { PollInputError } from "../../events/poll.js";
 import { holdAction } from "../../held.js";
+import { uuidv7 } from "../../ids.js";
 import { findGroupForMember, listMembers } from "../../people/group.js";
 import { type KnownPerson, listKnownPeople } from "../../people/known.js";
 import {
@@ -18,8 +19,9 @@ import {
   saveAskDraft,
   startAskDraft,
 } from "../../plans/ask.js";
-import { MAX_OPTION_EVENTS, MAX_OPTIONS } from "../../plans/plan.js";
-import { addDays, dayLabel } from "../../plans/weeks.js";
+import type { PlanEventLike } from "../../plans/diff.js";
+import { MAX_OPTION_EVENTS, MAX_OPTIONS, madeLike } from "../../plans/plan.js";
+import { addDays, colourKey, compareModel, dayLabel, weekBlocks } from "../../plans/weeks.js";
 import { askDragAssets } from "../ask-drag.js";
 import { type Html, html } from "../layout.js";
 import {
@@ -42,7 +44,7 @@ import {
 } from "../session.js";
 import type { AuthDeps } from "./auth.js";
 import { zoneOptions } from "./events.js";
-import { PLANS_PATH } from "./plans.js";
+import { lineList, PLANS_PATH, weeksHtml } from "./plans.js";
 
 // Ask when (DESIGN §10 *Asking when*, rc46, A2): one page to ask when, simple by default.
 // This is the page as a plain form — every form works without JavaScript (rc15) — and the
@@ -100,14 +102,20 @@ function str(form: Record<string, unknown>, key: string): string {
 /** The form as a body: what was typed, kept as typed; nothing here refuses. */
 function bodyOf(form: Record<string, unknown>, before: AskBody): AskBody {
   const options = before.options.map((events, i) =>
-    events.map((_, j) =>
-      eventOf({
-        day: str(form, `o${i}e${j}day`),
-        from: str(form, `o${i}e${j}from`),
-        to: str(form, `o${i}e${j}to`),
-        last: str(form, `o${i}e${j}last`),
-      }),
-    ),
+    events.map((was, j) => {
+      const name = str(form, `o${i}e${j}name`).slice(0, 200).trim();
+      return {
+        ...eventOf({
+          day: str(form, `o${i}e${j}day`),
+          from: str(form, `o${i}e${j}from`),
+          to: str(form, `o${i}e${j}to`),
+          last: str(form, `o${i}e${j}last`),
+        }),
+        // rc49: an event keeps its identity through every edit, and has its own name.
+        ...(was.sid === undefined ? {} : { sid: was.sid }),
+        title: name === "" ? null : name,
+      };
+    }),
   );
   const { emails, people } = fromChips(readChips(form, MAX_ASK_EMAILS));
   const text = (k: string, max: number) => str(form, k).slice(0, max);
@@ -127,6 +135,16 @@ function bodyOf(form: Record<string, unknown>, before: AskBody): AskBody {
       from: TIME.test(str(form, "new_from")) ? str(form, "new_from") : null,
       hours: HOURS.includes(Number(str(form, "new_hours"))) ? Number(str(form, "new_hours")) : 2,
     },
+  };
+}
+
+/** rc49: every event has an identity from when it is made; one made without gets one now. */
+function withSids(body: AskBody, newId: () => string = uuidv7): AskBody {
+  return {
+    ...body,
+    options: body.options.map((o) =>
+      o.map((e) => (e.sid === undefined || e.sid === "" ? { ...e, sid: newId() } : e)),
+    ),
   };
 }
 
@@ -283,6 +301,10 @@ function act(body: AskBody, action: string): AskBody {
     return { ...body, options: body.options.filter((_, k) => k !== Number(remove[1])) };
   if (action === "option" && body.options.length < MAX_OPTIONS)
     return { ...body, options: [...body.options, [EMPTY_EVENT]] };
+  // rc49: "+ Like A", a copy of A — the same events, the same identities — to change.
+  const [first] = body.options;
+  if (action === "like" && first !== undefined && body.options.length < MAX_OPTIONS)
+    return { ...body, options: [...body.options, first] };
   const and = /^and:(\d+)$/.exec(action);
   if (and !== null) {
     const i = Number(and[1]);
@@ -547,14 +569,86 @@ function viewSwitch(view: "days" | "hours"): Html {
   return html`<div class="seg viewswitch" role="group" aria-label="View"><button type="submit" name="act" value="view:days" aria-pressed="${String(view === "days")}">Days</button><button type="submit" name="act" value="view:hours" aria-pressed="${String(view === "hours")}">Hours</button></div>`;
 }
 
-function eventRow(i: number, j: number, r: EventRow, many: boolean): Html {
+function eventRow(
+  i: number,
+  j: number,
+  r: EventRow & { readonly name: string },
+  many: boolean,
+  title: string,
+): Html {
   const k = `o${i}e${j}`;
   return html`<div class="ev">${j > 0 ? html`<p class="and">and</p>` : ""}<div class="row wrap">
+<label>Name <span class="muted small">(optional)</span><br /><input name="${k}name" maxlength="200" value="${r.name}" placeholder="${title.trim() === "" ? "As the question" : title.trim()}" /></label>
 <label>Day<br /><input type="date" name="${k}day" value="${r.day}" /></label>
 <label>From <span class="muted small">(empty: all day)</span><br /><input type="time" name="${k}from" value="${r.from}" /></label>
 <label>To<br /><input type="time" name="${k}to" value="${r.to}" /></label>
 <label>Last day <span class="muted small">(all day, several days)</span><br /><input type="date" name="${k}last" value="${r.last}" /></label>
 ${many ? html`<button class="link" type="submit" name="act" value="drop:${i}:${j}">Remove</button>` : ""}</div></div>`;
+}
+
+/** An event as the week rows draw it (rc49), or null while its time is still being typed. */
+function drawn(e: AskBody["options"][number][number], title: string): PlanEventLike | null {
+  const ok = e.allDay
+    ? DAY.test(e.startLocal) && DAY.test(e.endLocal)
+    : /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(e.startLocal) &&
+      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(e.endLocal);
+  if (!ok || e.endLocal <= e.startLocal || e.sid === undefined) return null;
+  const named = e.title?.trim() || title.trim();
+  return {
+    sid: e.sid,
+    title: named === "" ? "Untitled" : named,
+    allDay: e.allDay,
+    startLocal: e.startLocal,
+    endLocal: e.endLocal,
+    who: [],
+  };
+}
+
+/**
+ * An option made like A (rc49), drawn as week rows of that option alone, its changes from A
+ * marked and listed; "See A" draws A in its place instead. One option at a time, never two
+ * layers blended (§10 *Plans*). The list of its events below stays the editor.
+ */
+function likeA(body: AskBody, i: number, today: string, seeing: boolean): Html {
+  const events = (o: AskBody["options"][number] | undefined) =>
+    (o ?? []).flatMap((e) => {
+      const d = drawn(e, body.title);
+      return d === null ? [] : [d];
+    });
+  const a = events(body.options[0]);
+  const here = events(body.options[i]);
+  const model = compareModel({
+    agreed: [],
+    events: seeing ? a : here,
+    base: seeing ? null : a,
+    nameOf: () => "",
+  });
+  // On the Ask page hue is the option (rc46): every event drawn is in its option's colour.
+  const hue = seeing ? 0 : i % 8;
+  const colours = new Map([...a, ...here].map((e) => [colourKey(e), hue]));
+  const blocks = weekBlocks(model, {
+    today,
+    colours,
+    nameOf: () => "",
+    selected: null,
+    picked: null,
+    agreedOnly: false,
+    more: 0,
+  });
+  const letter = LETTERS[i] ?? "";
+  const changes = model.lines.filter((l) => l.kind !== "warn" && l.primary);
+  const head = seeing
+    ? html`<p class="row wrap"><span>Showing <strong>A</strong>, which ${letter} is like.</span> <button type="submit" name="act" value="see:">Back to ${letter}</button></p>`
+    : html`<div class="row wrap">${
+        model.changes === 0
+          ? html`<span>Same as A — change something to make it a choice.</span>`
+          : html`<details><summary>${String(model.changes)} change${model.changes > 1 ? "s" : ""} from A</summary>${lineList(changes)}</details>`
+      } <button type="submit" name="act" value="see:${String(i)}">See A</button></div>`;
+  return html`<div class="like">${head}${weeksHtml(
+    blocks,
+    { day: () => `#o${i}`, ribbon: () => `#o${i}` },
+    { compareLetter: seeing ? null : "A", selColour: null, editing: false },
+  )}</div>`;
 }
 
 /** Right after a day was tapped (rc46): what it became, and Undo. */
@@ -588,13 +682,17 @@ function askPage(
     readonly people: AskPeople;
     /** The group the suggestions are narrowed to. */
     readonly filter: string | null;
+    /** rc49: the option made like A that is showing A instead. */
+    readonly seeing: number | null;
   },
 ): Html {
   const b = draft.body;
+  const [first] = b.options;
   const options = b.options.map(
     (events, i) =>
-      html`${i > 0 ? html`<p class="or">or</p>` : ""}<fieldset class="option" id="o${i}"><legend><span class="letter" style="background:var(--o${i % 8})">${LETTERS[i] ?? "?"}</span></legend>
-${events.map((e, j) => eventRow(i, j, rowOf(e), events.length > 1 || b.options.length > 1))}
+      html`${i > 0 ? html`<p class="or">or</p>` : ""}<fieldset class="option" id="o${i}"><legend><span class="letter" style="background:var(--o${i % 8})">${LETTERS[i] ?? "?"}</span>${i > 0 && first !== undefined && madeLike(first, events) ? " like A" : ""}</legend>
+${i > 0 && first !== undefined && madeLike(first, events) ? likeA(b, i, input.today, input.seeing === i) : ""}
+${events.map((e, j) => eventRow(i, j, { ...rowOf(e), name: e.title ?? "" }, events.length > 1 || b.options.length > 1, b.title))}
 ${events.length < MAX_OPTION_EVENTS ? html`<p><button type="submit" name="act" value="and:${i}">+ and</button> <span class="muted small">another event, in this option</span></p>` : ""}
 </fieldset>`,
   );
@@ -606,6 +704,7 @@ ${input.problem === null ? "" : html`<p class="error">${input.problem}</p>`}
 <input type="hidden" name="m" value="${input.month}" />
 <input type="hidden" name="v" value="${input.view}" />
 <input type="hidden" name="d" value="${input.from}" />
+${input.seeing === null ? "" : html`<input type="hidden" name="s" value="${String(input.seeing)}" />`}
 <button type="submit" name="act" value="save" hidden></button>
 <button type="submit" name="act" value="save" hidden data-drag-act></button>
 <p><label>What<br /><input name="title" maxlength="200" value="${b.title}" class="wide" required /></label></p>
@@ -615,7 +714,7 @@ ${input.view === "hours" ? hoursView(b, input.from, input.today) : daysView(b, i
 ${newOnes(b)}
 ${addedBar(b, input.added)}
 ${b.options.length === 0 ? html`<p class="muted">No times yet. Tap ${input.view === "hours" ? "an hour" : "a day"} to add one.</p>` : options}
-${b.options.length < MAX_OPTIONS ? html`<p><button type="submit" name="act" value="option">+ A time</button> <span class="muted small">another option to choose between</span></p>` : ""}
+${b.options.length < MAX_OPTIONS ? html`<p class="row wrap"><button type="submit" name="act" value="option">+ A time</button>${b.options.length > 0 ? html`<button type="submit" name="act" value="like">+ Like A</button>` : ""} <span class="muted small">another option to choose between${b.options.length > 0 ? "; Like A starts as a copy of A, its changes shown" : ""}</span></p>` : ""}
 <p><label>Time zone<br /><input name="tzid" list="zones" value="${b.tzid ?? ""}" placeholder="Europe/Prague" /></label></p>
 ${zoneOptions()}
 <h2>Who</h2>
@@ -652,6 +751,20 @@ export async function askDraftsSection(deps: AuthDeps, me: SignedIn): Promise<Ht
       )}</ul>`;
 }
 
+/** rc49: which option made like A is showing A, if that is still one. */
+function seeingOf(value: string | undefined, body: AskBody): number | null {
+  const i = Number.parseInt(value ?? "", 10);
+  const [first] = body.options;
+  const o = body.options[i];
+  return Number.isInteger(i) &&
+    i > 0 &&
+    first !== undefined &&
+    o !== undefined &&
+    madeLike(first, o)
+    ? i
+    : null;
+}
+
 function addedOf(value: string | undefined, body: AskBody): number | null {
   const i = Number.parseInt(value ?? "", 10);
   return Number.isInteger(i) && i >= 0 && i < body.options.length ? i : null;
@@ -684,7 +797,7 @@ export function registerAskRoutes(app: Hono<AppEnv>, deps: AuthDeps): void {
     await saveAskDraft(deps.storage, {
       id: draft.id,
       authorId: me.personId,
-      body: { ...draft.body, options: [[EMPTY_EVENT]] },
+      body: withSids({ ...draft.body, options: [[EMPTY_EVENT]] }),
       now: deps.now(),
     });
     return c.redirect(`${ASK_PATH}/${draft.id}`, 303);
@@ -713,6 +826,7 @@ export function registerAskRoutes(app: Hono<AppEnv>, deps: AuthDeps): void {
           added: addedOf(c.req.query("added"), draft.body),
           people: await askPeople(deps, me, draft),
           filter: (c.req.query("f") ?? "").slice(0, 64) || null,
+          seeing: seeingOf(c.req.query("s"), draft.body),
         }),
       ),
     );
@@ -750,6 +864,7 @@ export function registerAskRoutes(app: Hono<AppEnv>, deps: AuthDeps): void {
       body = { ...typed, ...fromChips(picked.chips) };
       filter = picked.filter;
     }
+    body = withSids(body);
     const now = deps.now();
     await saveAskDraft(deps.storage, { id, authorId: me.personId, body, now });
     if (action !== "ask") {
@@ -767,6 +882,10 @@ export function registerAskRoutes(app: Hono<AppEnv>, deps: AuthDeps): void {
       } else if (/^\d{4}-\d{2}$/.test(month)) q.set("m", month);
       if (view === "hours" && DAY.test(from)) q.set("d", from);
       if (filter !== null) q.set("f", filter);
+      // rc49: "See A" is a view of one option, kept like the month until "Back".
+      const see = /^see:(\d*)$/.exec(action);
+      const seeing = seeingOf(see === null ? str(form, "s") : see[1], body);
+      if (seeing !== null) q.set("s", String(seeing));
       return c.redirect(`${ASK_PATH}/${id}?${q.toString()}`, 303);
     }
     const saved: AskDraft = { ...draft, body, updatedAt: now };
@@ -791,6 +910,7 @@ export function registerAskRoutes(app: Hono<AppEnv>, deps: AuthDeps): void {
             added: null,
             people: await askPeople(deps, me, saved),
             filter,
+            seeing: seeingOf(str(form, "s"), body),
           }),
         ),
         400,
