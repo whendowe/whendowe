@@ -2,7 +2,7 @@
 import { expect, it } from "vitest";
 import { SIGNED_IN } from "../../src/events/response.js";
 import { findOrCreatePerson } from "../../src/people/person.js";
-import { castVote, createPollThread } from "../../src/plans/plan.js";
+import { castVote, createPollThread, withdrawPlan } from "../../src/plans/plan.js";
 import { findThreadForMember } from "../../src/plans/thread.js";
 import { issueVoteLinks } from "../../src/plans/vote-link.js";
 import { pickerAssets } from "../../src/web/picker.js";
@@ -80,6 +80,7 @@ async function poll(b: Browser) {
   const leaLink = issued.links.find((l) => l.personId === lea.id)?.token ?? "";
   const thread = `${PLANS_PATH}/${threadId}`;
   return {
+    maraAccess: await as(mara.id),
     a,
     second,
     thread,
@@ -129,4 +130,10 @@ it("what waits for you carries the attention mark, and what doesn't, doesn't", a
   expect(vote.match(/<li class="waits">/g)?.length).toBe(1);
   const waiting = vote.slice(vote.indexOf('<li class="waits">'));
   expect(waiting.slice(0, waiting.indexOf("</li>"))).toContain(`plan_${f.second}`);
+  const list = vote.slice(vote.indexOf("Which of these work for you?"), vote.indexOf("</ul>"));
+  expect(list.match(/<li[^>]*>/g)).toEqual(["<li>", '<li class="waits">']);
+
+  // Withdrawn, B no longer waits for anyone: its page's header is plain.
+  await withdrawPlan(b.storage, f.maraAccess, { planId: f.second, now: NOW });
+  expect(headOf(await f.text(`${f.thread}/p/${f.second}`))).toBe('<div class="head">');
 });

@@ -187,6 +187,16 @@ it("asked, an option made like A keeps A's identities and is like A; names go on
   expect(bPage).toContain("1 change from A");
   const seeA = await (await b.request(`${thread}/p/${bb.id}?see=base`)).text();
   expect(seeA).toContain("Showing the option this is like.");
+  // rc50: asked, B waits for Lea's answer, so its header carries the attention mark for
+  // her; showing A instead, the header is A's and doesn't.
+  expect(bPage).toContain('<div class="head">'); // Mara answered as she asked
+  await addAccount(b, "lea@example.org");
+  expect(await (await b.request(`${thread}/p/${bb.id}`)).text()).toContain(
+    '<div class="head waits">',
+  );
+  expect(await (await b.request(`${thread}/p/${bb.id}?see=base`)).text()).toContain(
+    '<div class="head">',
+  );
 });
 
 it("an option made fresh is asked with identities of its own and no plan to be like", async () => {
