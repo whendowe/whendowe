@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { z } from "zod";
 import { type StoragePort, stmt } from "../db/port.js";
+import { createEvent, eventFieldsSchema } from "../events/event.js";
 import { resolveInvitees } from "../events/participation.js";
 import { PollInputError } from "../events/poll.js";
 import { uuidv7 } from "../ids.js";
-import { findGroupForMember } from "../people/group.js";
+import { findGroupForMember, listMembers } from "../people/group.js";
 import { knownAddresses } from "../people/known.js";
 import { normalizeEmail } from "../people/person.js";
 import { ASK_DRAFT_KEEP_DAYS } from "../privacy/retention.js";
@@ -254,33 +255,110 @@ export async function askDraft(
     now: input.now,
     ...(input.newId === undefined ? {} : { newId: input.newId }),
   });
-  // Claimed in one statement only now, every check passed: two presses at once make one
-  // thread — the second finds nothing to claim. If the write then fails, it is put back.
-  const claimed = await storage.query(
+  const done = await claimed(storage, draft, input.authorId, () => storage.batch(statements));
+  return done === null ? null : { threadId, planIds };
+}
+
+/**
+ * Claim the draft in one statement, only once every check has passed, then write: two presses
+ * at once make one thread or event — the second finds nothing to claim. If the write then
+ * fails, the draft is put back. Null when there was nothing to claim.
+ */
+async function claimed<T>(
+  storage: StoragePort,
+  draft: AskDraft,
+  authorId: string,
+  write: () => Promise<T>,
+): Promise<T | null> {
+  const [row] = await storage.query(
     stmt(
       "DELETE FROM ask_draft WHERE id = ? AND author_id = ? RETURNING created_at",
-      input.id,
-      input.authorId,
+      draft.id,
+      authorId,
     ),
   );
-  const [row] = claimed;
   if (row === undefined) return null;
   try {
-    await storage.batch(statements);
+    return await write();
   } catch (error) {
     await storage.batch([
       stmt(
         `INSERT INTO ask_draft (id, author_id, group_id, body, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?)`,
         draft.id,
-        input.authorId,
+        authorId,
         draft.groupId,
-        JSON.stringify(body),
+        JSON.stringify(draft.body),
         String(row.created_at),
         draft.updatedAt,
       ),
     ]);
     throw error;
   }
-  return { threadId, planIds };
+}
+
+/**
+ * One option of one event, and nobody to ask (DESIGN §10 *Asking when*, rc50): no addresses,
+ * nobody chosen, and no group with anyone else in it. Asking it makes the event at once and
+ * tells nobody; anything else is a question.
+ */
+export async function makesEvent(
+  storage: StoragePort,
+  draft: AskDraft,
+  authorId: string,
+): Promise<boolean> {
+  const { body } = draft;
+  const [only, ...more] = body.options;
+  // One time given: the blank one a new question starts with is not yet a time.
+  if (only?.length !== 1 || more.length > 0 || only[0]?.startLocal === "") return false;
+  if (body.emails.length > 0 || (body.people ?? []).length > 0) return false;
+  if (draft.groupId === null) return true;
+  const group = await findGroupForMember(storage, draft.groupId, authorId);
+  if (group === null) return false;
+  return (await listMembers(storage, group)).every((m) => m.personId === authorId);
+}
+
+/**
+ * Ask a draft that makes an event (rc50): the event is made as the event form makes one, from
+ * the draft's group if it has one, and the draft is gone. Null for a draft that isn't the
+ * author's, or doesn't make an event (asked as a question instead).
+ */
+export async function askAsEvent(
+  storage: StoragePort,
+  input: {
+    readonly id: string;
+    readonly authorId: string;
+    readonly now: string;
+    readonly newId?: () => string;
+  },
+): Promise<{ readonly eventId: string } | null> {
+  const draft = await findAskDraft(storage, input);
+  if (draft === null || !(await makesEvent(storage, draft, input.authorId))) return null;
+  const group =
+    draft.groupId === null
+      ? null
+      : await findGroupForMember(storage, draft.groupId, input.authorId);
+  const { body } = draft;
+  const [e] = body.options[0] ?? [];
+  if (e === undefined) return null;
+  // Fully valid before the draft is claimed: a refused one stays as it was.
+  const fields = eventFieldsSchema.parse({
+    title: e.title?.trim() || body.title,
+    location: body.location,
+    description: body.note,
+    tzid: body.tzid,
+    allDay: e.allDay,
+    startLocal: e.startLocal,
+    endLocal: e.endLocal,
+  });
+  const event = await claimed(storage, draft, input.authorId, () =>
+    createEvent(storage, {
+      creatorId: input.authorId,
+      group,
+      fields,
+      now: input.now,
+      ...(input.newId === undefined ? {} : { newId: input.newId }),
+    }),
+  );
+  return event === null ? null : { eventId: event.id };
 }

@@ -1398,8 +1398,7 @@ export async function yourPlans(storage: StoragePort, personId: string): Promise
                   : ""
             }</li>`,
         )}</ul>`
-  }
-<p><a href="${PLANS_PATH}/new">+ Start planning</a></p>`;
+  }`;
 }
 
 // --- reading an event off a form ------------------------------------------------------

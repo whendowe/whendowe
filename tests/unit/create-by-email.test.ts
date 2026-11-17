@@ -192,10 +192,12 @@ it("a poll for people by email: a thread they vote in, and between two the secon
   expect(await (await b.request(first)).text()).toContain("Both said yes to it");
 });
 
-it("home offers both, with no group needed", async () => {
+it("home starts with Ask when, the event form a quieter link, with no group needed (rc50)", async () => {
   const b = await browser();
   await addAccount(b, "ann@example.org");
   const text = (await home(b)).text;
-  expect(text).toContain(`href="${EVENTS_PATH}/new"`);
-  expect(text).toContain(`href="${POLLS_PATH}/new"`);
+  expect(text).toContain(">Ask when</button>");
+  expect(text).toContain(`<a href="${EVENTS_PATH}/new">New repeating event</a>`);
+  // The poll form is retired from home; its route stays for links already out.
+  expect(text).not.toContain(`href="${POLLS_PATH}/new"`);
 });

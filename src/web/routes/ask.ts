@@ -11,11 +11,13 @@ import { type KnownPerson, listKnownPeople } from "../../people/known.js";
 import {
   type AskBody,
   type AskDraft,
+  askAsEvent,
   askDraft,
   discardAskDraft,
   findAskDraft,
   listAskDrafts,
   MAX_ASK_EMAILS,
+  makesEvent,
   saveAskDraft,
   startAskDraft,
 } from "../../plans/ask.js";
@@ -43,7 +45,7 @@ import {
   verifyFormCsrf,
 } from "../session.js";
 import type { AuthDeps } from "./auth.js";
-import { zoneOptions } from "./events.js";
+import { EVENTS_PATH, zoneOptions } from "./events.js";
 import { lineList, PLANS_PATH, weeksHtml } from "./plans.js";
 
 // Ask when (DESIGN §10 *Asking when*, rc46, A2): one page to ask when, simple by default.
@@ -347,7 +349,7 @@ async function askedCount(deps: AuthDeps, me: SignedIn, draft: AskDraft): Promis
   return fromGroup.length + chosen.size + draft.body.emails.length;
 }
 
-function readBack(draft: AskDraft, asked: number): Html {
+function readBack(draft: AskDraft, asked: number, makes: boolean): Html {
   const n = draft.body.options.length;
   const letters = [...LETTERS.slice(0, n)];
   const which =
@@ -357,6 +359,9 @@ function readBack(draft: AskDraft, asked: number): Html {
         ? html`<strong>A</strong>`
         : html`<strong>${letters.slice(0, -1).join(", ")} or ${letters.at(-1) ?? ""}</strong>`;
   const what = draft.body.title.trim() === "" ? "this" : `“${draft.body.title.trim()}”`;
+  // rc50: one time and nobody to ask is an event, made at once; the button keeps its name.
+  if (makes)
+    return html`<p class="readback">Nobody to ask, so asking makes ${what} an event at once and tells nobody.</p>`;
   const who =
     asked === 0 ? "nobody yet — add people below" : `${asked} ${asked === 1 ? "person" : "people"}`;
   return html`<p class="readback">Asking emails ${who} one question: does ${which} suit for ${what}? ${
@@ -734,6 +739,8 @@ function askPage(
   me: SignedIn,
   input: {
     readonly asked: number;
+    /** rc50: asking makes an event at once (one time, nobody to ask). */
+    readonly makesEvent: boolean;
     readonly saved: boolean;
     readonly problem: string | null;
     readonly month: string;
@@ -805,13 +812,13 @@ ${peoplePicker({
   exclude: input.people.inGroup,
 })}
 <p><label>Note <span class="muted">(optional — everyone asked sees it)</span><br /><textarea name="note" rows="2" maxlength="2000" class="wide">${b.note ?? ""}</textarea></label></p>
-${readBack(draft, input.asked)}
+${readBack(draft, input.asked, input.makesEvent)}
 <div class="row wrap"><button class="primary" type="submit" name="act" value="ask">${
     input.asked === 0
       ? "Ask"
       : `Ask ${input.asked} ${input.asked === 1 ? "person" : "people"} by email`
   }</button><button type="submit" name="act" value="save">Save</button></div>
-<p class="muted small">Asking emails them a minute later; until then you can undo it.</p>
+${input.makesEvent ? "" : html`<p class="muted small">Asking emails them a minute later; until then you can undo it.</p>`}
 <p class="discard"><button class="link" type="submit" name="act" value="discard">Throw this question away</button></p>
 </form></div>${askDragAssets()}${input.editing === null ? "" : editorScript()}`;
 }
@@ -943,6 +950,7 @@ export function registerAskRoutes(app: Hono<AppEnv>, deps: AuthDeps): void {
         "Ask when",
         askPage(draft, me, {
           asked: await askedCount(deps, me, draft),
+          makesEvent: await makesEvent(deps.storage, draft, me.personId),
           saved: c.req.query("saved") === "1",
           problem: null,
           month: monthOf(draft.body, c.req.query("m") ?? null, deps.now().slice(0, 10)),
@@ -1028,6 +1036,12 @@ export function registerAskRoutes(app: Hono<AppEnv>, deps: AuthDeps): void {
     const saved: AskDraft = { ...draft, body, updatedAt: now };
     let asked: Awaited<ReturnType<typeof askDraft>>;
     try {
+      // rc50: one time and nobody to ask is made as an event, and the page after is its own.
+      if (await makesEvent(deps.storage, saved, me.personId)) {
+        const made = await askAsEvent(deps.storage, { id, authorId: me.personId, now });
+        if (made === null) return notFound(c);
+        return c.redirect(`${EVENTS_PATH}/${made.eventId}`, 303);
+      }
       asked = await askDraft(deps.storage, { id, authorId: me.personId, now });
     } catch (err) {
       const message = problem(err);
@@ -1038,6 +1052,7 @@ export function registerAskRoutes(app: Hono<AppEnv>, deps: AuthDeps): void {
           "Ask when",
           askPage(saved, me, {
             asked: await askedCount(deps, me, saved),
+            makesEvent: await makesEvent(deps.storage, saved, me.personId),
             saved: true,
             problem: message,
             month: monthOf(body, str(form, "m"), now.slice(0, 10)),

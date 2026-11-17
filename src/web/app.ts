@@ -12,7 +12,7 @@ import { ACCOUNT_PATH, html } from "./layout.js";
 import { registerAccountRoutes } from "./routes/account.js";
 import { askDraftsSection, registerAskRoutes } from "./routes/ask.js";
 import { type AuthDeps, registerAuthRoutes, SIGN_IN_PATH } from "./routes/auth.js";
-import { EVENTS_PATH, POLLS_PATH, registerEventRoutes, yourEvents } from "./routes/events.js";
+import { EVENTS_PATH, registerEventRoutes, yourEvents } from "./routes/events.js";
 import { registerFeedRoutes } from "./routes/feeds.js";
 import { GROUPS_PATH, registerGroupRoutes } from "./routes/groups.js";
 import {
@@ -157,7 +157,7 @@ export function createApp(options: AppOptions = {}): Hono<AppEnv> {
 <p class="muted">Milestone: MVP-1 — People</p>
 ${connect}`
           : html`${await nameNudge(auth, signedIn.personId)}${await askDraftsSection(auth, signedIn)}${await yourEvents(auth.storage, signedIn.personId, auth.now())}
-<p><a href="${EVENTS_PATH}/new">+ New event</a> · <a href="${POLLS_PATH}/new">+ Find a time (poll)</a> · <a href="${PLANS_PATH}/new">+ Start planning</a></p>
+<p class="muted"><a href="${EVENTS_PATH}/new">New repeating event</a></p>
 <p><a href="${PLANS_PATH}">Your plans</a> · <a href="${GROUPS_PATH}">Your groups</a></p>
 ${connect}`,
       ),

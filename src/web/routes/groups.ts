@@ -249,7 +249,7 @@ ${createForm(me.csrfToken, "", null)}`,
 <h2>Events with these people</h2>
 ${events.length === 0 ? html`<p class="muted">Nothing planned yet.</p>` : html`<ul>${events.map((a) => html`<li>${eventSummary(a)}</li>`)}</ul>`}
 <form method="post" action="${ASK_PATH}" class="row wrap"><input type="hidden" name="csrf" value="${me.csrfToken}" /><input type="hidden" name="group" value="${membership.group.id}" /><button class="primary" type="submit">Ask ${membership.group.name} when</button></form>
-<p><a href="${GROUPS_PATH}/${membership.group.id}/events/new">+ New event</a> · <a href="${GROUPS_PATH}/${membership.group.id}/polls/new">+ Find a time (poll)</a></p>
+<p class="muted"><a href="${GROUPS_PATH}/${membership.group.id}/events/new">New repeating event</a></p>
 <h2>People</h2>
 <ul>${members.map(
           (m) =>
