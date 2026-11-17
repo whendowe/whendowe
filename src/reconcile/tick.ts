@@ -198,7 +198,7 @@ export async function runTick(ports: TickPorts, connectionId: string): Promise<T
   const wanted = new Map<string, Want>();
   for (const entry of await feedEntries(
     storage,
-    { personId: conn.owner_id, groupId: null },
+    { personId: conn.owner_id, groupId: null, ownCalendar: true },
     { now, eventUrl: ports.eventUrl },
   )) {
     if (entry.status !== "scheduled") continue; // a cancelled entry is a copy to remove

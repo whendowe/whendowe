@@ -71,10 +71,11 @@ export async function exportPerson(storage: StoragePort, personId: string, now: 
       response_state: nullable,
       handle: nullable,
       show_email: z.number(),
+      in_calendar: z.number(),
     },
     `SELECT e.id, e.title, e.description, e.location, e.all_day, e.start_local, e.end_local,
             e.tzid, e.rrule, e.status, ep.edit_tier, ep.visibility, ep.attendance,
-            ep.response_kind, ep.response_state, ep.handle, ep.show_email
+            ep.response_kind, ep.response_state, ep.handle, ep.show_email, ep.in_calendar
      FROM event_participation ep JOIN canonical_event e ON e.id = ep.canonical_event_id
      WHERE ep.person_id = ? ORDER BY e.start_local`,
     [personId],
@@ -191,6 +192,7 @@ export async function exportPerson(storage: StoragePort, personId: string, now: 
           answer: e.response_state,
           your_name_here: e.handle,
           email_shown_here: e.show_email === 1,
+          in_your_calendar: e.in_calendar === 1,
         },
         your_notes: notes
           .filter((n) => n.canonical_event_id === e.id)

@@ -49,6 +49,8 @@ export interface Participation {
   readonly responseState: ResponseState | null;
   /** rc42: "only my own email answers for me" here: no copied link answers as them. */
   readonly ownAnswersOnly: boolean;
+  /** rc40 (G3): false after "Don't put this in my calendar" — out of their feeds and Google. */
+  readonly inCalendar: boolean;
 }
 
 /**
@@ -63,7 +65,7 @@ export function shownEmailSql(alias: string): string {
 
 /** The SQL column list toParticipation reads, aliased `ep`. */
 export const PARTICIPATION_COLUMNS =
-  "ep.canonical_event_id, ep.person_id, ep.edit_tier, ep.visibility, ep.attendance, ep.response_kind, ep.response_state, ep.own_answers_only";
+  "ep.canonical_event_id, ep.person_id, ep.edit_tier, ep.visibility, ep.attendance, ep.response_kind, ep.response_state, ep.own_answers_only, ep.in_calendar";
 
 export interface ParticipantView extends Participation {
   /** As the event's people see them (DESIGN §10 rc21): a handle, an address only if shown. */
@@ -110,6 +112,7 @@ export const participationRowSchema = z.object({
   response_kind: responseKindSchema,
   response_state: responseStateSchema.nullable(),
   own_answers_only: z.number(),
+  in_calendar: z.number(),
 });
 
 export function toParticipation(row: unknown): Participation {
@@ -123,7 +126,28 @@ export function toParticipation(row: unknown): Participation {
     responseKind: r.response_kind,
     responseState: r.response_state,
     ownAnswersOnly: r.own_answers_only === 1,
+    inCalendar: r.in_calendar === 1,
   };
+}
+
+/**
+ * "Don't put this in my calendar", and undoing it (DESIGN §10 *Google Calendar, one way*,
+ * rc40): this person's own feeds and synced calendar leave the event out, or take it back.
+ * A fact about them only — nobody else's view, feed or copy changes, and it is no edit of the
+ * event, so no change_log row (the rc12 rule for per-person facts). The push tick removes or
+ * restores the Google copy within the minute.
+ */
+export async function setInCalendar(
+  storage: StoragePort,
+  access: { readonly event: { readonly id: string }; readonly participation: Participation },
+  inCalendar: boolean,
+): Promise<void> {
+  await storage.batch([
+    {
+      sql: "UPDATE event_participation SET in_calendar = ? WHERE canonical_event_id = ? AND person_id = ?",
+      params: [inCalendar ? 1 : 0, access.event.id, access.participation.personId],
+    },
+  ]);
 }
 
 const participantRowSchema = participationRowSchema.extend(shownRowSchema.shape);
