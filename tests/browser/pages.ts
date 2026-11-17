@@ -276,9 +276,36 @@ await app.request(
   ),
 );
 
+// rc49 (A5a): B made like A — the dinner renamed, the weekend a week later — drawn as week
+// rows with its changes from A.
+const likePath = must(
+  (await app.request("/ask", post({ csrf }, cookie))).headers.get("location"),
+  "ask like draft",
+);
+const likeA = { ...askFields, o0e0name: "Dinner", o0e1day: "2026-11-07", o0e1last: "2026-11-08" };
+await app.request(likePath, post({ ...likeA, act: "and:0" }, cookie));
+await app.request(likePath, post({ ...likeA, act: "like" }, cookie));
+await app.request(
+  likePath,
+  post(
+    {
+      ...likeA,
+      o1e0name: "Pizza",
+      o1e0day: "2026-11-05",
+      o1e0from: "19:00",
+      o1e0to: "23:00",
+      o1e1day: "2026-11-14",
+      o1e1last: "2026-11-15",
+      act: "save",
+    },
+    cookie,
+  ),
+);
+
 const pages: Record<string, string> = {
   home: "/",
   ask: askPath,
+  "ask-like": likePath,
   "ask-hours": `${askPath}?v=hours&d=2026-11-05`,
   "plan-thread": table,
   "plan-answer": planB,
