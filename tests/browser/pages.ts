@@ -302,10 +302,18 @@ await app.request(
   ),
 );
 
+// rc49 (A5b): A edited on its week rows, its weekend chosen.
+const askEditing = await (await app.request(`${askPath}?x=0`, { headers: { cookie } })).text();
+const weekendSid = must(
+  /value="edit:0:([0-9a-f-]+)"[^>]*aria-label="Sat 7 Nov/.exec(askEditing)?.[1],
+  "A's weekend",
+);
+
 const pages: Record<string, string> = {
   home: "/",
   ask: askPath,
   "ask-like": likePath,
+  "ask-edit": `${askPath}?x=0&e=${weekendSid}`,
   "ask-hours": `${askPath}?v=hours&d=2026-11-05`,
   "plan-thread": table,
   "plan-answer": planB,
