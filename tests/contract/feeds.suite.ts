@@ -356,6 +356,9 @@ export function runFeedsContract(makePort: () => Promise<StoragePort>): void {
 
       await setInCalendar(port, await access(port, dinner.id, ann), true);
       expect((await own(ann)).map((e) => e.id)).toEqual([dinner.id]);
+      expect(JSON.stringify(await exportPerson(port, ann, T1))).toContain(
+        '"in_your_calendar":true',
+      );
     });
   });
 

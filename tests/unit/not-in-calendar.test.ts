@@ -84,3 +84,31 @@ it("only 0 or 1; the page writes nothing; someone not in the event can't", async
     true,
   );
 });
+
+it("signed out, with a stale form, or for an event you can't see, nothing changes", async () => {
+  const f = await dinner();
+  const inCalendar = async (who: string) =>
+    (await findEventForParticipant(f.b.storage, f.id, who))?.participation.inCalendar;
+  const forged = await f.b.request(`${f.path}/in-calendar`, post({ csrf: "stale", in: "0" }));
+  expect(forged.status).toBe(403);
+  expect(await inCalendar(f.ann)).toBe(true);
+
+  // Someone on the event who sees nothing of it (HIDDEN) is told it isn't there.
+  const hid = (await findOrCreatePerson(f.b.storage, "hid@example.org", { now: NOW })).id;
+  await f.b.storage.batch([
+    {
+      sql: `INSERT INTO event_participation (canonical_event_id, person_id, edit_tier, visibility, created_at)
+            VALUES (?, ?, 'view', 'HIDDEN', ?)`,
+      params: [f.id, hid, NOW],
+    },
+  ]);
+  await addAccount(f.b, "hid@example.org");
+  expect((await f.set("0")).status).toBe(404);
+  expect(await inCalendar(hid)).toBe(true);
+
+  // Signed out, it asks you to sign in first.
+  const signedOut = await browser({ now: () => NOW });
+  const res = await signedOut.request(`${f.path}/in-calendar`, post({ in: "0" }));
+  expect(res.status).toBe(303);
+  expect(res.headers.get("location")).toBe("/auth/sign-in");
+});
