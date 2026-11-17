@@ -143,7 +143,7 @@ function withSids(body: AskBody, newId: () => string = uuidv7): AskBody {
   return {
     ...body,
     options: body.options.map((o) =>
-      o.map((e) => (e.sid === undefined || e.sid === "" ? { ...e, sid: newId() } : e)),
+      o.map((e) => (e.sid === undefined ? { ...e, sid: newId() } : e)),
     ),
   };
 }

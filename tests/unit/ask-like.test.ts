@@ -248,3 +248,102 @@ it("an identity given twice in one option is kept once; the other event gets one
   expect(events.filter((e) => e.sid === "s1")).toHaveLength(1);
   expect(new Set(events.map((e) => e.sid)).size).toBe(2);
 });
+
+it("what the week rows leave out, and the levers around them", async () => {
+  const b = await browser({ now: () => NOW });
+  const f = await start(b);
+  // A name is cut at 200; with no question title the placeholder says where the name comes from.
+  await f.send({ ...WEEKEND, title: "", o0e0name: "x".repeat(250), act: "save" });
+  expect((await f.body())?.options[0]?.[0]?.title).toBe("x".repeat(200));
+  const untitled = await (await b.request(f.path)).text();
+  expect(untitled).toContain('placeholder="As the question"');
+  expect(untitled).not.toContain('<input type="hidden" name="s"');
+  // B like A, with one event still being typed and one ending before it starts: only A's
+  // dinner, as B has it, is drawn — named Untitled, as nothing names it.
+  await f.send({ ...WEEKEND, title: "", o0e0name: "", act: "and:0" });
+  await f.send({ ...WEEKEND, title: "", o0e0name: "", act: "like" });
+  const odd = {
+    ...WEEKEND,
+    title: "",
+    o0e0name: "",
+    o1e0day: "2101-12-16",
+    o1e0from: "19:00",
+    o1e0to: "21:00",
+    o1e1day: "2101-12-17",
+    o1e1from: "",
+  };
+  await f.send({ ...odd, act: "and:1" });
+  await f.send({ ...odd, o1e2day: "", o1e2from: "10:00", act: "and:1" });
+  await f.send({
+    ...odd,
+    o1e2day: "",
+    o1e2from: "10:00",
+    o1e3day: "2101-12-20",
+    o1e3from: "12:00",
+    o1e3to: "11:00",
+    act: "save",
+  });
+  const page = await (await b.request(f.path)).text();
+  const like = page.slice(page.indexOf('<div class="like">'), page.indexOf('name="o1e0name"'));
+  expect(like).toContain("Same as A — change something to make it a choice.");
+  expect(like).toContain('<div class="weeks">');
+  expect(like.match(/class="rib /g)).toHaveLength(2);
+  expect(like).toMatch(
+    /<a class="rib plan[^"]*" [^>]*href="#o1"[^>]*>[^<]*<small>19:00<\/small> Untitled/,
+  );
+  expect(like).toContain('<span class="st">same as A</span>');
+  // + Like A does nothing with ten options, or with none.
+  for (let k = 2; k < 10; k++) await f.send({ ...odd, act: "option" });
+  expect((await f.body())?.options).toHaveLength(10);
+  await f.send({ ...odd, act: "like" });
+  expect((await f.body())?.options).toHaveLength(10);
+  expect(await (await b.request(f.path)).text()).not.toContain('value="like"');
+});
+
+it("a move to another week is one change; See A's field is only there while A is shown", async () => {
+  const b = await browser({ now: () => NOW });
+  const f = await start(b);
+  await f.send({ ...WEEKEND, act: "and:0" });
+  await f.send({ ...WEEKEND, act: "like" });
+  const moved = { ...WEEKEND, ...B_AS_A, o1e1day: "2101-12-24" };
+  await f.send({ ...moved, act: "save" });
+  const page = await (await b.request(f.path)).text();
+  const listed = /<summary>1 change from A<\/summary><ul class="wl">(.*?)<\/ul>/s.exec(page)?.[1];
+  expect(listed?.match(/<li /g)).toHaveLength(1);
+  // A malformed see: is no view of A; a refused ask keeps the view it was pressed in.
+  for (const act of ["see:1x", "xsee:1"])
+    expect((await f.send({ ...moved, act })).headers.get("location")).toBe(`${f.path}?saved=1`);
+  const refused = await f.send({ ...moved, ...B_AS_A, o1e1day: "2101-12-17", s: "1", act: "ask" });
+  expect(refused.status).toBe(400);
+  expect(await refused.text()).toContain('<input type="hidden" name="s" value="1" />');
+  // Without an option made like A in that place, no field: the first option can't show A.
+  expect(await (await b.request(`${f.path}?s=0`)).text()).not.toContain('name="s"');
+});
+
+it("asked, events with no identity, or an empty one, get one of their own", async () => {
+  const b = await browser({ now: () => NOW });
+  await addAccount(b, "mara@example.org");
+  const mara = (await findOrCreatePerson(b.storage, "mara@example.org", { now: NOW })).id;
+  const day = (d: string, sid?: string) => ({
+    allDay: true,
+    startLocal: `2101-12-${d}`,
+    endLocal: `2101-12-${String(Number(d) + 1)}`,
+    ...(sid === undefined ? {} : { sid }),
+  });
+  const { threadId, statements } = await questionThreadStatements(b.storage, {
+    creatorId: mara,
+    group: null,
+    fields: { title: "Weekend", location: null, description: null, tzid: "Europe/Prague" },
+    options: [[day("16"), day("17", "")], [day("18", "s1")]],
+    now: NOW,
+  });
+  await b.storage.batch(statements);
+  const access = await findThreadForMember(b.storage, threadId, mara);
+  if (access === null) throw new Error("thread");
+  const plans = await listPlans(b.storage, access);
+  const sids = plans.flatMap((p) => p.events.map((e) => e.sid));
+  expect(sids).toHaveLength(3);
+  expect(sids.every((s) => /^[0-9a-f-]{36}$/.test(s) || s === "s1")).toBe(true);
+  expect(new Set(sids).size).toBe(3);
+  expect(plans.map((p) => p.answersId)).toEqual([null, null]);
+});
