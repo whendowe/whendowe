@@ -69,6 +69,58 @@ test("an option made like A: its week rows, its changes from A listed, and See A
   expect(errors).toEqual([]);
 });
 
+// --- the week-row editor behind Edit (rc49, A5b) ----------------------------------------------
+// The plan editor's script on the Ask form: it writes the chosen event's own fields and sends
+// the form with no button, which saves them. Here the sends are recorded instead (below).
+test.describe("the week-row editor behind Edit", () => {
+  const cell = (k: string) => `[data-plan-editor] .dh[data-k="${k}"]`;
+  const field = (page: Page, name: string) => page.locator(`#ask [name="${name}"]`);
+
+  test("A's weekend: picked up by its first day and put down on another, sending its fields", async ({
+    page,
+  }) => {
+    const errors = await open(page, "ask-edit");
+    await recordSends(page);
+    const editor = page.locator("#o0 .like.edit");
+    await expect(editor.locator(".rib.sel")).toHaveCount(1);
+    await expect(editor.locator(".rib.sel .grip")).toHaveCount(2);
+    await expect(editor.locator("[data-hint]")).toHaveText(
+      "Tap its first or last day to pick it up, then tap where it goes. Or drag an end.",
+    );
+    await expect(editor).toHaveScreenshot("ask-edit.png");
+    await page.locator(cell("2026-11-07")).click();
+    await expect(page.locator(cell("2026-11-07"))).toHaveClass(/grab/);
+    await expect(editor.locator("[data-hint]")).toContainText("Picked up its first day");
+    expect(await sent(page)).toEqual([]);
+    await page.locator(cell("2026-11-04")).click();
+    expect(await sent(page)).toEqual([""]);
+    await expect(field(page, "o0e1day")).toHaveValue("2026-11-04");
+    await expect(field(page, "o0e1last")).toHaveValue("2026-11-08");
+    // Only this option's week rows are painted.
+    await expect(page.locator(".dh.sel-end")).toHaveCount(2);
+    expect(errors).toEqual([]);
+  });
+
+  test("dragged by its ribbon, the whole stretch moves; another event is chosen by tapping it", async ({
+    page,
+  }) => {
+    const errors = await open(page, "ask-edit");
+    await recordSends(page);
+    await mouseDrag(
+      page,
+      await centre(page, "[data-plan-editor] .rib.sel"),
+      await centre(page, cell("2026-11-05")),
+    );
+    expect(await sent(page)).toEqual([""]);
+    await expect(field(page, "o0e1day")).toHaveValue("2026-11-05");
+    await expect(field(page, "o0e1last")).toHaveValue("2026-11-06");
+    // Thursday's evening is a button of the form: choosing it saves first.
+    await page.locator("[data-plan-editor] .rib.plan:not(.sel)").first().click();
+    expect((await sent(page)).at(-1)).toMatch(/^native edit:0:[0-9a-f-]+$/);
+    expect(errors).toEqual([]);
+  });
+});
+
 // --- dragging (rc47) ------------------------------------------------------------------------
 // The pages are files here, so instead of navigating, sending the form records which button
 // it was sent by: the drag's only output is the action it names.

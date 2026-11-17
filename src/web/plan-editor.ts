@@ -88,6 +88,8 @@ export const PLAN_STYLE = html`<style>
   .pl span.clash::before { content: " · "; font-weight: 400; }
   .pl .rib { box-sizing: border-box; display: block; min-width: 0; padding: 3px 6px; border-radius: 6px; font-size: .78rem; line-height: 1.25;
     overflow: hidden; overflow-wrap: anywhere; position: relative; text-decoration: none; color: var(--fg); }
+  /* A ribbon that is a button (rc49, the Ask page: choosing one saves the form first). */
+  .pl button.rib { font: inherit; font-size: .78rem; line-height: 1.25; border: 0; background: none; text-align: left; width: 100%; cursor: pointer; }
   .pl .rib small { font-weight: 400; font-size: .7rem; }
   .pl .rib.plan { background: color-mix(in srgb, var(--x) 24%, var(--card)); border-left: 4px solid var(--x); font-weight: 700; }
   .pl .rib.agreed { background: color-mix(in srgb, var(--x) 10%, var(--tile)); color: var(--muted); }
@@ -301,7 +303,9 @@ const EDITOR_SCRIPT = html`<script>
 
   /* ---------- the page ---------- */
   var root = document.querySelector("[data-plan-editor]");
-  var form = document.getElementById("editor");
+  /* The Ask page (rc49) names its own form and fields on the root; a plan draft's are these. */
+  function named(a, d) { return (root && root.getAttribute(a)) || d; }
+  var form = document.getElementById(named("data-form", "editor"));
   var sheet = document.querySelector(".pl .sheet");
   var head = document.querySelector(".pl .head");
   var sel = root ? root.getAttribute("data-sel") : "";
@@ -322,17 +326,19 @@ const EDITOR_SCRIPT = html`<script>
 
   if (!root || !form || !sel) return;
   var field = function (name) { return form.querySelector("[name=" + name + "]"); };
+  var kind = root.getAttribute("data-kind");
   var kindDays = form.querySelector("input[name=kind][value=days]");
-  var allDay = !!(kindDays && kindDays.checked);
-  var from = field("from"), to = field("to"), dayField = field("day");
-  var hint = form.querySelector("[data-hint]");
-  var state = { start: from ? from.value : "", end: to ? to.value : "", grab: null };
+  var allDay = kind ? kind === "days" : !!(kindDays && kindDays.checked);
+  var from = field(named("data-from", "from")), to = field(named("data-to", "to")), dayField = field(named("data-day", "day"));
+  var hint = root.querySelector("[data-hint]") || form.querySelector("[data-hint]");
+  /* An empty last day is the first: the Ask page leaves it empty for one day. */
+  var state = { start: from ? from.value : "", end: to && to.value ? to.value : from ? from.value : "", grab: null };
   var g0 = root.getAttribute("data-grab");
   if (allDay && (g0 === "start" || g0 === "end")) state.grab = g0;
   if (allDay && !(isDay(state.start) && isDay(state.end))) allDay = false;
 
   function paint(range) {
-    var cells = document.querySelectorAll(".pl .dh[data-k]");
+    var cells = root.querySelectorAll(".dh[data-k]");
     for (var i = 0; i < cells.length; i++) {
       var c = cells[i], k = c.getAttribute("data-k");
       var inside = range && k >= range.start && k <= range.end;
@@ -341,7 +347,7 @@ const EDITOR_SCRIPT = html`<script>
       c.classList.toggle("sel-mid", !!(inside && !isEnd));
       c.classList.toggle("grab", !!(range && state.grab && k === (state.grab === "start" ? range.start : range.end)));
     }
-    var grips = document.querySelectorAll(".pl .rib.sel .grip");
+    var grips = root.querySelectorAll(".rib.sel .grip");
     for (var j = 0; j < grips.length; j++)
       grips[j].classList.toggle("on", grips[j].getAttribute("data-grip") === state.grab);
     if (hint && allDay) {
@@ -676,6 +682,11 @@ export function busyDay(day: string) {
 /** The busy script alone, for the pages that vote but have no week rows. */
 export function busyAssets() {
   return BUSY_SCRIPT;
+}
+
+/** The editor script alone, after a page that has its styles already (rc49, Ask when). */
+export function editorScript() {
+  return EDITOR_SCRIPT;
 }
 
 /** The plan pages' styles and the editor script, for a page that has week rows. */
