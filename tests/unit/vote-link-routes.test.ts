@@ -201,7 +201,7 @@ it("one time is one tap: each answer its own button, the note going with it (rc3
   expect(guard).toBeLessThan(page.indexOf(`name="plan_${only}"`));
   // The note sits above the buttons, so the tap sends it.
   expect(page.indexOf('name="note"')).toBeLessThan(guard);
-  expect(page).toContain("<strong>Not answered</strong>");
+  expect(page).toContain('<strong class="attn">Not answered</strong>');
 
   const res = await vote(b, f.token(0), { [`plan_${only}`]: "ifneedbe", note: "Late by ten" });
   expect(res.status).toBe(303);
@@ -1157,7 +1157,9 @@ it("on the plan's page: tap it again to take it back, Undo, and a receipt that s
   // Nothing to take back: back to the page, no Undo.
   const again = await b.request(`${planPage}/vote`, post({ csrf: await csrf(), answer: "none" }));
   expect(again.headers.get("location")).toBe(planPage);
-  expect(await (await b.request(planPage)).text()).toContain("<strong>Not answered</strong>");
+  expect(await (await b.request(planPage)).text()).toContain(
+    '<strong class="attn">Not answered</strong>',
+  );
   // Decided: it can't be taken back.
   await acceptPlan(b.storage, await f.as(f.mara.id), { planId: f.planIds[1] ?? "", now: NOW });
   const closed = await b.request(`${planPage}/vote`, post({ csrf: await csrf(), answer: "none" }));
