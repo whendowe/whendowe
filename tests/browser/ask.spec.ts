@@ -60,11 +60,12 @@ test("an option made like A: its week rows, its changes from A listed, and See A
   const listed = like.locator(":scope > .row > details");
   await expect(listed.locator("summary")).toHaveText("2 changes from A");
   await listed.locator("summary").click();
+  await page.mouse.move(0, 0); // no hover left on the summary for the screenshot
   await expect(listed.locator(".wl li")).toHaveCount(2);
   await expect(listed.locator(".wl li").first()).toContainText("renamed Pizza");
   await expect(like.locator(".rib.ghost")).toHaveCount(1); // where the weekend was: one ribbon, Sat–Sun
   await expect(like.getByRole("button", { name: "See A" })).toBeVisible();
-  await expect(page.locator("#o1")).toHaveScreenshot("ask-like.png");
+  await expect(like).toHaveScreenshot("ask-like.png");
   expect(errors).toEqual([]);
 });
 
