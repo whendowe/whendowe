@@ -161,3 +161,35 @@ it("a question whose options were all withdrawn says so in place of a step", asy
     expect(page, path).not.toContain("of 4");
   }
 });
+
+it("only a choice makes Decided: emailing vote links is held too, and a choice that ran into nothing is Asking again", async () => {
+  const b = await browser({ now: () => NOW });
+  const f = await poll(b);
+  await b.request(`${f.thread}/links`, post({ csrf: (await home(b)).csrf }));
+  const links = await f.text(f.thread);
+  expect(links).toContain("<strong>Emailing vote links</strong> — in about a minute");
+  expect(links).toContain(ASKING);
+  expect(await b.pass()).toBe(1);
+
+  // Chosen, then withdrawn within the minute: the choice runs into nothing (its outcome is
+  // kept for a day) and B is still asked.
+  await b.request(`${f.plan}/accept`, post({ csrf: (await home(b)).csrf }));
+  await withdrawPlan(b.storage, await f.as(f.mara), { planId: f.a, now: NOW });
+  expect(await f.text(f.thread)).toContain(DECIDED);
+  expect(await b.pass()).toBe(1);
+  const after = await f.text(f.thread);
+  expect(after).toContain("That option is no longer on the table, so nothing was chosen.");
+  expect(after).toContain(ASKING);
+});
+
+it("the shared link's page offers only what is still on the table", async () => {
+  const b = await browser({ now: () => NOW });
+  const f = await poll(b);
+  const shared = await shareLink(b, f.thread);
+  expect(await f.text(shared)).toContain(`plan_${f.a}`);
+  await withdrawPlan(b.storage, await f.as(f.mara), { planId: f.a, now: NOW });
+  const page = await f.text(shared);
+  expect(page).not.toContain(`plan_${f.a}`);
+  expect(page).toContain(`plan_${f.second}`);
+  expect(page).toContain(ASKING);
+});
