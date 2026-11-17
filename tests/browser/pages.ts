@@ -250,7 +250,7 @@ const askFields = {
   o0e0day: "2026-11-05",
   o0e0from: "19:00",
   o0e0to: "23:00",
-  emails: "ann@example.org bob@example.org",
+  email: "ann@example.org bob@example.org",
   // What the page's own form always sends: a tapped day is 19:00 for 4 hours.
   new_from: "19:00",
   new_hours: "4",

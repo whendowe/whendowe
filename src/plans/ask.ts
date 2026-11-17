@@ -2,8 +2,11 @@
 import { z } from "zod";
 import { type StoragePort, stmt } from "../db/port.js";
 import { resolveInvitees } from "../events/participation.js";
+import { PollInputError } from "../events/poll.js";
 import { uuidv7 } from "../ids.js";
 import { findGroupForMember } from "../people/group.js";
+import { knownAddresses } from "../people/known.js";
+import { normalizeEmail } from "../people/person.js";
 import { ASK_DRAFT_KEEP_DAYS } from "../privacy/retention.js";
 
 export { ASK_DRAFT_KEEP_DAYS };
@@ -34,6 +37,14 @@ export const askBodySchema = z.object({
   options: z.array(z.array(eventSchema).max(MAX_OPTION_EVENTS)).max(MAX_OPTIONS),
   /** People named by address, as typed; a group's people come from the group. */
   emails: z.array(z.string().max(320)).max(MAX_ASK_EMAILS),
+  /**
+   * (rc48) People chosen from the suggestions: a person id, never an address, and the group
+   * they were added with. Asking checks again that the author still shares somewhere with each.
+   */
+  people: z
+    .array(z.object({ id: z.string().max(64), from: z.string().max(64).nullable() }))
+    .max(MAX_ASK_EMAILS)
+    .optional(),
   /** What a day tapped on the calendar becomes (rc46): a time and length, or all day. */
   defaults: z
     .object({ from: z.string().max(5).nullable(), hours: z.number().int().min(1).max(12) })
@@ -201,9 +212,28 @@ export async function askDraft(
       : await findGroupForMember(storage, draft.groupId, input.authorId);
   if (draft.groupId !== null && group === null) return null;
   const { body } = draft;
+  const bad = body.emails.filter((e) => {
+    try {
+      normalizeEmail(e);
+      return false;
+    } catch {
+      return true;
+    }
+  });
+  if (bad.length > 0) throw new PollInputError(`Not an email address: ${bad.join(", ")}`);
+  const chosen = (body.people ?? []).map((p) => p.id);
+  const addresses = await knownAddresses(storage, input.authorId, chosen);
+  if (chosen.some((id) => !addresses.has(id)))
+    throw new PollInputError(
+      "Someone chosen is no longer someone you share a group, event or thread with: remove them first.",
+    );
   const people = await resolveInvitees(
     storage,
-    body.emails.map((email) => ({ email, editTier: "view", visibility: "FULL" })),
+    [...body.emails, ...addresses.values()].map((email) => ({
+      email,
+      editTier: "view",
+      visibility: "FULL",
+    })),
     { now: input.now, from: { senderId: input.authorId, groupId: draft.groupId } },
   );
   const { threadId, planIds, statements } = await questionThreadStatements(storage, {

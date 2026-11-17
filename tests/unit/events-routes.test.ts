@@ -395,8 +395,8 @@ it("the form makes a thread: who sees what the group plans votes, busy-only memb
   const form = await text(h, `${group}/polls/new`, dm);
   expect(form).toContain(`action="${group}/polls"`);
   expect(form).toContain("Everyone in Thursday Table who sees what the group plans votes;");
-  expect(form).not.toContain('name="tier_0"');
-  expect(form).not.toContain('name="vis_0"');
+  expect(form).not.toContain('name="editTier"');
+  expect(form).not.toContain('name="visibility"');
   const res = await h.app.request(`${group}/polls`, post({ csrf: dm.csrf, ...POLL }, dm.cookie));
   expect(res.status).toBe(303);
   const thread = res.headers.get("location") ?? "";

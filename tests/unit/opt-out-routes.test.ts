@@ -197,10 +197,10 @@ it("never names the sender by their account name, which could join two of their 
         start: "2101-10-20T12:00",
         end: "2101-10-20T15:00",
         tzid: "Europe/Prague",
-        email_0: "ana@example.org",
-        tier_0: "view",
-        vis_0: "FULL",
-        ask_0: "ack",
+        pc_0: "e:ana@example.org",
+        pt_0: "view",
+        pv_0: "FULL",
+        pa_0: "ack",
       },
       dm.cookie,
     ),
@@ -241,7 +241,7 @@ it("an opted-out address can't be added anywhere, and nothing is created for it"
   const made = await h.app.request(
     "/events",
     post(
-      { csrf: dm.csrf, ...PICNIC, email_0: "Ana@Example.org", tier_0: "view", vis_0: "FULL" },
+      { csrf: dm.csrf, ...PICNIC, pc_0: "e:Ana@Example.org", pt_0: "view", pv_0: "FULL" },
       dm.cookie,
     ),
   );
@@ -282,7 +282,7 @@ it("an opted-out address can't be added anywhere, and nothing is created for it"
   const evas = await h.app.request(
     "/events",
     post(
-      { csrf: eva.csrf, ...PICNIC, email_0: "ana@example.org", tier_0: "view", vis_0: "FULL" },
+      { csrf: eva.csrf, ...PICNIC, pc_0: "e:ana@example.org", pt_0: "view", pv_0: "FULL" },
       eva.cookie,
     ),
   );
