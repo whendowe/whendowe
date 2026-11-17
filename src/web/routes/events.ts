@@ -354,7 +354,7 @@ export function eventSummary(access: EventAccess): Html {
 function threadSummary(t: ThreadSummary): Html {
   return html`<a href="${PLANS_PATH}/${t.id}">${t.name}</a> <span class="muted">·</span> ${
     t.waiting > 0
-      ? html`<strong>${t.waiting} waiting for your vote</strong>`
+      ? html`<strong class="attn">${t.waiting} waiting for your vote</strong>`
       : html`<span class="muted">${t.onTable} on the table</span>`
   }`;
 }

@@ -399,7 +399,7 @@ function answerStateLine(p: Plan, mine: Answer | null, took: Answer | undefined)
   if (took !== undefined && mine === null)
     return html`<p class="small">Took back your ${VOTE_WORD[took]}. <button class="link" type="submit" name="plan_${p.id}" value="${took}">Undo</button></p>`;
   return mine === null
-    ? html`<p class="small"><strong>Not answered</strong></p>`
+    ? html`<p class="small"><strong class="attn">Not answered</strong></p>`
     : html`<p class="small muted">Saved: ${VOTE_WORD[mine]}. Tap it again to take it back.</p>`;
 }
 
@@ -433,7 +433,8 @@ export function answerPart(
   <button type="submit" disabled hidden></button>${card(only)}${saved}`;
   return html`<button type="submit" disabled hidden></button><h2>Which of these work for you?</h2>
   <ul class="stack" style="list-style:none;padding:0;margin:0">${onTable.map(
-    (p) => html`<li>${planSummary(voter, p)}${card(p)}</li>`,
+    (p) =>
+      html`<li${mineOf(voter, p, chosen) === null ? html` class="waits"` : ""}>${planSummary(voter, p)}${card(p)}</li>`,
   )}</ul>${saved}
   ${note}
   <p>${sendNote}</p>`;
