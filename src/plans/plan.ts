@@ -1139,11 +1139,26 @@ export async function suggestTime(
 
 // --- polls (rc26) ---------------------------------------------------------------------
 
-/** One event of an option asked about (rc46): its time; title and place are the question's. */
+/**
+ * One event of an option asked about (rc46): its time, and (rc49) its own name — none is the
+ * question's title — and its identity, which an option made like A shares with A. Place and
+ * notes are the question's.
+ */
 export interface OptionEventInput {
   readonly allDay: boolean;
   readonly startLocal: string;
   readonly endLocal: string;
+  readonly sid?: string | undefined;
+  readonly title?: string | null | undefined;
+}
+
+/** An option made like A (rc49): it shares an event's identity with the first option. */
+export function madeLike(
+  first: readonly Pick<OptionEventInput, "sid">[],
+  option: readonly Pick<OptionEventInput, "sid">[],
+): boolean {
+  const sids = new Set(first.flatMap((e) => (e.sid === undefined ? [] : [e.sid])));
+  return option.some((e) => e.sid !== undefined && sids.has(e.sid));
 }
 
 /** Most options one question offers, as a poll's times (§10 rc26). */
@@ -1183,17 +1198,35 @@ export async function questionThreadStatements(
     if (events.length === 0) throw new PollInputError("Each option needs a time.");
     if (events.length > MAX_OPTION_EVENTS)
       throw new PollInputError(`An option can have at most ${MAX_OPTION_EVENTS} events.`);
-    return events.map((e) => eventFieldsSchema.parse({ ...input.fields, ...e }));
+    return events.map((e) =>
+      eventFieldsSchema.parse({
+        ...input.fields,
+        title: e.title?.trim() || input.fields.title,
+        allDay: e.allDay,
+        startLocal: e.startLocal,
+        endLocal: e.endLocal,
+      }),
+    );
   });
-  const key = (o: readonly { startLocal: string; endLocal: string; allDay: boolean }[]) =>
+  const key = (
+    o: readonly { title: string; startLocal: string; endLocal: string; allDay: boolean }[],
+  ) =>
     o
-      .map((e) => `${e.allDay ? "d" : "t"}${e.startLocal}/${e.endLocal}`)
+      .map((e) => `${e.allDay ? "d" : "t"}${e.startLocal}/${e.endLocal} ${e.title}`)
       .sort()
       .join(" ");
   if (new Set(options.map(key)).size !== options.length)
     throw new PollInputError("Two of the options are the same.");
   const [first] = options[0] ?? [];
-  if (first === undefined) throw new PollInputError("Offer a time.");
+  const [firstAsked] = input.options[0] ?? [];
+  if (first === undefined || firstAsked === undefined) throw new PollInputError("Offer a time.");
+  // The thread and its plans keep the question's title; an event may have its own (rc49).
+  const name = eventFieldsSchema.parse({
+    ...input.fields,
+    allDay: firstAsked.allDay,
+    startLocal: firstAsked.startLocal,
+    endLocal: firstAsked.endLocal,
+  }).title;
   const fromGroup =
     input.group === null
       ? []
@@ -1201,7 +1234,7 @@ export async function questionThreadStatements(
           .filter((d) => d.visibility === "FULL" || d.visibility === "DETAILS")
           .map((d) => d.personId);
   const { thread, statements } = threadStatements({
-    name: first.title,
+    name,
     tzid: first.tzid ?? "UTC",
     creatorId: input.creatorId,
     memberIds: [...fromGroup, ...(input.people ?? [])],
@@ -1222,24 +1255,33 @@ export async function questionThreadStatements(
   const questionId = ids[0] ?? "";
   options.forEach((events, i) => {
     const planId = ids[i] ?? "";
+    const asked = input.options[i] ?? [];
+    // rc49: an option made like A is compared with A, as a plan with what it answers.
+    const like = i > 0 && madeLike(input.options[0] ?? [], asked) ? questionId : null;
     statements.push({
-      sql: `INSERT INTO plan (id, thread_id, author_id, name, question_id, status, sent_at, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, 'on_table', ?, ?, ?)`,
+      sql: `INSERT INTO plan (id, thread_id, author_id, name, answers_id, question_id, status, sent_at, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, 'on_table', ?, ?, ?)`,
       params: [
         planId,
         thread.id,
         input.creatorId,
-        first.title,
+        name,
+        like,
         questionId,
         input.now,
         input.now,
         input.now,
       ],
     });
-    for (const e of events)
+    // rc49: an identity given is kept, once per option; any other event gets a new one.
+    const seen = new Set<string>();
+    events.forEach((e, j) => {
+      const given = asked[j]?.sid;
+      const sid = given !== undefined && given !== "" && !seen.has(given) ? given : newId();
+      seen.add(sid);
       statements.push(
         insertEvent(planId, {
-          sid: newId(),
+          sid,
           title: e.title,
           allDay: e.allDay,
           startLocal: e.startLocal,
@@ -1249,6 +1291,7 @@ export async function questionThreadStatements(
           description: e.description,
         }),
       );
+    });
     statements.push({
       sql: "INSERT INTO plan_vote (plan_id, person_id, answer, responded_at, answered_via) VALUES (?, ?, 'yes', ?, 'session')",
       params: [planId, input.creatorId, input.now],

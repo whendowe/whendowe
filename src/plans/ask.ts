@@ -25,6 +25,10 @@ const eventSchema = z.object({
   allDay: z.boolean(),
   startLocal: z.string().max(19),
   endLocal: z.string().max(19),
+  /** (rc49) Its identity, from when it was made; "+ Like A" copies it with the event. */
+  sid: z.string().max(64).optional(),
+  /** (rc49) Its own name; none is the question's title. */
+  title: z.string().max(200).nullable().optional(),
 });
 
 /** A draft's body, as stored: zod-checked on every read, and on every save. */
