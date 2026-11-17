@@ -18,14 +18,15 @@ import { disabledMailPort, type MailPort } from "../../src/mail/port.js";
 import { eraseDue } from "../../src/privacy/erasure.js";
 import { retentionPass } from "../../src/privacy/purge.js";
 import { isRetentionMinute } from "../../src/privacy/retention.js";
+import { connectionsToTick, runTick, tickFailureLog, tickLog } from "../../src/reconcile/tick.js";
 import { calendarRevoker, createApp, heldRunners } from "../../src/web/app.js";
 import type { AuthDeps } from "../../src/web/routes/auth.js";
 import type { OAuthRouteDeps } from "../../src/web/routes/oauth.js";
-import { buildOAuthDeps, tokenCipherFor } from "../../src/web/routes/oauth-deps.js";
+import { buildOAuthDeps, pushTickPorts, tokenCipherFor } from "../../src/web/routes/oauth-deps.js";
 
 // Node entry (DESIGN.md §8): the same Hono app object as the Cloudflare worker,
 // served by @hono/node-server, with an in-process scheduler as the Node twin of the
-// Worker's cron (§6). Today it runs the purge pass; runTick() joins it in MVP-4.
+// Worker's cron (§6): held actions, the purge pass, and the push tick (MVP-4 G2).
 const config = loadConfig(process.env);
 const storage = sqliteStoragePort(createClient({ url: config.DATABASE_URL }));
 const now = () => new Date().toISOString();
@@ -88,11 +89,31 @@ const auth: AuthDeps = {
 const app = createApp({ auth, oauth });
 
 // The pass (§10 rc21/rc22, rc46), each minute like the Worker's cron: held actions, then purge;
-// retention hourly. Ticks never
-// overlap: the next is scheduled when this one is done.
+// retention hourly; then each connection's push tick, one after another (§11) — this one
+// process is the single writer for every connection, as a Durable Object is on Workers.
+// Passes never overlap: the next is scheduled when this one is done.
 const PASS_INTERVAL_MS = 60_000;
 const revokeCalendars = calendarRevoker(oauth);
 const runners = heldRunners(auth);
+const tickPorts =
+  oauth === undefined
+    ? undefined
+    : pushTickPorts(oauth, {
+        publicBaseUrl: config.PUBLIC_BASE_URL,
+        capabilities: capabilityConfigOf(config),
+      });
+/** Every connection due this minute, in turn; one failing doesn't stop the rest. */
+async function pushTicks(at: string): Promise<void> {
+  if (tickPorts === undefined) return;
+  for (const id of await connectionsToTick(storage, at, Number.POSITIVE_INFINITY)) {
+    try {
+      const line = tickLog(id, await runTick(tickPorts, id));
+      if (line !== null) console.log(JSON.stringify(line));
+    } catch (error) {
+      console.error(JSON.stringify(tickFailureLog(id, error)));
+    }
+  }
+}
 async function purgePass(): Promise<void> {
   try {
     const at = now();
@@ -106,6 +127,7 @@ async function purgePass(): Promise<void> {
       if (r.events + r.plans + r.sweeps > 0)
         console.log(JSON.stringify({ reason: "retention_purged", ...r }));
     }
+    await pushTicks(at);
   } catch (error) {
     console.error(JSON.stringify({ reason: "purge_pass_failed", error: String(error) }));
   }

@@ -2,6 +2,12 @@
 import { type Config, requireGoogleOAuth } from "../../config.js";
 import { createTokenCipher, type TokenCipher } from "../../crypto/tokens.js";
 import type { StoragePort } from "../../db/port.js";
+import { uuidv7 } from "../../ids.js";
+import { refreshAccessToken } from "../../oauth/token-exchange.js";
+import type { CapabilityConfig } from "../../people/capability.js";
+import { GoogleCalendarProvider } from "../../providers/google.js";
+import type { TickPorts } from "../../reconcile/tick.js";
+import { EVENTS_PATH } from "../layout.js";
 import type { OAuthRouteDeps } from "./oauth.js";
 
 // Assembles the OAuth route dependencies from config + a storage port. Lives here
@@ -43,5 +49,39 @@ export async function buildOAuthDeps(
     // do accept Secure on http://localhost, so this is belt-and-braces for the
     // environments that disagree.
     secureCookies: new URL(google.GOOGLE_REDIRECT_URI).protocol === "https:",
+  };
+}
+
+/**
+ * The push tick's ports (MVP-4 G2) from the same OAuth client: Google's calendar API behind
+ * the connection's own token, refreshed with this client's credentials. The same on both
+ * targets; only the scheduler that calls runTick differs (§11).
+ */
+export function pushTickPorts(
+  oauth: OAuthRouteDeps,
+  input: { readonly publicBaseUrl: string; readonly capabilities: CapabilityConfig },
+): TickPorts {
+  return {
+    storage: oauth.storage,
+    cipher: oauth.cipher,
+    capabilities: input.capabilities,
+    refresh: (refreshToken) =>
+      refreshAccessToken({
+        refreshToken,
+        clientId: oauth.clientId,
+        clientSecret: oauth.clientSecret,
+        now: oauth.now(),
+        ...(oauth.fetchImpl === undefined ? {} : { fetchImpl: oauth.fetchImpl }),
+      }),
+    providerFor: (calendarId, getAccessToken) =>
+      new GoogleCalendarProvider({
+        calendarId,
+        getAccessToken,
+        ...(oauth.fetchImpl === undefined ? {} : { fetchImpl: oauth.fetchImpl }),
+      }),
+    eventUrl: (eventId) => `${input.publicBaseUrl}${EVENTS_PATH}/${eventId}`,
+    now: oauth.now,
+    newNonce: () => uuidv7(),
+    newId: oauth.newId ?? (() => uuidv7()),
   };
 }

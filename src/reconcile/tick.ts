@@ -49,6 +49,63 @@ export interface TickResult {
   readonly decisions: readonly { readonly eventId: string; readonly reason: LogReason }[];
 }
 
+/**
+ * At most this many connections are ticked in one minute (§11 cron fan-out): one call out each
+ * on Workers, where a scheduled run may make only so many. Past it they take turns, a share a
+ * minute, so every one is still ticked within a few minutes.
+ */
+export const FAN_OUT_MAX = 40;
+
+/**
+ * The connections to tick in the minute `at`: every active one, or past `max`, this minute's
+ * share in turn. Reads only: scheduling writes nothing (§6, §16).
+ */
+export async function connectionsToTick(
+  storage: StoragePort,
+  at: string,
+  max: number = FAN_OUT_MAX,
+): Promise<string[]> {
+  const ids = (
+    await storage.query(
+      stmt("SELECT id FROM calendar_connection WHERE status = 'active' ORDER BY id"),
+    )
+  ).map((r) => idRowSchema.parse(r).id);
+  if (ids.length <= max) return ids;
+  const turn = Math.floor(Date.parse(at) / 60_000) % Math.ceil(ids.length / max);
+  return ids.slice(turn * max, (turn + 1) * max);
+}
+
+const idRowSchema = z.object({ id: z.string() });
+
+/**
+ * A tick's log line (§14): its outcome and how many decisions of each reason, by connection
+ * id — never event content. Null for a quiet tick (nothing but `skipped_unchanged`) or a
+ * skipped one, so a steady state logs nothing.
+ */
+export function tickLog(
+  connectionId: string,
+  result: TickResult,
+): Record<string, string | number> | null {
+  if (result.outcome === "skipped") return null;
+  const counts: Record<string, number> = {};
+  for (const d of result.decisions)
+    if (d.reason !== "skipped_unchanged") counts[d.reason] = (counts[d.reason] ?? 0) + 1;
+  if (result.outcome === "done" && Object.keys(counts).length === 0) return null;
+  return { reason: "push_tick", connection: connectionId, outcome: result.outcome, ...counts };
+}
+
+/**
+ * A tick that threw, for the log (§14): the error's kind only. Its message could carry
+ * anything — a statement, a response body — so it is not logged.
+ */
+export function tickFailureLog(connectionId: string, error: unknown): Record<string, string> {
+  return {
+    reason: "push_tick_failed",
+    connection: connectionId,
+    error: error instanceof Error ? error.name : typeof error,
+  };
+}
+
 /** A token refresh margin: a token this close to expiry is refreshed first. */
 const TOKEN_MARGIN_MS = 60_000;
 
