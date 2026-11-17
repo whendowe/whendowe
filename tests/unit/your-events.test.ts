@@ -175,5 +175,6 @@ it("one list of what is being decided: threads waiting for you, then the rest (r
   expect(text).not.toContain("Nothing planned yet");
   expect(text).not.toContain("<h2>Plans</h2>");
   expect(text).toContain('<a href="/plans">Your plans</a>');
-  expect(text).toContain('<a href="/plans/new">+ Start planning</a>');
+  // rc50: Ask is the starting point; the plan form's link is retired, its route kept.
+  expect(text).not.toContain('href="/plans/new"');
 });
