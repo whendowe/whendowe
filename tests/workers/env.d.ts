@@ -5,6 +5,7 @@
 declare namespace Cloudflare {
   interface Env {
     DB: D1Database;
+    CONNECTION_DO: DurableObjectNamespace;
     TEST_MIGRATIONS: import("cloudflare:test").D1Migration[];
   }
 }

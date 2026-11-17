@@ -21,7 +21,7 @@ import type {
 } from "../../src/providers/base.js";
 import { FakeCalendarProvider } from "../../src/providers/fake.js";
 import { RETRY_FIRST_MS } from "../../src/reconcile/decide.js";
-import { runTick, type TickPorts } from "../../src/reconcile/tick.js";
+import { connectionsToTick, runTick, type TickPorts } from "../../src/reconcile/tick.js";
 
 // The push tick (DESIGN §11, §10 rc40/rc43/rc45) on BOTH drivers, against the fake provider:
 // a calendar converges to what its person's feed holds, a quiet tick writes nothing and calls
@@ -469,6 +469,73 @@ export function runPushTickContract(makePort: () => Promise<StoragePort>): void 
       ]);
       await t.event();
       expect(await t.tick()).toEqual({ outcome: "skipped", decisions: [] });
+    });
+  });
+
+  describe("choosing whom to tick (MVP-4 G2, part 4)", () => {
+    it("every active connection, in id order, read without writing; past the most, a share a minute in turn", async () => {
+      const t = await setUp(makePort, "fan-a");
+      // One connection per account: each of these is someone else's.
+      for (const [id, status] of [
+        ["conn-fan-c", "active"],
+        ["conn-fan-e", "active"],
+        ["conn-fan-b", "disconnected"],
+        ["conn-fan-d", "auth_error"],
+      ] as const) {
+        const owner = await findOrCreatePerson(t.inner, `${id}@example.org`, { now: T0 });
+        await t.inner.batch([
+          stmt(
+            `INSERT INTO calendar_connection (id, owner_id, provider, account_email, calendar_id,
+               access_token_enc, refresh_token_enc, token_expiry, status, made_by_us, created_at, updated_at)
+             VALUES (?, ?, 'google', ?, 'cal', 'x', 'x', ?, ?, 1, ?, ?)`,
+            id,
+            owner.id,
+            `${id}@example.org`,
+            FAR,
+            status,
+            T0,
+            T0,
+          ),
+        ]);
+      }
+      const active = (
+        await t.inner.query(
+          stmt("SELECT id FROM calendar_connection WHERE status = 'active' ORDER BY id"),
+        )
+      ).map((r) => String(r.id));
+      expect(active).toEqual(expect.arrayContaining(["conn-fan-a", "conn-fan-c", "conn-fan-e"]));
+      expect(active).not.toContain("conn-fan-b");
+      expect(active).not.toContain("conn-fan-d");
+
+      const writes = t.port.writes;
+      expect(await connectionsToTick(t.port, T0)).toEqual(active);
+      expect(t.port.writes).toBe(writes);
+
+      // One a minute: each minute takes the next, and every one comes round.
+      const n = active.length;
+      const minute = (k: number) => at(k * 60_000);
+      const turn = (k: number) => Math.floor(Date.parse(minute(k)) / 60_000) % n;
+      const seen = new Set<string>();
+      for (let k = 0; k < n; k++) {
+        const one = await connectionsToTick(t.port, minute(k), 1);
+        expect(one).toEqual([active[turn(k)]]);
+        for (const id of one) seen.add(id);
+      }
+      expect([...seen].sort()).toEqual([...active].sort());
+      // Two a minute, of three or more: each minute's pair in turn, the last perhaps one.
+      const pairs = Math.ceil(n / 2);
+      const covered = new Set<string>();
+      for (let k = 0; k < 2 * pairs; k++) {
+        const p = Math.floor(Date.parse(minute(k)) / 60_000) % pairs;
+        const two = await connectionsToTick(t.port, minute(k), 2);
+        expect(two).toEqual(active.slice(p * 2, p * 2 + 2));
+        expect(two.length).toBeGreaterThan(0);
+        for (const id of two) covered.add(id);
+      }
+      expect(covered.size).toBe(n);
+      // Exactly the most is everyone.
+      expect(await connectionsToTick(t.port, T0, n)).toEqual(active);
+      expect(t.port.writes).toBe(writes);
     });
   });
 }
