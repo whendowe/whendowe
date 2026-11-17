@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import type { PlanEventLike } from "../plans/diff.js";
-import { BUSY_PATH, html } from "./layout.js";
+import type { QuestionStep } from "../plans/plan.js";
+import { BUSY_PATH, type Html, html } from "./layout.js";
 
 // The week-row editor (DESIGN §10 rc19): the plan pages' styles and, with JavaScript, the
 // script that lets a stretch be picked up and put down or dragged (slice P4).
@@ -205,7 +206,7 @@ export const PLAN_STYLE = html`<style>
   .pl .bar .y { background: var(--fg); } .pl .bar .m { background: color-mix(in srgb, var(--fg) 22%, transparent); }
   .pl .bars .n { text-align: right; }
   /* rc46: Ask when, the plain page. */
-  .pl.ask .askstatus { font-size: .85rem; }
+  .pl .askstatus { font-size: .85rem; }
   .pl.ask .discard { margin-top: 1.5rem; }
   .pl.ask .option { border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; display: grid; gap: 6px; }
   .pl.ask .option legend { padding: 0 4px; }
@@ -641,6 +642,19 @@ const BUSY_SCRIPT = html`<script>
   });
 })();
 </script>`;
+
+const STEP_LINE: Record<QuestionStep, Html> = {
+  draft: html`<strong>Draft</strong> · step 1 of 4 · nobody has been told`,
+  asking: html`<strong>Asking</strong> · step 2 of 4`,
+  decided: html`<strong>Decided</strong> · step 3 of 4 · nobody has been told yet`,
+  in_calendars: html`<strong>In calendars</strong> · step 4 of 4`,
+  withdrawn: html`<strong>Withdrawn</strong> · every option was withdrawn`,
+};
+
+/** The four-step status line (§10 *Asking when*, rc50): a status, not tabs. */
+export function statusLine(step: QuestionStep, after: Html | string = ""): Html {
+  return html`<p class="askstatus">${STEP_LINE[step]}${after}</p>`;
+}
 
 /**
  * Busy times for the person choosing (rc41): the attributes that turn the busy script on

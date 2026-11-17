@@ -40,6 +40,7 @@ import {
   type Plan,
   type PlanEvent,
   PlanInputError,
+  questionStep,
   retractVote,
 } from "../../plans/plan.js";
 import {
@@ -70,7 +71,7 @@ import {
   type Preview,
   renderPage,
 } from "../layout.js";
-import { busyAssets, busyAttrs, busyClash, PLAN_STYLE } from "../plan-editor.js";
+import { busyAssets, busyAttrs, busyClash, PLAN_STYLE, statusLine } from "../plan-editor.js";
 import type { AppEnv } from "../session.js";
 import { BUSY_LABEL, describeRRule, EVENTS_PATH, formatWhen, verifiedLine } from "./events.js";
 
@@ -492,6 +493,7 @@ async function votePage(
     "Your vote",
     // The plan pages' look (rc19), so a link page and a plan page answer alike.
     html`${PLAN_STYLE}<div class="pl"${busyAttrs(own ? access.thread.tzid : null)}>${notice}<h1>${access.thread.name}</h1>${threadVerifiedLine(access.thread)}
+${statusLine(questionStep(plans, false))}
 ${body}
 ${notes === "" ? "" : html`<h2>Notes</h2>${notes}`}
 ${ownSwitch}

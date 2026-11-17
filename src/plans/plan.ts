@@ -35,6 +35,24 @@ import {
 const statusSchema = z.enum(["draft", "on_table", "accepted", "replaced", "withdrawn"]);
 export type PlanStatus = z.infer<typeof statusSchema>;
 
+/**
+ * Where a question stands, for the four-step status line on each of its pages (DESIGN §10
+ * *Asking when*, rc50): Draft while nothing has been sent; Asking while an option is on the
+ * table; Decided while the viewer's own choice waits its minute (`choosing`), which nobody
+ * else sees; In calendars once a choice has run; Withdrawn when every option was taken back.
+ */
+export type QuestionStep = "draft" | "asking" | "decided" | "in_calendars" | "withdrawn";
+
+export function questionStep(
+  plans: readonly Pick<Plan, "status">[],
+  choosing: boolean,
+): QuestionStep {
+  if (plans.some((p) => p.status === "on_table")) return choosing ? "decided" : "asking";
+  if (plans.some((p) => p.status === "accepted")) return "in_calendars";
+  if (plans.some((p) => p.status !== "draft")) return "withdrawn";
+  return "draft";
+}
+
 /** A poll's place and notes, copied to each time it offers (rc26); null on drawn plans. */
 export interface PlanEventDetails {
   readonly location: string | null;
