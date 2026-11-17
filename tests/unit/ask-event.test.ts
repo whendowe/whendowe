@@ -3,7 +3,13 @@ import { expect, it } from "vitest";
 import { findEventForParticipant, listEventsFor } from "../../src/events/event.js";
 import { acceptInvite } from "../../src/people/invite.js";
 import { findOrCreatePerson } from "../../src/people/person.js";
-import { askAsEvent, findAskDraft } from "../../src/plans/ask.js";
+import {
+  type AskDraft,
+  askAsEvent,
+  EMPTY_ASK,
+  findAskDraft,
+  makesEvent,
+} from "../../src/plans/ask.js";
 import { listThreadsFor } from "../../src/plans/thread.js";
 import { ASK_PATH } from "../../src/web/routes/ask.js";
 import { EVENTS_PATH } from "../../src/web/routes/events.js";
@@ -214,4 +220,60 @@ it("home, a group's page and the plans page start with Ask; the event form is a 
     `/groups/${g}/polls/new`,
   ])
     expect((await b.request(path)).status, path).toBe(200);
+});
+
+it("nobody to ask means nobody chosen either, and a group the asker is in", async () => {
+  const b = await browser({ now: () => NOW });
+  const g = await group(b, []);
+  const mara = (await findOrCreatePerson(b.storage, "mara@example.org", { now: NOW })).id;
+  const lea = (await findOrCreatePerson(b.storage, "lea@example.org", { now: NOW })).id;
+  const time = { allDay: false, startLocal: "2101-12-17T19:00", endLocal: "2101-12-17T21:00" };
+  const draft = (over: Partial<AskDraft["body"]>, groupId: string | null = null): AskDraft => ({
+    id: "d",
+    groupId,
+    updatedAt: NOW,
+    body: { ...EMPTY_ASK, title: "Pizza", options: [[time]], ...over },
+  });
+  expect(await makesEvent(b.storage, draft({}), mara)).toBe(true);
+  expect(await makesEvent(b.storage, draft({ people: [] }), mara)).toBe(true);
+  // Someone chosen from the suggestions is someone to ask.
+  expect(await makesEvent(b.storage, draft({ people: [{ id: lea, from: null }] }), mara)).toBe(
+    false,
+  );
+  expect(await makesEvent(b.storage, draft({ emails: ["lea@example.org"] }), mara)).toBe(false);
+  // A group of only Mara makes her event; it is no one's for someone not in it.
+  expect(await makesEvent(b.storage, draft({}, g), mara)).toBe(true);
+  expect(await makesEvent(b.storage, draft({}, g), lea)).toBe(false);
+});
+
+it("a name of only spaces is the question's title; a name is trimmed; the id may be given", async () => {
+  const b = await browser({ now: () => NOW });
+  const blank = await start(b);
+  const made = await blank.send({ ...PIZZA, o0e0name: "   ", act: "ask" });
+  const id = made.headers.get("location")?.split("/").at(-1) ?? "";
+  expect((await findEventForParticipant(b.storage, id, blank.mara))?.event.title).toBe("Pizza");
+
+  const padded = await start(b);
+  await padded.send({ ...PIZZA, o0e0name: "  Pizza at Ann's  ", act: "save" });
+  const given = "0198a3a0-0000-7000-8000-000000000001";
+  expect(
+    await askAsEvent(b.storage, {
+      id: padded.id,
+      authorId: padded.mara,
+      now: NOW,
+      newId: () => given,
+    }),
+  ).toEqual({ eventId: given });
+  expect((await findEventForParticipant(b.storage, given, padded.mara))?.event.title).toBe(
+    "Pizza at Ann's",
+  );
+});
+
+it("with no title yet, the read-back says it makes this an event", async () => {
+  const b = await browser({ now: () => NOW });
+  const f = await start(b);
+  await f.send({ ...PIZZA, title: "  ", act: "save" });
+  expect(await (await b.request(f.path)).text()).toContain(
+    "Nobody to ask, so asking makes this an event at once and tells nobody.",
+  );
 });
