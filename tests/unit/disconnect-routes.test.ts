@@ -179,10 +179,10 @@ async function harness(opts: { deleteStatus?: number; capabilities?: CapabilityC
   };
   const connection = async () =>
     (await storage.query(stmt("SELECT id, status, made_by_us FROM calendar_connection")))[0];
-  /** Copies in Google, as the push tick records them: `n` live, and one already deleted. */
+  /** Copies in Google, as the push tick records them: `n` live, one deleted, one never made. */
   const copies = async (n: number) => {
     const id = String((await connection())?.id);
-    for (let i = 0; i <= n; i++) {
+    for (let i = 0; i <= n + 1; i++) {
       await storage.batch([
         stmt(
           `INSERT INTO canonical_event (id, origin, owner_id, title, start_local, end_local, tzid,
@@ -199,7 +199,7 @@ async function harness(opts: { deleteStatus?: number; capabilities?: CapabilityC
           `ev-${i}`,
           id,
           i < n ? `g-${i}` : null,
-          i < n ? "synced" : "deleted",
+          i < n ? "synced" : i === n ? "deleted" : "error",
           NOW,
           NOW,
         ),
@@ -234,6 +234,7 @@ async function harness(opts: { deleteStatus?: number; capabilities?: CapabilityC
   };
 }
 
+const title = (t: string) => `<h1>${t}</h1>`;
 const button = (value: string, label: string) =>
   `<button type="submit" name="copies" value="${value}">${label}</button>`;
 
@@ -246,6 +247,7 @@ it("home links to the page, which asks about the copies and asks Google nothing"
   const res = await h.get(DISCONNECT_PATH);
   expect(res.status).toBe(200);
   const text = await res.text();
+  expect(text).toContain(title("Disconnect Google Calendar"));
   expect(text).toContain(`<form method="post" action="${DISCONNECT_PATH}">`);
   expect(text).toContain(ASK); // the one already deleted in Google isn't counted
   expect(text).toContain(button("remove", "Remove them"));
@@ -262,7 +264,9 @@ it("a calendar of your own is never offered for deletion; one copy is one event;
   await h.copies(1);
   const one = await h.page(DISCONNECT_PATH);
   expect(one).toContain("Also remove the 1 WhenDoWe event from your Google calendar?");
-  expect(one).not.toContain('value="calendar"');
+  expect(one).toContain(
+    `<p>${button("remove", "Remove them")} ${button("keep", "Keep them")} </p>`,
+  );
   expect((await h.leave("calendar")).status).toBe(409);
   expect(await h.count("calendar_connection")).toBe(1);
   expect(h.log.some((c) => c.method === "DELETE")).toBe(false);
@@ -283,7 +287,9 @@ it("Keep them: the grant goes back to Google and the connection is forgotten; th
   expect(await h.count("busy_calendar")).toBe(1);
   const res = await h.leave("keep");
   expect(res.status).toBe(200);
-  expect(await res.text()).toContain(
+  const kept = await res.text();
+  expect(kept).toContain(title("Disconnected"));
+  expect(kept).toContain(
     "Google Calendar is disconnected. The 2 WhenDoWe events there stay, and are no longer updated.",
   );
   expect(h.revokes()).toEqual([new URLSearchParams({ token: REFRESH }).toString()]);
@@ -294,8 +300,17 @@ it("Keep them: the grant goes back to Google and the connection is forgotten; th
   const home = await h.page("/");
   expect(home).toContain(">Connect Google Calendar</button>");
   expect(home).not.toContain(DISCONNECT_PATH);
-  expect((await h.get(DISCONNECT_PATH)).status).toBe(404);
-  expect((await h.leave("keep")).status).toBe(404);
+  for (const res of [await h.get(DISCONNECT_PATH), await h.leave("keep")]) {
+    expect(res.status).toBe(404);
+    const text = await res.text();
+    expect(text).toContain(title("Disconnect"));
+    expect(text).toContain("No Google Calendar is connected.");
+  }
+
+  // With nothing in Google, nothing is said to stay.
+  const g = await harness();
+  await g.connect();
+  expect(await (await g.leave("keep")).text()).toContain("<p>Google Calendar is disconnected.</p>");
 });
 
 it("Remove them: the connection is marked for the tick, its busy times stop, Google isn't called yet", async () => {
@@ -305,17 +320,23 @@ it("Remove them: the connection is marked for the tick, its busy times stop, Goo
   const calls = h.log.length;
   const res = await h.leave("remove");
   expect(res.status).toBe(200);
-  expect(await res.text()).toContain(REMOVING);
+  const removing = await res.text();
+  expect(removing).toContain(title("Disconnecting"));
+  expect(removing).toContain(REMOVING);
   expect((await h.connection())?.status).toBe("disconnected");
   expect(await h.count("busy_calendar")).toBe(0);
-  expect(await h.count("projection")).toBe(3); // the tick's to remove
+  expect(await h.count("projection")).toBe(4); // the tick's to go through
   expect(h.log.length).toBe(calls);
   expect(await h.page("/")).toContain(
     "Disconnecting Google Calendar: removing your WhenDoWe events from it.",
   );
-  expect(await h.page(DISCONNECT_PATH)).toContain(REMOVING);
+  const again = await h.page(DISCONNECT_PATH);
+  expect(again).toContain(title("Disconnecting"));
+  expect(again).toContain(REMOVING);
   // Pressed again, or another choice from a stale page: still just removing.
-  expect(await (await h.leave("keep")).text()).toContain(REMOVING);
+  const stale = await (await h.leave("keep")).text();
+  expect(stale).toContain(title("Disconnecting"));
+  expect(stale).toContain(REMOVING);
   expect((await h.connection())?.status).toBe("disconnected");
   expect(h.revokes()).toEqual([]);
 });
@@ -326,9 +347,9 @@ it("Delete the WhenDoWe calendar: one call to Google, then the grant goes back a
   await h.copies(2);
   const res = await h.leave("calendar");
   expect(res.status).toBe(200);
-  expect(await res.text()).toContain(
-    "Google Calendar is disconnected, and the WhenDoWe calendar deleted.",
-  );
+  const deleted = await res.text();
+  expect(deleted).toContain(title("Disconnected"));
+  expect(deleted).toContain("Google Calendar is disconnected, and the WhenDoWe calendar deleted.");
   const deletes = h.log.filter((c) => c.method === "DELETE");
   expect(deletes).toEqual([
     {
@@ -344,16 +365,20 @@ it("Delete the WhenDoWe calendar: one call to Google, then the grant goes back a
 });
 
 it("a WhenDoWe calendar already gone counts as deleted; Google failing changes nothing", async () => {
-  const gone = await harness({ deleteStatus: 404 });
-  await gone.connect();
-  expect((await gone.leave("calendar")).status).toBe(200);
-  expect(await gone.count("calendar_connection")).toBe(0);
+  for (const deleteStatus of [404, 410]) {
+    const gone = await harness({ deleteStatus });
+    await gone.connect();
+    expect((await gone.leave("calendar")).status).toBe(200);
+    expect(await gone.count("calendar_connection")).toBe(0);
+  }
 
   const down = await harness({ deleteStatus: 503 });
   await down.connect();
   const res = await down.leave("calendar");
   expect(res.status).toBe(502);
-  expect(await res.text()).toContain("Google didn't answer just now.");
+  const down502 = await res.text();
+  expect(down502).toContain(title("Disconnect"));
+  expect(down502).toContain("Google didn't answer just now.");
   expect(await down.count("calendar_connection")).toBe(1);
   expect((await down.connection())?.status).toBe("active");
   expect(down.revokes()).toEqual([]);
@@ -375,11 +400,23 @@ it("after Google stopped accepting: only Disconnect, and the copies are yours to
   expect(text).not.toContain('value="remove"');
   expect(text).not.toContain('value="calendar"');
   for (const choice of ["remove", "calendar"]) {
-    expect((await h.leave(choice)).status).toBe(409);
+    const res = await h.leave(choice);
+    expect(res.status).toBe(409);
+    const text = await res.text();
+    expect(text).toContain(title("Disconnect"));
+    expect(text).toContain("That isn't one of the choices. Please start again.");
     expect((await h.connection())?.status).toBe("auth_error");
   }
   expect((await h.leave("keep")).status).toBe(200);
   expect(await h.count("calendar_connection")).toBe(0);
+
+  // With nothing in Google, there is nothing to remove yourself.
+  const g = await harness();
+  await g.connect();
+  await g.storage.batch([stmt("UPDATE calendar_connection SET status = 'auth_error'")]);
+  expect(await g.page(DISCONNECT_PATH)).toContain(
+    "Google stopped accepting WhenDoWe's access, so nothing can be removed from here.</p>",
+  );
 });
 
 it("without calendar_sync, disconnecting and removing the copies still work", async () => {
@@ -422,15 +459,34 @@ it("signed out, without the form's token, or with no choice: nothing changes; ot
     form({ csrf: "stale", copies: "keep" }, h.ann.cookie),
   );
   expect(forged.status).toBe(403);
+  const rejected = await forged.text();
+  expect(rejected).toContain(title("Request rejected"));
+  expect(rejected).toContain("Please try again.");
   for (const bad of ["", "maybe", "Keep them"]) {
     const res = await h.leave(bad);
     expect(res.status).toBe(400);
-    expect(await res.text()).toContain("Choose one.");
+    const text = await res.text();
+    expect(text).toContain(title("Disconnect"));
+    expect(text).toContain("Choose one.");
   }
-  // Bob, with no connection of his own, can't reach Ann's.
+  // Bob, with no Google connection of his own — one of another provider isn't one — can't
+  // reach Ann's.
   const bob = await h.signIn("bob@example.org");
+  const bobId = (
+    await h.storage.query(stmt("SELECT id FROM person WHERE email = 'bob@example.org'"))
+  )[0]?.id;
+  await h.storage.batch([
+    stmt(
+      `INSERT INTO calendar_connection (id, owner_id, provider, account_email, calendar_id,
+         access_token_enc, refresh_token_enc, status, created_at, updated_at)
+       VALUES ('other', ?, 'other', 'bob@example.com', 'cal', 'x', 'x', 'active', ?, ?)`,
+      String(bobId),
+      NOW,
+      NOW,
+    ),
+  ]);
   expect((await h.get(DISCONNECT_PATH, bob)).status).toBe(404);
   expect((await h.leave("keep", bob)).status).toBe(404);
-  expect(await h.count("calendar_connection")).toBe(1);
+  expect(await h.count("calendar_connection")).toBe(2);
   expect(h.revokes()).toEqual([]);
 });
