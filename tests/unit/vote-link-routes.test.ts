@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { expect, it } from "vitest";
+import { SIGNED_IN } from "../../src/events/response.js";
 import { HOLD_MS } from "../../src/held.js";
 import { MailCapReachedError, SenderShareReachedError } from "../../src/mail/capped.js";
 import { grantCapability } from "../../src/people/capability.js";
@@ -7,6 +8,7 @@ import { findOrCreatePerson, guestName } from "../../src/people/person.js";
 import {
   acceptPlan,
   addDraftEvent,
+  castVote,
   createPollThread,
   listPlans,
   sendDraft,
@@ -1164,4 +1166,41 @@ it("on the plan's page: tap it again to take it back, Undo, and a receipt that s
   await acceptPlan(b.storage, await f.as(f.mara.id), { planId: f.planIds[1] ?? "", now: NOW });
   const closed = await b.request(`${planPage}/vote`, post({ csrf: await csrf(), answer: "none" }));
   expect(closed.status).toBe(409);
+});
+
+it("mail that stops (rc51): a verified thread of two says who stopped email, and what didn't go out", async () => {
+  const b = await browser({ now: () => NOW });
+  const f = await signedInPoll(b, ["ana"]);
+  const csrf = async () => (await home(b)).csrf;
+  await b.request(`${f.thread}/verify`, post({ csrf: await csrf() }));
+  await suppress(b.storage, "ana@example.org", { kind: "person", id: f.mara.id }, NOW);
+
+  // The vote link is dropped as before (rc24), and the history says so.
+  expect(await (await sendLinks(b, f.thread)).text()).toContain("Sent to 0 people.");
+  // Agreed by Mara's yes after Ana's: the result email from Mara is dropped too.
+  const [planId = ""] = f.planIds;
+  await b.request(`${f.thread}/p/${planId}/vote`, post({ csrf: await csrf(), answer: "no" }));
+  await castVote(b.storage, await f.as(f.rest[0]?.id ?? ""), {
+    planId,
+    answer: "yes",
+    now: NOW,
+    arrival: SIGNED_IN,
+  });
+  await b.request(`${f.thread}/p/${planId}/vote`, post({ csrf: await csrf(), answer: "yes" }));
+  const page = await (await b.request(f.thread)).text();
+  const ana = guestName(f.threadId, f.rest[0]?.id ?? "");
+  const q = "(&#39;|')";
+  expect(page).toContain(`${ana} stopped emails about this.`);
+  for (const what of ["A vote link", "The email saying what was agreed"])
+    expect(page).toMatch(
+      new RegExp(
+        `${what} to ${ana} didn${q}t go out: ${ana} isn${q}t receiving email about this\\.`,
+      ),
+    );
+
+  // A thread of three says nothing.
+  const g = await signedInPoll(b, ["david", "cat"]);
+  await b.request(`${g.thread}/verify`, post({ csrf: await csrf() }));
+  await suppress(b.storage, "david@example.org", { kind: "all" }, NOW);
+  expect(await (await sendLinks(b, g.thread)).text()).not.toContain("emails about this");
 });

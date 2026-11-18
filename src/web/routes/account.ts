@@ -523,7 +523,7 @@ ${button("delete", "Delete everything about this address")}`
       .max(64)
       .safeParse(form.scope_id ?? "");
     if (!scope.success || !scopeId.success) return c.redirect(ACCOUNT_PATH, 303);
-    await undoOptOut(deps.storage, me.email, scope.data, scopeId.data);
+    await undoOptOut(deps.storage, me.email, scope.data, scopeId.data, deps.now());
     return c.redirect(ACCOUNT_PATH, 303);
   });
 

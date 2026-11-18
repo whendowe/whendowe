@@ -159,6 +159,15 @@ function eventStatements(e: string, p: string, t: string, now: string): SqlState
       sql: "DELETE FROM receipt_unsent WHERE canonical_event_id = ? AND person_id = ?",
       params: [e, p],
     },
+    // rc51: the trail about their email goes; what their own email caused stays, unnamed.
+    {
+      sql: "DELETE FROM mail_trail WHERE canonical_event_id = ? AND person_id = ?",
+      params: [e, p],
+    },
+    {
+      sql: "UPDATE mail_trail SET caused_by = NULL WHERE canonical_event_id = ? AND caused_by = ?",
+      params: [e, p],
+    },
     {
       sql: "DELETE FROM event_participation WHERE canonical_event_id = ? AND person_id = ?",
       params: [e, p],
@@ -216,6 +225,11 @@ function threadStatements(th: string, p: string, t: string, now: string): SqlSta
     },
     { sql: "DELETE FROM plan_note WHERE thread_id = ? AND author_id = ?", params: [th, p] },
     { sql: "DELETE FROM receipt_unsent WHERE thread_id = ? AND person_id = ?", params: [th, p] },
+    { sql: "DELETE FROM mail_trail WHERE thread_id = ? AND person_id = ?", params: [th, p] },
+    {
+      sql: "UPDATE mail_trail SET caused_by = NULL WHERE thread_id = ? AND caused_by = ?",
+      params: [th, p],
+    },
     { sql: "DELETE FROM plan_vote_token WHERE thread_id = ? AND person_id = ?", params: [th, p] },
     { sql: "DELETE FROM guest_claim WHERE thread_id = ? AND person_id = ?", params: [th, p] },
     { sql: "DELETE FROM share_link WHERE thread_id = ? AND created_by = ?", params: [th, p] },

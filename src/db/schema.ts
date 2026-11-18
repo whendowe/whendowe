@@ -908,6 +908,37 @@ export const receiptUnsent = sqliteTable(
   ],
 );
 
+// rc51 (§10 *Mail that stops*): in a verified event or thread of exactly two people, the
+// moments one of them stopped the other's email or took it back, and each email of the
+// other's that then didn't go out. Never which opt-out did it. Exactly one container is set.
+export const mailTrail = sqliteTable(
+  "mail_trail",
+  {
+    id: text("id").primaryKey(),
+    canonicalEventId: text("canonical_event_id").references(() => canonicalEvent.id, {
+      onDelete: "cascade",
+    }),
+    threadId: text("thread_id").references(() => planThread.id, { onDelete: "cascade" }),
+    // Whose email stopped, started again, or didn't go out.
+    personId: text("person_id")
+      .notNull()
+      .references(() => person.id, { onDelete: "cascade" }),
+    kind: text("kind").notNull(),
+    // unsent: what the email was.
+    what: text("what"),
+    // unsent: whose email it was; a former member once they are erased.
+    causedBy: text("caused_by").references(() => person.id, { onDelete: "set null" }),
+    createdAt: text("created_at").notNull(),
+  },
+  (t) => [
+    index("mail_trail_event_idx").on(t.canonicalEventId),
+    index("mail_trail_thread_idx").on(t.threadId),
+    check("mail_trail_one_chk", sql`(${t.canonicalEventId} IS NULL) <> (${t.threadId} IS NULL)`),
+    check("mail_trail_kind_chk", sql`${t.kind} IN ('stopped', 'stopped_links', 'again', 'unsent')`),
+    check("mail_trail_what_chk", sql`(${t.kind} = 'unsent') = (${t.what} IS NOT NULL)`),
+  ],
+);
+
 // rc42 (§10 *Who really answered*): what a verified event or thread needs everyone on it to
 // agree to — to stop verifying, to remove an event for good, or to keep it for less long
 // (`retain_days`, the new period). One open at a time per container. Open while closed_at
