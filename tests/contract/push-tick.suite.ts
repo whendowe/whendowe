@@ -475,14 +475,14 @@ export function runPushTickContract(makePort: () => Promise<StoragePort>): void 
       expect((await t.tick()).decisions).toHaveLength(1);
     });
 
-    it("an unknown or inactive connection is skipped", async () => {
+    it("an unknown connection, or one Google stopped accepting, is skipped", async () => {
       const t = await setUp(makePort, "inactive");
       expect(await runTick(t.ports, "no-such-connection")).toEqual({
         outcome: "skipped",
         decisions: [],
       });
       await t.inner.batch([
-        stmt("UPDATE calendar_connection SET status = 'disconnected' WHERE id = ?", t.connectionId),
+        stmt("UPDATE calendar_connection SET status = 'auth_error' WHERE id = ?", t.connectionId),
       ]);
       await t.event();
       expect(await t.tick()).toEqual({ outcome: "skipped", decisions: [] });
@@ -490,7 +490,7 @@ export function runPushTickContract(makePort: () => Promise<StoragePort>): void 
   });
 
   describe("choosing whom to tick (MVP-4 G2, part 4)", () => {
-    it("every active connection, in id order, read without writing; past the most, a share a minute in turn", async () => {
+    it("every active or disconnecting connection, in id order, read without writing; past the most, a share a minute in turn", async () => {
       const t = await setUp(makePort, "fan-a");
       // One connection per account: each of these is someone else's.
       for (const [id, status] of [
@@ -517,11 +517,15 @@ export function runPushTickContract(makePort: () => Promise<StoragePort>): void 
       }
       const active = (
         await t.inner.query(
-          stmt("SELECT id FROM calendar_connection WHERE status = 'active' ORDER BY id"),
+          stmt(
+            "SELECT id FROM calendar_connection WHERE status IN ('active', 'disconnected') ORDER BY id",
+          ),
         )
       ).map((r) => String(r.id));
-      expect(active).toEqual(expect.arrayContaining(["conn-fan-a", "conn-fan-c", "conn-fan-e"]));
-      expect(active).not.toContain("conn-fan-b");
+      // A disconnected connection is ticked until its copies are removed (rc40, G3 part 2).
+      expect(active).toEqual(
+        expect.arrayContaining(["conn-fan-a", "conn-fan-b", "conn-fan-c", "conn-fan-e"]),
+      );
       expect(active).not.toContain("conn-fan-d");
 
       const writes = t.port.writes;
