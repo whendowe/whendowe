@@ -170,7 +170,7 @@ it("after Google stopped accepting: only Disconnect, and the copies are yours to
   await h.copies(2);
   await h.storage.batch([stmt("UPDATE calendar_connection SET status = 'auth_error'")]);
   expect(await h.page("/")).toContain(
-    `<p class="muted"><a href="${DISCONNECT_PATH}">Disconnect</a></p>`,
+    `<p>Google stopped accepting WhenDoWe's access to <strong>ann@example.com</strong>. <a href="${DISCONNECT_PATH}">Disconnect</a></p>`,
   );
   const text = await h.page(DISCONNECT_PATH);
   expect(text).toContain(
