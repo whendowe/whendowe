@@ -193,6 +193,7 @@ it("the result drops opt-outs through the app's seam, is at each reader's tier, 
         },
       },
       publicBaseUrl: "https://x.example",
+      now: () => NOW,
     },
     hm,
     { planId: h.planIds[0] ?? "", how: "chose" },
@@ -205,7 +206,12 @@ it("the result drops opt-outs through the app's seam, is at each reader's tier, 
   // Not accepted (yet, or any more): nobody is told.
   expect(
     await sendResultMail(
-      { storage: d.storage, mail: { send: async () => {} }, publicBaseUrl: "https://x.example" },
+      {
+        storage: d.storage,
+        mail: { send: async () => {} },
+        publicBaseUrl: "https://x.example",
+        now: () => NOW,
+      },
       hm,
       { planId: h.planIds[1] ?? "", how: "chose" },
     ),
