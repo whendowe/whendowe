@@ -53,6 +53,8 @@ import {
   UNAVAILABLE,
 } from "../../people/capability.js";
 import { findOrCreatePerson, findPersonByEmail, normalizeEmail } from "../../people/person.js";
+// What disconnecting does with the copies (rc40); `calendar` only for one WhenDoWe made.
+import { copiesSchema } from "../../privacy/erasure.js";
 import { copiesOn, forgetConnection } from "../../reconcile/tick.js";
 import { GOOGLE_CONNECT_PATH, type Html, html } from "../layout.js";
 import {
@@ -99,8 +101,6 @@ const choiceSchema = z.string().min(1).max(1024);
 
 /** The calendars whose busy times count (rc41): none, one or several ticks of `busy`. */
 const MAX_BUSY = 50;
-/** What disconnecting does with the copies (rc40); `calendar` only for one WhenDoWe made. */
-const copiesSchema = z.enum(["remove", "keep", "calendar"]);
 
 const busySchema = z
   .union([choiceSchema, z.array(choiceSchema)])
@@ -285,6 +285,22 @@ async function liveConnection(
     madeByUs: conn.made_by_us === 1,
     accessToken,
   };
+}
+
+/**
+ * Delete the calendar WhenDoWe made for this person (rc40), for erasure: false if there is
+ * none, or Google refused or didn't answer — the reason isn't kept, since it could carry a
+ * token. A token refreshed here isn't saved: the account is about to go.
+ */
+export async function deleteMadeCalendar(deps: OAuthRouteDeps, personId: string): Promise<boolean> {
+  try {
+    const live = await liveConnection(deps, personId);
+    if (live === null || !live.madeByUs) return false;
+    await deleteCalendar(live.accessToken, live.calendarId, deps.fetchImpl);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**

@@ -6,6 +6,7 @@ import { transitionStatements } from "../events/event.js";
 import { uuidv7 } from "../ids.js";
 import { moveSharedLinks } from "../people/group.js";
 import { hashToken, issueToken } from "../people/tokens.js";
+import { copiesOn } from "../reconcile/tick.js";
 import { collect, reapplyLedger } from "./purge.js";
 
 // Deleting an account (DESIGN §10 rc21 *Privacy basics*, GDPR Art. 17).
@@ -397,6 +398,23 @@ export const ERASURES_PER_PASS = 1;
 /** Revoke these grants at the provider, before their tokens are deleted (app.ts builds it). */
 export type RevokeCalendars = (connections: readonly ConnectionToRevoke[]) => Promise<void>;
 
+/** What to do with the copies in Google, asked when disconnecting and when deleting (rc40). */
+export const copiesSchema = z.enum(["remove", "keep", "calendar"]);
+export type CalendarCopies = z.infer<typeof copiesSchema>;
+
+/** The person's grants at Google, for erasure (app.ts builds it from the OAuth deps). */
+export interface CalendarGrants {
+  readonly revoke: RevokeCalendars;
+  /** Delete the calendar WhenDoWe made for this person; false if it couldn't be. */
+  readonly deleteMadeCalendar: (personId: string) => Promise<boolean>;
+}
+
+/**
+ * How long past its day an erasure waits for the push tick to remove the copies (rc40).
+ * Past it, the account is erased anyway: being erased mustn't hang on Google.
+ */
+export const COPIES_GRACE_MS = 24 * 60 * 60 * 1000;
+
 /**
  * Ask for the account to be deleted: one batch that records it and signs the person out
  * of every session, the asking one included — so a stolen session can't stay to watch,
@@ -410,17 +428,28 @@ export async function requestDeletion(
   options: {
     /** Also stop anyone emailing the address once it's erased (rc24); unchecked by default. */
     readonly suppress?: boolean;
+    /** The copies in Google on the day (rc40); removed unless asked otherwise. */
+    readonly copies?: CalendarCopies;
   } = {},
 ): Promise<{ readonly token: string; readonly eraseAfter: string }> {
   const { token, hash } = await issueToken();
   const eraseAfter = new Date(new Date(now).getTime() + DELETION_WAIT_MS).toISOString();
   await storage.batch([
     {
-      sql: `INSERT INTO account_deletion (person_id, requested_at, erase_after, token_hash, suppress)
-            VALUES (?, ?, ?, ?, ?)
+      sql: `INSERT INTO account_deletion
+              (person_id, requested_at, erase_after, token_hash, suppress, calendar_copies)
+            VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT (person_id) DO UPDATE SET token_hash = excluded.token_hash,
-                                                  suppress = excluded.suppress`,
-      params: [personId, now, eraseAfter, hash, options.suppress === true ? 1 : 0],
+                                                  suppress = excluded.suppress,
+                                                  calendar_copies = excluded.calendar_copies`,
+      params: [
+        personId,
+        now,
+        eraseAfter,
+        hash,
+        options.suppress === true ? 1 : 0,
+        options.copies ?? "remove",
+      ],
     },
     {
       sql: "UPDATE session SET revoked_at = ? WHERE person_id = ? AND revoked_at IS NULL",
@@ -483,6 +512,83 @@ export async function keepOwnAccount(storage: StoragePort, personId: string): Pr
   ]);
 }
 
+const leavingSchema = z.object({
+  id: z.string(),
+  status: z.string(),
+  made_by_us: z.number(),
+  calendar_copies: copiesSchema,
+  erase_after: z.string(),
+});
+
+/**
+ * The copies in Google first (rc40): asked to remove them, the connection is handed to the
+ * push tick, which removes them and then forgets it (§11: one path to Google) — so the
+ * erasure waits. A WhenDoWe calendar asked deleted is deleted here, or its events removed if
+ * it can't be. True while the copies are still going and the grace isn't over.
+ */
+async function copiesFirst(
+  storage: StoragePort,
+  personId: string,
+  input: { readonly now: string; readonly calendars?: CalendarGrants },
+): Promise<boolean> {
+  const [row] = await storage.query({
+    sql: `SELECT c.id, c.status, c.made_by_us, d.calendar_copies, d.erase_after
+          FROM calendar_connection c JOIN account_deletion d ON d.person_id = c.owner_id
+          WHERE c.owner_id = ? AND c.provider = 'google'`,
+    params: [personId],
+  });
+  if (row === undefined) return false;
+  const conn = leavingSchema.parse(row);
+  if (conn.status === "disconnected") {
+    return Date.parse(input.now) < Date.parse(conn.erase_after) + COPIES_GRACE_MS;
+  }
+  // Refused by Google, or kept: nothing to remove from here.
+  if (conn.status !== "active" || conn.calendar_copies === "keep") return false;
+  if (
+    conn.calendar_copies === "calendar" &&
+    conn.made_by_us === 1 &&
+    input.calendars !== undefined &&
+    (await input.calendars.deleteMadeCalendar(personId))
+  )
+    return false;
+  if ((await copiesOn(storage, conn.id)) === 0) return false;
+  await storage.batch([
+    {
+      sql: `UPDATE calendar_connection SET status = 'disconnected', updated_at = ?
+            WHERE id = ? AND status = 'active'`,
+      params: [input.now, conn.id],
+    },
+    { sql: "DELETE FROM busy_calendar WHERE connection_id = ?", params: [conn.id] },
+  ]);
+  return true;
+}
+
+/** The person's Google connection as the deletion page asks about it (rc40); null without one. */
+export async function googleCopiesOf(
+  storage: StoragePort,
+  personId: string,
+): Promise<{
+  readonly status: string;
+  readonly madeByUs: boolean;
+  readonly copies: number;
+} | null> {
+  const [row] = await storage.query({
+    sql: `SELECT id, status, made_by_us FROM calendar_connection
+          WHERE owner_id = ? AND provider = 'google'`,
+    params: [personId],
+  });
+  if (row === undefined) return null;
+  const conn = z.object({ id: z.string(), status: z.string(), made_by_us: z.number() }).parse(row);
+  return {
+    status: conn.status,
+    madeByUs: conn.made_by_us === 1,
+    copies: await copiesOn(storage, conn.id),
+  };
+}
+
+/** What erasing came to: already gone, erased, or waiting for its copies in Google (rc40). */
+export type Erased = "gone" | "erased" | "removing";
+
 /**
  * Revoke the person's grants, then erase them; nothing if they're already gone (a link
  * clicked twice, or a pass that overlapped one).
@@ -490,13 +596,14 @@ export async function keepOwnAccount(storage: StoragePort, personId: string): Pr
 async function eraseWithGrants(
   storage: StoragePort,
   personId: string,
-  input: { readonly now: string; readonly revokeCalendars?: RevokeCalendars },
-): Promise<boolean> {
+  input: { readonly now: string; readonly calendars?: CalendarGrants },
+): Promise<Erased> {
   const exists = await storage.query({
     sql: "SELECT 1 FROM person WHERE id = ?",
     params: [personId],
   });
-  if (exists.length === 0) return false;
+  if (exists.length === 0) return "gone";
+  if (await copiesFirst(storage, personId, input)) return "removing";
   // Asked for on the deletion page: the address is opted out before it goes, since the
   // address is what the opt-out is kept by (hashed; rc24).
   const asked = await storage.query({
@@ -513,47 +620,54 @@ async function eraseWithGrants(
       },
     ]);
   }
-  if (input.revokeCalendars !== undefined)
-    await input.revokeCalendars(await connectionsOf(storage, personId));
+  if (input.calendars !== undefined)
+    await input.calendars.revoke(await connectionsOf(storage, personId));
   await eraseAccount(storage, personId, { now: input.now });
-  return true;
+  return "erased";
 }
 
 /**
  * Delete now, from the emailed link. The request is made due first, so if the erasure
- * stops part-way the next purge pass finishes it. False if the link no longer works.
+ * stops part-way — or waits for its copies in Google — the purge pass finishes it. "gone"
+ * if the link no longer works.
  */
 export async function deleteNow(
   storage: StoragePort,
   token: string,
-  input: { readonly now: string; readonly revokeCalendars?: RevokeCalendars },
-): Promise<boolean> {
+  input: { readonly now: string; readonly calendars?: CalendarGrants },
+): Promise<Erased> {
   const rows = await storage.query({
     sql: "UPDATE account_deletion SET erase_after = ? WHERE token_hash = ? RETURNING person_id",
     params: [input.now, await hashToken(token)],
   });
   const personId = rows[0] === undefined ? null : z.string().parse(rows[0].person_id);
-  if (personId === null) return false;
-  await eraseWithGrants(storage, personId, input);
-  return true;
+  if (personId === null) return "gone";
+  return eraseWithGrants(storage, personId, input);
 }
 
 /**
  * The purge pass's first job: erase the accounts whose wait is over, a bounded number
- * per run. With none due it is one read and writes nothing (§16).
+ * per run. One whose copies in Google are still being removed is passed over until they
+ * are, or its grace is over, so it can't hold up the rest. With none due it is one read
+ * and writes nothing (§16).
  */
 export async function eraseDue(
   storage: StoragePort,
-  input: { readonly now: string; readonly revokeCalendars?: RevokeCalendars },
+  input: { readonly now: string; readonly calendars?: CalendarGrants },
 ): Promise<number> {
+  const graceOver = new Date(Date.parse(input.now) - COPIES_GRACE_MS).toISOString();
   const due = await storage.query({
-    sql: `SELECT person_id FROM account_deletion WHERE erase_after <= ?
-          ORDER BY erase_after LIMIT ?`,
-    params: [input.now, ERASURES_PER_PASS],
+    sql: `SELECT d.person_id FROM account_deletion d WHERE d.erase_after <= ?
+            AND (d.erase_after <= ? OR NOT EXISTS
+              (SELECT 1 FROM calendar_connection c
+               WHERE c.owner_id = d.person_id AND c.status = 'disconnected'))
+          ORDER BY d.erase_after LIMIT ?`,
+    params: [input.now, graceOver, ERASURES_PER_PASS],
   });
   let erased = 0;
   for (const r of due) {
-    if (await eraseWithGrants(storage, z.string().parse(r.person_id), input)) erased += 1;
+    if ((await eraseWithGrants(storage, z.string().parse(r.person_id), input)) === "erased")
+      erased += 1;
   }
   return erased;
 }

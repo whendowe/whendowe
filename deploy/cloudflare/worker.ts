@@ -14,11 +14,11 @@ import { cappedMailPort } from "../../src/mail/capped.js";
 import { cloudflareBindingMailPort, type EmailBindingLike } from "../../src/mail/cloudflare.js";
 import { consoleMailPort } from "../../src/mail/console.js";
 import { disabledMailPort, type MailPort } from "../../src/mail/port.js";
-import { eraseDue, type RevokeCalendars } from "../../src/privacy/erasure.js";
+import { type CalendarGrants, eraseDue } from "../../src/privacy/erasure.js";
 import { retentionPass } from "../../src/privacy/purge.js";
 import { isRetentionMinute } from "../../src/privacy/retention.js";
 import { connectionsToTick, tickFailureLog } from "../../src/reconcile/tick.js";
-import { calendarRevoker, createApp, heldRunners, reconnectMailer } from "../../src/web/app.js";
+import { calendarGrants, createApp, heldRunners, reconnectMailer } from "../../src/web/app.js";
 import type { AuthDeps } from "../../src/web/routes/auth.js";
 import { buildOAuthDeps, tokenCipherFor } from "../../src/web/routes/oauth-deps.js";
 import type { AppEnv } from "../../src/web/session.js";
@@ -66,7 +66,7 @@ export interface Env {
 interface Built {
   readonly app: Hono<AppEnv>;
   readonly storage: StoragePort;
-  readonly revokeCalendars: RevokeCalendars | undefined;
+  readonly calendars: CalendarGrants | undefined;
   readonly runners: HeldRunners;
   /** The minute's reconnect emails (rc40). */
   readonly mailReconnects: (
@@ -149,7 +149,7 @@ async function build(env: Env): Promise<Built> {
   return {
     app,
     storage,
-    revokeCalendars: calendarRevoker(oauth),
+    calendars: calendarGrants(oauth),
     runners: heldRunners(auth),
     mailReconnects: reconnectMailer(auth),
     pushing: oauth !== undefined,
@@ -186,12 +186,12 @@ export default {
   async scheduled(controller: ScheduledController, env: Env, _ctx: ExecutionContext) {
     // The purge pass (§10 rc21/rc22): accounts whose 7 days are over, each minute, and
     // retention once an hour. Bounded per run; with nothing due, reads only (§16).
-    const { storage, revokeCalendars, runners, mailReconnects, pushing } = await getBuilt(env);
+    const { storage, calendars, runners, mailReconnects, pushing } = await getBuilt(env);
     const at = new Date(controller.scheduledTime).toISOString();
     // rc46: actions held their minute, first — someone is waiting on them.
     const ran = await runDueHeld(storage, runners, at);
     if (ran > 0) console.log(JSON.stringify({ reason: "held_ran", count: ran }));
-    const erased = await eraseDue(storage, { now: at, revokeCalendars });
+    const erased = await eraseDue(storage, { now: at, calendars });
     if (erased > 0) console.log(JSON.stringify({ reason: "accounts_erased", count: erased }));
     if (isRetentionMinute(at)) {
       const r = await retentionPass(storage, at);

@@ -754,6 +754,8 @@ export const accountDeletion = sqliteTable(
     tokenHash: text("token_hash").notNull().unique(),
     // rc24: 1 = also stop anyone emailing the address, once it is erased (asked on the page).
     suppress: integer("suppress").notNull().default(0),
+    // rc40: what happens to the copies in Google on the day — remove | keep | calendar.
+    calendarCopies: text("calendar_copies").notNull().default("remove"),
   },
   (t) => [index("account_deletion_due_idx").on(t.eraseAfter)],
 );

@@ -12,14 +12,16 @@ import {
   setAppearance,
 } from "../../people/person.js";
 import {
+  type CalendarGrants,
+  copiesSchema,
   DELETION_WAIT_MS,
   deleteNow,
   erasePreview,
   FORMER_MEMBER,
+  googleCopiesOf,
   keepAccount,
   keepOwnAccount,
   peekDeletion,
-  type RevokeCalendars,
   requestDeletion,
 } from "../../privacy/erasure.js";
 import { exportPerson } from "../../privacy/export.js";
@@ -81,10 +83,36 @@ export { KEEP_ACCOUNT_PATH };
 
 export interface AccountOptions {
   /**
-   * Revoke this person's calendar grants at the provider, before their tokens are
-   * deleted. Present when the instance has Google credentials (app.ts).
+   * This person's calendar grants at the provider: revoked before their tokens are deleted,
+   * and the WhenDoWe calendar deleted if asked. Present with Google credentials (app.ts).
    */
-  readonly revokeCalendars?: RevokeCalendars;
+  readonly calendars?: CalendarGrants;
+}
+
+const events = (n: number) => (n === 1 ? "1 WhenDoWe event" : `${n} WhenDoWe events`);
+
+/**
+ * What happens to the copies in Google (rc40): the same question as disconnecting, with
+ * Remove them chosen. Asked of a connection Google still answers for; for one it refuses,
+ * the page says to remove them in Google yourself. Being disconnected already, nothing.
+ */
+async function copiesQuestion(storage: StoragePort, personId: string) {
+  const conn = await googleCopiesOf(storage, personId);
+  if (conn === null || conn.status === "disconnected") return "";
+  if (conn.status !== "active") {
+    return conn.copies === 0
+      ? ""
+      : html`<p class="error">Google stopped accepting WhenDoWe's access, so the ${events(conn.copies)} in your Google calendar can't be removed from here: remove them in Google Calendar yourself.</p>`;
+  }
+  const option = (value: string, label: string, checked: boolean) =>
+    html`<label><input type="radio" name="copies" value="${value}"${checked ? " checked" : ""} /> ${label}</label><br />`;
+  return html`<fieldset>
+  <legend>Your WhenDoWe events in your Google calendar${conn.copies === 0 ? "" : html` (${events(conn.copies)} now)`}</legend>
+  ${option("remove", "Remove them", true)}
+  ${option("keep", "Keep them", false)}
+  ${conn.madeByUs ? option("calendar", "Delete the WhenDoWe calendar", false) : ""}
+  <span class="muted">On the day, before the account goes. Kept, they're no longer updated.</span>
+</fieldset>`;
 }
 
 const WAIT_DAYS = DELETION_WAIT_MS / (24 * 60 * 60 * 1000);
@@ -255,6 +283,7 @@ ${loses.length === 0 ? "" : html`<p class="error">${loses.join(". ")}. To keep t
 <form method="post" action="${DELETE_ACCOUNT_PATH}">
   <input type="hidden" name="csrf" value="${me.csrfToken}" />
   <p><label>To confirm, type your email address<br /><input name="confirm" type="email" autocomplete="off" required /></label></p>
+  ${await copiesQuestion(deps.storage, me.personId)}
   <p><label><input type="checkbox" name="suppress" value="1" /> Also stop anyone emailing this address</label><br />
   <span class="muted">Without it, someone could add the address again later, as a new person.</span></p>
   <p><button type="submit">Delete my account</button> <a href="${ACCOUNT_PATH}">Keep it</a></p>
@@ -279,8 +308,21 @@ ${loses.length === 0 ? "" : html`<p class="error">${loses.join(". ")}. To keep t
         400,
       );
     }
+    // No question asked (no connection), Remove them stands; anything else is refused.
+    const copies = copiesSchema.default("remove").safeParse(form.copies);
+    if (!copies.success) {
+      return c.html(
+        page(
+          c,
+          "Not deleted",
+          html`<h1>Nothing was deleted</h1><p>That isn't one of the choices. <a href="${DELETE_ACCOUNT_PATH}">Try again</a></p>`,
+        ),
+        400,
+      );
+    }
     const asked = await requestDeletion(deps.storage, me.personId, deps.now(), {
       suppress: form.suppress === "1",
+      copies: copies.data,
     });
     const day = deletionDay(asked.eraseAfter);
     // From the configured origin, never the Host header (auth.ts explains why).
@@ -375,9 +417,18 @@ ${button("now", "Delete it now")}`,
     if (form.do !== "now") return c.html(linkGonePage(c), 400);
     const deleted = await deleteNow(deps.storage, token.data, {
       now: deps.now(),
-      revokeCalendars: options.revokeCalendars,
+      calendars: options.calendars,
     });
-    if (!deleted) return c.html(linkGonePage(c), 400);
+    if (deleted === "gone") return c.html(linkGonePage(c), 400);
+    if (deleted === "removing") {
+      return c.html(
+        page(
+          c,
+          "Account being deleted",
+          html`<h1>Your account is being deleted</h1><p>WhenDoWe is removing its events from your Google calendar first. Your account is deleted once they're gone, in a minute or two.</p><p><a href="/">Home</a></p>`,
+        ),
+      );
+    }
     return c.html(
       page(
         c,

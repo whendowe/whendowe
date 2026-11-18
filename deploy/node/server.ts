@@ -19,7 +19,7 @@ import { eraseDue } from "../../src/privacy/erasure.js";
 import { retentionPass } from "../../src/privacy/purge.js";
 import { isRetentionMinute } from "../../src/privacy/retention.js";
 import { connectionsToTick, runTick, tickFailureLog, tickLog } from "../../src/reconcile/tick.js";
-import { calendarRevoker, createApp, heldRunners, reconnectMailer } from "../../src/web/app.js";
+import { calendarGrants, createApp, heldRunners, reconnectMailer } from "../../src/web/app.js";
 import type { AuthDeps } from "../../src/web/routes/auth.js";
 import type { OAuthRouteDeps } from "../../src/web/routes/oauth.js";
 import { buildOAuthDeps, pushTickPorts, tokenCipherFor } from "../../src/web/routes/oauth-deps.js";
@@ -93,7 +93,7 @@ const app = createApp({ auth, oauth });
 // process is the single writer for every connection, as a Durable Object is on Workers.
 // Passes never overlap: the next is scheduled when this one is done.
 const PASS_INTERVAL_MS = 60_000;
-const revokeCalendars = calendarRevoker(oauth);
+const calendars = calendarGrants(oauth);
 const runners = heldRunners(auth);
 const mailReconnects = reconnectMailer(auth);
 const tickPorts =
@@ -121,7 +121,7 @@ async function purgePass(): Promise<void> {
     // rc46: actions held their minute, first — someone is waiting on them.
     const ran = await runDueHeld(storage, runners, at);
     if (ran > 0) console.log(JSON.stringify({ reason: "held_ran", count: ran }));
-    const erased = await eraseDue(storage, { now: at, revokeCalendars });
+    const erased = await eraseDue(storage, { now: at, calendars });
     if (erased > 0) console.log(JSON.stringify({ reason: "accounts_erased", count: erased }));
     if (isRetentionMinute(at)) {
       const r = await retentionPass(storage, at);
