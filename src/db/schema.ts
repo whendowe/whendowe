@@ -769,6 +769,8 @@ export const mailSuppression = sqliteTable(
     scope: text("scope").notNull(),
     scopeId: text("scope_id").notNull().default(""),
     createdAt: text("created_at").notNull(),
+    // rc51: "Stop emails — {name} can send me the link". Changes only what that person reads.
+    prefersLinks: integer("prefers_links").notNull().default(0),
   },
   (t) => [
     primaryKey({ columns: [t.addressHash, t.scope, t.scopeId] }),

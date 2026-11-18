@@ -330,6 +330,13 @@
       "when": 1795034386141,
       "tag": "0046_mail_trail",
       "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "6",
+      "when": 1795038287404,
+      "tag": "0047_prefers_links",
+      "breakpoints": true
     }
   ]
 }

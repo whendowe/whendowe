@@ -31,6 +31,7 @@ import {
   type OptOutLink,
   type OptOutView,
   optOutsOf,
+  pairWarning,
   peekOptOut,
   suppress,
   undoOptOut,
@@ -189,6 +190,22 @@ function optOutGonePage(c: Context<AppEnv>) {
     html`<h1>This link has expired</h1>
 <p>Each email has its own link, and it works for 90 days. If these emails keep coming, the newest one has a link that works.</p>`,
   );
+}
+
+/**
+ * Which of this link's own opt-outs — its sender, its group — the address has made, to start
+ * again (rc51). Never "everyone": that one took the link with it (rc24).
+ */
+async function stoppedFrom(
+  storage: StoragePort,
+  link: OptOutLink,
+): Promise<ReadonlySet<"all" | "group" | "person">> {
+  const made = (await optOutsOf(storage, link.email)).filter(
+    (o) =>
+      (o.scope === "person" && o.scopeId === link.senderId) ||
+      (o.scope === "group" && o.scopeId === link.groupId),
+  );
+  return new Set(made.map((o) => o.scope));
 }
 
 /**
@@ -451,15 +468,44 @@ ${button("now", "Delete it now")}`,
   <input type="hidden" name="do" value="${action}" />
   <p><button type="submit">${label}</button></p>
 </form>`;
+    const stopped = await stoppedFrom(deps.storage, link);
+    const pair = await pairWarning(deps.storage, link.email, link.senderId);
+    const offered = [
+      names.sender !== null && !stopped.has("person")
+        ? button("person", `Stop emails from ${names.sender}`)
+        : "",
+      names.sender !== null && pair.sender
+        ? button("links", `Stop emails — ${names.sender} can send me the link`)
+        : "",
+      names.group !== null && !stopped.has("group")
+        ? button("group", `Stop emails through “${names.group}”`)
+        : "",
+      button("all", "Stop emails from anyone on WhenDoWe"),
+    ];
     return c.html(
       page(
         c,
         "Stop these emails",
         html`<h1>Stop emails to ${link.email}</h1>
 <p class="muted">Sign-in links you ask for yourself still arrive: none of these stop you signing in.</p>
-${names.sender === null ? "" : button("person", `Stop emails from ${names.sender}`)}
-${names.group === null ? "" : button("group", `Stop emails through “${names.group}”`)}
-${button("all", "Stop emails from anyone on WhenDoWe")}
+${
+  stopped.size === 0
+    ? ""
+    : html`<h2>You've stopped these emails</h2>
+${stopped.has("person") && names.sender !== null ? button("again-person", `Start emails from ${names.sender} again`) : ""}
+${stopped.has("group") && names.group !== null ? button("again-group", `Start emails through “${names.group}” again`) : ""}
+`
+}
+${
+  pair.warn
+    ? html`<p class="attn">${
+        pair.sender && names.sender !== null
+          ? `${names.sender.charAt(0).toUpperCase()}${names.sender.slice(1)} will see in the history of a verified plan you share with only them that you stopped these emails, and when.`
+          : "In a verified plan with only one other person, they'll see in its history that you stopped these emails, and when."
+      }</p>`
+    : ""
+}
+${offered}
 ${
   link.neverSignedIn
     ? html`<h2>Or delete everything</h2>
@@ -480,6 +526,27 @@ ${button("delete", "Delete everything about this address")}`
     if (link === null) return c.html(optOutGonePage(c), 400);
     const done = (what: string) => c.html(page(c, "Done", html`<h1>Done</h1><p>${what}</p>`));
     // The scope comes from the link, never the form: a link stops only what it came with.
+    if (form.do === "links" && link.senderId !== null) {
+      // Offered only where the sender is the other person in a verified plan of two (rc51).
+      if (!(await pairWarning(deps.storage, link.email, link.senderId)).sender)
+        return c.html(optOutGonePage(c), 400);
+      await suppress(deps.storage, link.email, { kind: "person", id: link.senderId }, now, {
+        prefersLinks: true,
+      });
+      return done(
+        "You won't get email from that person any more. They'll see that you asked for the link instead.",
+      );
+    }
+    // Starting them again (rc51): only what this link could have stopped. Stopping
+    // everyone took this link with it (rc24), so that one starts again on the account page.
+    if (form.do === "again-person" && link.senderId !== null) {
+      await undoOptOut(deps.storage, link.email, "person", link.senderId, now);
+      return done("Emails from that person will reach you again.");
+    }
+    if (form.do === "again-group" && link.groupId !== null) {
+      await undoOptOut(deps.storage, link.email, "group", link.groupId, now);
+      return done("Emails through that group will reach you again.");
+    }
     if (form.do === "person" && link.senderId !== null) {
       await suppress(deps.storage, link.email, { kind: "person", id: link.senderId }, now);
       return done("You won't get email from that person any more.");
