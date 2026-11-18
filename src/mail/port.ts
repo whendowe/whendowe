@@ -30,7 +30,22 @@ export type MailCause =
       readonly groupId: string | null;
       /** "dm invited you to “Thursday Table”": the footer's "You got this because …". */
       readonly why: string;
+      /**
+       * The event or thread it is about (rc51), so that one an opt-out drops is recorded in
+       * a verified event or thread of two. Left out for mail about no event or thread.
+       */
+      readonly about?: MailAbout;
     };
+
+/** What an email someone else caused is about, and what it is (DESIGN §10 rc51). */
+export interface MailAbout {
+  readonly kind: "event" | "thread";
+  readonly id: string;
+  readonly what: UnsentWhat;
+}
+
+/** The emails a verified plan of two records when they don't go out (rc51). */
+export type UnsentWhat = "answer_link" | "vote_link" | "request" | "result";
 
 export interface MailPort {
   send(message: MailMessage): Promise<void>;

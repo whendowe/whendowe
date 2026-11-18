@@ -92,7 +92,13 @@ import {
   whenText,
   whoText,
 } from "../../plans/weeks.js";
-import { isSuppressed } from "../../privacy/suppression.js";
+import {
+  isSuppressed,
+  type MailTrailEntry,
+  mailTrailOf,
+  mailTrailText,
+  recordUnsentMail,
+} from "../../privacy/suppression.js";
 import {
   cappedText,
   copiedLink,
@@ -188,6 +194,8 @@ interface View {
   readonly unsent: readonly UnsentThreadReceipt[];
   /** rc42: what everyone has been asked to agree to. */
   readonly requests: readonly ThreadRequest[];
+  /** rc51: in a verified thread of two, mail that stopped and started again. */
+  readonly trail: readonly MailTrailEntry[];
   /** rc43: whether the viewer may turn verifying on. */
   readonly mayVerify: boolean;
   /** rc43: whether the viewer sees history older than 90 days, and the moment it's counted from. */
@@ -216,6 +224,7 @@ async function load(deps: PlanRouteDeps, access: ThreadAccess, me: SignedIn): Pr
     notes: await listNotes(deps.storage, access),
     unsent: await listUnsentThreadReceipts(deps.storage, access),
     requests: await listThreadRequests(deps.storage, access, deps.now()),
+    trail: await mailTrailOf(deps.storage, { kind: "thread", id: access.thread.id }),
     mayVerify: await mayVerify(deps, access.personId),
     longHistory: await mayLongHistory(deps, access.personId),
     now: deps.now(),
@@ -583,6 +592,8 @@ function history(v: View): Html {
       at: u.at,
       text: `No receipt went to ${v.nameOf(u.personId)} for their answer: ${UNSENT_REASON[u.reason]}.`,
     });
+  // rc51: mail that stopped and started again, and what then didn't go out.
+  for (const t of v.trail) entries.push({ at: t.at, text: mailTrailText(t, v.nameOf(t.personId)) });
   // rc42: each step of asking everyone to agree.
   for (const r of v.requests) {
     entries.push({
@@ -2273,6 +2284,13 @@ export function voteLinksRunner(deps: PlanRouteDeps): HeldRunner {
           groupId: access.thread.groupId,
         })
       ) {
+        // rc51: as the seam would have, a verified plan of two records it.
+        await recordUnsentMail(deps.storage, {
+          to: link.email,
+          senderId: access.personId,
+          about: { kind: "thread", id: access.thread.id, what: "vote_link" },
+          now,
+        });
         await revokeUndeliveredVoteLink(deps.storage, link);
         optedOut += 1;
         continue;

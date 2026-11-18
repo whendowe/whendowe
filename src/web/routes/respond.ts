@@ -62,7 +62,7 @@ import {
 } from "../../plans/vote-link.js";
 import { dayLabel, spanText, whenText } from "../../plans/weeks.js";
 import { retainLabel } from "../../privacy/retention.js";
-import { isSuppressed } from "../../privacy/suppression.js";
+import { isSuppressed, recordUnsentMail } from "../../privacy/suppression.js";
 import {
   type Html,
   html,
@@ -1097,6 +1097,7 @@ export async function sendThreadRequestLink(
       senderId: input.access.personId,
       groupId: input.access.thread.groupId,
       why: `${input.from} asked everyone in a plan you're in to agree`,
+      about: { kind: "thread", id: input.access.thread.id, what: "request" },
     },
     text: [
       `${input.from} asks everyone in "${name}" to agree to stop verifying answers there.`,
@@ -1138,6 +1139,7 @@ export async function sendRequestLink(
       senderId: access.participation.personId,
       groupId: access.event.groupId,
       why: `${from} asked everyone on an event you're on to agree`,
+      about: { kind: "event", id: access.event.id, what: "request" },
     },
     text: [
       `${from} asks everyone on ${on} to agree to ${requestWhat(input.kind, input.retainDays)}.`,
@@ -1279,6 +1281,7 @@ export async function sendResponseLink(
       senderId: access.participation.personId,
       groupId: access.event.groupId,
       why: `${from} added this address to an event on WhenDoWe`,
+      about: { kind: "event", id: access.event.id, what: "answer_link" },
     },
     text: [
       ask,
@@ -1329,7 +1332,7 @@ export interface ResultMailed {
  * as the page would only ask them to sign in. A reached cap stops the rest. Never throws.
  */
 export async function sendResultMail(
-  deps: Pick<RespondRouteDeps, "storage" | "mail" | "publicBaseUrl">,
+  deps: Pick<RespondRouteDeps, "storage" | "mail" | "publicBaseUrl" | "now">,
   access: ThreadAccess,
   input: { readonly planId: string; readonly how: "chose" | "agreed" },
 ): Promise<ResultMailed> {
@@ -1371,6 +1374,13 @@ export async function sendResultMail(
         groupId: access.thread.groupId,
       })
     ) {
+      // rc51: as the seam would have, a verified plan of two records it.
+      await recordUnsentMail(deps.storage, {
+        to: first.email,
+        senderId: access.personId,
+        about: { kind: "thread", id: access.thread.id, what: "result" },
+        now: deps.now(),
+      });
       optedOut += 1;
       continue;
     }
@@ -1410,6 +1420,7 @@ export async function sendResultMail(
           senderId: access.personId,
           groupId: access.thread.groupId,
           why: `${decider} decided a plan you are in on WhenDoWe`,
+          about: { kind: "thread", id: access.thread.id, what: "result" },
         },
         text: [
           lead,
@@ -1458,6 +1469,7 @@ export async function sendVoteLink(
       senderId: access.personId,
       groupId: access.thread.groupId,
       why: `${from} added this address to a plan on WhenDoWe`,
+      about: { kind: "thread", id: access.thread.id, what: "vote_link" },
     },
     text: [
       one === null

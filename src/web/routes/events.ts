@@ -95,6 +95,7 @@ import {
   type ThreadSummary,
 } from "../../plans/thread.js";
 import { RETAIN_CHOICES, retainDaysSchema } from "../../privacy/retention.js";
+import { mailTrailOf, mailTrailText } from "../../privacy/suppression.js";
 import {
   formatRRule,
   parseRRule,
@@ -1292,6 +1293,11 @@ async function eventPage(
     ? await listParticipantChanges(deps.storage, access)
     : [];
   const unsent = see("participants") ? await listUnsentReceipts(deps.storage, access) : [];
+  // rc51: in a verified event of two, mail that stopped and started again, to everyone on it.
+  const trail = see("participants")
+    ? await mailTrailOf(deps.storage, { kind: "event", id: event.id })
+    : [];
+  const nameOf = new Map(people.map((p) => [p.personId, p.shown.name]));
   const requests = await listVerifiedRequests(deps.storage, access, deps.now());
   // One attributed trail, newest first (DESIGN rc15): edits and people changes together.
   const history = [
@@ -1302,6 +1308,10 @@ async function eventPage(
       entry: html`<span class="muted">${u.at.slice(0, 16).replace("T", " ")}</span> · No receipt went to ${who(u.shown)} for their answer: ${UNSENT_WHY[u.reason]}`,
     })),
     ...requestHistory(requests),
+    ...trail.map((t) => ({
+      at: t.at,
+      entry: html`<span class="muted">${t.at.slice(0, 16).replace("T", " ")}</span> · ${mailTrailText(t, nameOf.get(t.personId) ?? "Someone who has left")}`,
+    })),
     ...peopleChanges.map((h) => ({
       at: h.at,
       entry: html`<span class="muted">${h.at.slice(0, 16).replace("T", " ")}</span> · ${

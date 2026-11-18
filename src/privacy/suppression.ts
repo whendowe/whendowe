@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { z } from "zod";
-import type { StoragePort } from "../db/port.js";
-import type { MailMessage, MailPort } from "../mail/port.js";
+import type { SqlStatement, StoragePort } from "../db/port.js";
+import { uuidv7 } from "../ids.js";
+import type { MailAbout, MailMessage, MailPort, UnsentWhat } from "../mail/port.js";
 import { hashToken, issueToken } from "../people/tokens.js";
 import { eraseAccount } from "./erasure.js";
 
@@ -64,7 +65,17 @@ export function suppressingMailPort(
       if (message.to.endsWith(".invalid")) return;
       const cause = message.cause;
       if (cause.kind === "self") return inner.send(message);
-      if (await isSuppressed(storage, message.to, cause)) return;
+      if (await isSuppressed(storage, message.to, cause)) {
+        // rc51: dropped, still without an error; a verified plan of two records it.
+        if (cause.about !== undefined)
+          await recordUnsentMail(storage, {
+            to: message.to,
+            senderId: cause.senderId,
+            about: cause.about,
+            now: options.now(),
+          });
+        return;
+      }
       const now = options.now();
       const issued = await issueToken();
       await storage.batch([
@@ -147,12 +158,15 @@ export async function suppress(
   now: string,
 ): Promise<void> {
   const id = scope.kind === "all" ? "" : scope.id;
+  const before = await suppressionsOn(storage, email);
+  const after = [...before, { scope: scope.kind, scope_id: id }];
   await storage.batch([
     {
       sql: `INSERT INTO mail_suppression (address_hash, scope, scope_id, created_at)
             VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING`,
       params: [await addressHash(email), scope.kind, id, now],
     },
+    ...(await trailStatements(storage, email, before, after, now)),
     ...(scope.kind === "all"
       ? [{ sql: "DELETE FROM opt_out_token WHERE email = ?", params: [email] }]
       : []),
@@ -229,17 +243,249 @@ export async function optOutsOf(storage: StoragePort, email: string): Promise<Op
   });
 }
 
-/** Undo one opt-out on this address: only ever its own, since the caller passes its email. */
+/**
+ * Undo one opt-out on this address: only ever its own, since the caller passes its email.
+ * In a verified plan of two, getting the other's email again is recorded (rc51).
+ */
 export async function undoOptOut(
   storage: StoragePort,
   email: string,
   scope: string,
   scopeId: string,
+  now: string,
 ): Promise<void> {
+  const before = await suppressionsOn(storage, email);
+  const after = before.filter((r) => r.scope !== scope || r.scope_id !== scopeId);
   await storage.batch([
     {
       sql: "DELETE FROM mail_suppression WHERE address_hash = ? AND scope = ? AND scope_id = ?",
       params: [await addressHash(email), scope, scopeId],
     },
+    ...(await trailStatements(storage, email, before, after, now)),
   ]);
+}
+
+// --- Said in a verified plan of two (DESIGN §10 *Mail that stops*, rc51) -----------------
+//
+// Everywhere else an opt-out stays silent. In a verified event or thread with exactly two
+// people, the history records when one of them stops the other's email or takes it back, and
+// each email of the other's that then doesn't go out — never which opt-out it was.
+
+const suppressionRowSchema = z.object({ scope: z.string(), scope_id: z.string() });
+type SuppressionRow = z.infer<typeof suppressionRowSchema>;
+
+async function suppressionsOn(storage: StoragePort, email: string): Promise<SuppressionRow[]> {
+  const rows = await storage.query({
+    sql: "SELECT scope, scope_id FROM mail_suppression WHERE address_hash = ?",
+    params: [await addressHash(email)],
+  });
+  return rows.map((r) => suppressionRowSchema.parse(r));
+}
+
+/** The test the mail wrapper makes (`isSuppressed`), over rows already read. */
+function covers(
+  rows: readonly SuppressionRow[],
+  from: { readonly senderId: string; readonly groupId: string | null },
+): boolean {
+  return rows.some(
+    (r) =>
+      r.scope === "all" ||
+      (r.scope === "person" && r.scope_id === from.senderId) ||
+      (r.scope === "group" && from.groupId !== null && r.scope_id === from.groupId),
+  );
+}
+
+/** Counted as people: neither a guest (rc25) nor erased (rc21). */
+const COUNTED = "xp.guest_at IS NULL AND xp.erased_at IS NULL";
+
+const pairRowSchema = z.object({
+  kind: z.enum(["event", "thread"]),
+  id: z.string(),
+  group_id: z.string().nullable(),
+  me_id: z.string(),
+  other_id: z.string(),
+});
+
+/** The verified events and threads of exactly two this address is one of, with the other. */
+async function pairsOf(storage: StoragePort, email: string) {
+  const rows = await storage.query({
+    sql: `SELECT 'event' AS kind, e.id, e.group_id, me.person_id AS me_id, o.person_id AS other_id
+          FROM person mp
+            JOIN event_participation me ON me.person_id = mp.id
+            JOIN canonical_event e ON e.id = me.canonical_event_id AND e.verified_at IS NOT NULL
+            JOIN event_participation o
+              ON o.canonical_event_id = e.id AND o.person_id <> me.person_id
+            JOIN person xp ON xp.id = o.person_id AND ${COUNTED}
+          WHERE mp.email = ?
+            AND (SELECT COUNT(*) FROM event_participation x JOIN person xp ON xp.id = x.person_id
+                 WHERE x.canonical_event_id = e.id AND ${COUNTED}) = 2
+          UNION ALL
+          SELECT 'thread', t.id, t.group_id, me.person_id, o.person_id
+          FROM person mp
+            JOIN plan_thread_member me ON me.person_id = mp.id
+            JOIN plan_thread t ON t.id = me.thread_id AND t.verified_at IS NOT NULL
+            JOIN plan_thread_member o ON o.thread_id = t.id AND o.person_id <> me.person_id
+            JOIN person xp ON xp.id = o.person_id AND ${COUNTED}
+          WHERE mp.email = ?
+            AND (SELECT COUNT(*) FROM plan_thread_member x JOIN person xp ON xp.id = x.person_id
+                 WHERE x.thread_id = t.id AND ${COUNTED}) = 2`,
+    params: [email, email],
+  });
+  return rows.map((r) => pairRowSchema.parse(r));
+}
+
+/**
+ * What changing this address's opt-outs from `before` to `after` records: in each verified
+ * plan of two it is on, whether the other's email now stops or starts again. Only changes —
+ * a second opt-out covering the same mail adds nothing.
+ */
+async function trailStatements(
+  storage: StoragePort,
+  email: string,
+  before: readonly SuppressionRow[],
+  after: readonly SuppressionRow[],
+  now: string,
+): Promise<SqlStatement[]> {
+  const statements: SqlStatement[] = [];
+  for (const pair of await pairsOf(storage, email)) {
+    const from = { senderId: pair.other_id, groupId: pair.group_id };
+    const was = covers(before, from);
+    const is = covers(after, from);
+    if (was === is) continue;
+    statements.push({
+      sql:
+        pair.kind === "event"
+          ? `INSERT INTO mail_trail (id, canonical_event_id, person_id, kind, created_at)
+             VALUES (?, ?, ?, ?, ?)`
+          : `INSERT INTO mail_trail (id, thread_id, person_id, kind, created_at)
+             VALUES (?, ?, ?, ?, ?)`,
+      params: [uuidv7(), pair.id, pair.me_id, is ? "stopped" : "again", now],
+    });
+  }
+  return statements;
+}
+
+/**
+ * Record an email an opt-out dropped, if what it is about is a verified plan of exactly two
+ * people, the address and its sender. Anywhere else it writes nothing, so the opt-out stays
+ * silent. Mail to oneself (a receipt) is `receipt_unsent`'s, never this.
+ */
+export async function recordUnsentMail(
+  storage: StoragePort,
+  input: {
+    readonly to: string;
+    readonly senderId: string;
+    readonly about: MailAbout;
+    readonly now: string;
+  },
+): Promise<void> {
+  const { to, senderId, about, now } = input;
+  // In the order the placeholders appear: the row, then what it is about, then who.
+  const params = [uuidv7(), about.what, senderId, now, about.id, to, senderId, senderId];
+  await storage.batch([
+    about.kind === "event"
+      ? {
+          sql: `INSERT INTO mail_trail
+                  (id, canonical_event_id, person_id, kind, what, caused_by, created_at)
+                SELECT ?, e.id, p.id, 'unsent', ?, ?, ?
+                FROM person p JOIN canonical_event e ON e.id = ? AND e.verified_at IS NOT NULL
+                WHERE p.email = ? AND p.id <> ?
+                  AND EXISTS (SELECT 1 FROM event_participation a
+                              WHERE a.canonical_event_id = e.id AND a.person_id = p.id)
+                  AND EXISTS (SELECT 1 FROM event_participation b
+                              WHERE b.canonical_event_id = e.id AND b.person_id = ?)
+                  AND (SELECT COUNT(*) FROM event_participation x
+                         JOIN person xp ON xp.id = x.person_id
+                       WHERE x.canonical_event_id = e.id AND ${COUNTED}) = 2`,
+          params,
+        }
+      : {
+          sql: `INSERT INTO mail_trail
+                  (id, thread_id, person_id, kind, what, caused_by, created_at)
+                SELECT ?, t.id, p.id, 'unsent', ?, ?, ?
+                FROM person p JOIN plan_thread t ON t.id = ? AND t.verified_at IS NOT NULL
+                WHERE p.email = ? AND p.id <> ?
+                  AND EXISTS (SELECT 1 FROM plan_thread_member a
+                              WHERE a.thread_id = t.id AND a.person_id = p.id)
+                  AND EXISTS (SELECT 1 FROM plan_thread_member b
+                              WHERE b.thread_id = t.id AND b.person_id = ?)
+                  AND (SELECT COUNT(*) FROM plan_thread_member x
+                         JOIN person xp ON xp.id = x.person_id
+                       WHERE x.thread_id = t.id AND ${COUNTED}) = 2`,
+          params,
+        },
+  ]);
+}
+
+const unsentWhatSchema = z.enum(["answer_link", "vote_link", "request", "result"]);
+
+/** One entry of the trail, for a history page. */
+export type MailTrailEntry = {
+  readonly personId: string;
+  readonly at: string;
+} & (
+  | { readonly kind: "stopped" | "stopped_links" | "again" }
+  | { readonly kind: "unsent"; readonly what: UnsentWhat }
+);
+
+// The table's CHECK keeps `what` exactly on the unsent rows.
+const trailRowSchema = z.discriminatedUnion("kind", [
+  z.object({
+    person_id: z.string(),
+    kind: z.enum(["stopped", "stopped_links", "again"]),
+    created_at: z.string(),
+  }),
+  z.object({
+    person_id: z.string(),
+    kind: z.literal("unsent"),
+    what: unsentWhatSchema,
+    created_at: z.string(),
+  }),
+]);
+
+/** The trail of one event or thread, oldest first. The caller has checked who may see it. */
+export async function mailTrailOf(
+  storage: StoragePort,
+  of: { readonly kind: "event" | "thread"; readonly id: string },
+): Promise<MailTrailEntry[]> {
+  const rows = await storage.query({
+    sql:
+      of.kind === "event"
+        ? `SELECT person_id, kind, what, created_at FROM mail_trail
+           WHERE canonical_event_id = ? ORDER BY created_at, id`
+        : `SELECT person_id, kind, what, created_at FROM mail_trail
+           WHERE thread_id = ? ORDER BY created_at, id`,
+    params: [of.id],
+  });
+  return rows.map((row) => {
+    const r = trailRowSchema.parse(row);
+    return r.kind === "unsent"
+      ? { personId: r.person_id, at: r.created_at, kind: r.kind, what: r.what }
+      : { personId: r.person_id, at: r.created_at, kind: r.kind };
+  });
+}
+
+const UNSENT_WHAT: Record<UnsentWhat, string> = {
+  answer_link: "An answer link",
+  vote_link: "A vote link",
+  request: "A request to agree",
+  result: "The email saying what was agreed",
+};
+
+/** How the history says it, with the person named as the page names them. Never the scope. */
+export function mailTrailText(entry: MailTrailEntry, name: string): string {
+  switch (entry.kind) {
+    case "stopped":
+      return `${name} stopped emails about this.`;
+    case "stopped_links":
+      return `${name} stopped emails about this, and asked for the link instead.`;
+    case "again":
+      return `${name} gets emails about this again.`;
+    case "unsent":
+      return `${UNSENT_WHAT[entry.what]} to ${name} didn't go out: ${name} isn't receiving email about this.`;
+    default: {
+      const never: never = entry;
+      return never;
+    }
+  }
 }
