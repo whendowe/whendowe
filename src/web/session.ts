@@ -3,6 +3,7 @@ import type { Context, MiddlewareHandler } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import type { StoragePort } from "../db/port.js";
 import { type Account, addAccount, canAdd, cookieTokens, cookieValue } from "../people/accounts.js";
+import { type CapabilityConfig, EVERYTHING, hasCapability } from "../people/capability.js";
 import {
   createSession,
   resolveAccounts,
@@ -41,8 +42,11 @@ export interface SignedIn {
   readonly csrfToken: string;
   /** When this account will be deleted, if its deletion was asked for (§10 rc22). */
   readonly deletesAt: string | null;
-  /** Google stopped accepting this account's calendar connection (rc40). */
-  readonly googleLost: boolean;
+  /**
+   * Google stopped accepting this account's calendar connection (rc40): the banner offers to
+   * reconnect, or without `calendar_sync` (rc43) shows the button disabled. Null otherwise.
+   */
+  readonly reconnect: "offer" | "unavailable" | null;
 }
 
 export interface AppEnv {
@@ -58,13 +62,15 @@ export interface SessionDeps {
   readonly storage: StoragePort;
   readonly now: () => string;
   readonly secureCookies: boolean;
+  /** Who may reconnect Google Calendar (rc43); everyone when unset. */
+  readonly capabilities?: CapabilityConfig;
 }
 
 export function sessionMiddleware(deps: SessionDeps): MiddlewareHandler<AppEnv> {
   return async (c, next) => {
     const tokens = cookieTokens(getCookie(c, SESSION_COOKIE));
     const accounts = await resolveAccounts(deps.storage, tokens, { now: deps.now() });
-    await setAccounts(c, accounts);
+    await setAccounts(c, accounts, deps);
     await next();
     // A token that is unknown, expired or revoked leaves the cookie on this response,
     // unless the route has already written the cookie itself. A cookie rewrite only:
@@ -76,9 +82,25 @@ export function sessionMiddleware(deps: SessionDeps): MiddlewareHandler<AppEnv> 
   };
 }
 
-async function setAccounts(c: Context<AppEnv>, accounts: readonly Account[]): Promise<void> {
+async function setAccounts(
+  c: Context<AppEnv>,
+  accounts: readonly Account[],
+  deps: Pick<SessionDeps, "storage" | "capabilities">,
+): Promise<void> {
   c.set("accounts", accounts);
   const active = accounts[0];
+  // Read only when Google is lost, which is rare: every other page costs nothing more.
+  const reconnect =
+    active === undefined || !active.googleLost
+      ? null
+      : (await hasCapability(
+            deps.storage,
+            deps.capabilities ?? EVERYTHING,
+            active.personId,
+            "calendar_sync",
+          ))
+        ? "offer"
+        : "unavailable";
   c.set(
     "signedIn",
     active === undefined
@@ -90,7 +112,7 @@ async function setAccounts(c: Context<AppEnv>, accounts: readonly Account[]): Pr
           sessionToken: active.token,
           csrfToken: await csrfTokenFor(active.token),
           deletesAt: active.deletesAt,
-          googleLost: active.googleLost,
+          reconnect,
         },
   );
 }
@@ -142,7 +164,7 @@ export async function signInAs(
   if (added.kind === "full") throw new Error("checked above: there was room");
   if (added.replaced !== null) await revokeSession(deps.storage, added.replaced.token, now);
   writeAccountsCookie(c, added.accounts, deps.secureCookies);
-  await setAccounts(c, added.accounts);
+  await setAccounts(c, added.accounts, deps);
   return true;
 }
 
@@ -234,7 +256,7 @@ export function viewerOf(c: Context<AppEnv>): Viewer | null {
       .map((a) => ({ sessionId: a.sessionId, email: a.email })),
     canAddAccount: canAdd(c.get("accounts"), null),
     deletesAt: active.deletesAt,
-    googleLost: active.googleLost,
+    reconnect: active.reconnect,
     // The path only: a query string may carry a token (§13), and never goes in a form.
     here: c.req.path,
   };

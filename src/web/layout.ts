@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { type MailCapReachedError, SenderShareReachedError } from "../mail/capped.js";
+import { UNAVAILABLE } from "../people/capability.js";
 import { RETAIN_CHOICES, retainLabel } from "../privacy/retention.js";
 import { META_CONTENT_SECURITY_POLICY } from "./csp.js";
 import { escapeHtml } from "./escape.js";
@@ -58,8 +59,8 @@ export interface Viewer {
   readonly here: string;
   /** When the active account will be deleted, if its deletion was asked for (§10 rc22). */
   readonly deletesAt: string | null;
-  /** Google stopped accepting the active account's calendar connection (rc40). */
-  readonly googleLost: boolean;
+  /** Google stopped accepting the active account's calendar connection (rc40); see SignedIn. */
+  readonly reconnect: "offer" | "unavailable" | null;
 }
 
 // Paths the header posts to (src/web/routes/auth.ts registers them).
@@ -115,16 +116,22 @@ export function deletionNotice(v: Pick<Viewer, "csrfToken">, deletesAt: string):
 </form>`;
 }
 
+const GOOGLE_LOST = html`<strong>Google stopped accepting WhenDoWe's access, so your events aren't reaching your Google calendar.</strong>`;
+
 /**
  * "Reconnect Google Calendar" on every page while Google refuses this account's grant (rc40):
- * the button starts the connect flow, which reconnects to the same calendar.
+ * the button starts the connect flow, which reconnects to the same calendar. Without
+ * `calendar_sync` (rc43) it shows disabled, with its one line.
  */
-export function reconnectNotice(v: Pick<Viewer, "csrfToken">): Html {
-  return html`<form class="wd-deleting error" method="post" action="${GOOGLE_CONNECT_PATH}">
+export function reconnectNotice(v: Pick<Viewer, "csrfToken">, may: "offer" | "unavailable"): Html {
+  return may === "offer"
+    ? html`<form class="wd-deleting error" method="post" action="${GOOGLE_CONNECT_PATH}">
   <input type="hidden" name="csrf" value="${v.csrfToken}" />
-  <strong>Google stopped accepting WhenDoWe's access, so your events aren't reaching your Google calendar.</strong>
+  ${GOOGLE_LOST}
   <button type="submit">Reconnect Google Calendar</button>
-</form>`;
+</form>`
+    : html`<p class="wd-deleting error">${GOOGLE_LOST}
+  <button type="button" disabled>Reconnect Google Calendar</button> <span class="muted">${UNAVAILABLE.calendar_sync}</span></p>`;
 }
 
 /** A one-button form that makes another account on this browser active, then comes back here. */
@@ -377,7 +384,7 @@ ${
 <body>
 ${viewer === null ? "" : accountHeader(viewer)}
 ${viewer === null || viewer.deletesAt === null ? "" : deletionNotice(viewer, viewer.deletesAt)}
-${viewer?.googleLost === true ? reconnectNotice(viewer) : ""}
+${viewer === null || viewer.reconnect === null ? "" : reconnectNotice(viewer, viewer.reconnect)}
 ${body}
 </body>
 </html>`.value;
