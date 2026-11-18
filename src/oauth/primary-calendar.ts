@@ -240,7 +240,7 @@ export async function deleteCalendar(
   throw new HttpError(response.status, "calendar delete", "not deleted");
 }
 
-export const GOOGLE_FREEBUSY_URL ="https://www.googleapis.com/calendar/v3/freeBusy";
+export const GOOGLE_FREEBUSY_URL = "https://www.googleapis.com/calendar/v3/freeBusy";
 
 const freeBusySchema = z.object({
   calendars: z
