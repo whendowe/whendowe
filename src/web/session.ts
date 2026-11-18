@@ -41,6 +41,8 @@ export interface SignedIn {
   readonly csrfToken: string;
   /** When this account will be deleted, if its deletion was asked for (§10 rc22). */
   readonly deletesAt: string | null;
+  /** Google stopped accepting this account's calendar connection (rc40). */
+  readonly googleLost: boolean;
 }
 
 export interface AppEnv {
@@ -88,6 +90,7 @@ async function setAccounts(c: Context<AppEnv>, accounts: readonly Account[]): Pr
           sessionToken: active.token,
           csrfToken: await csrfTokenFor(active.token),
           deletesAt: active.deletesAt,
+          googleLost: active.googleLost,
         },
   );
 }
@@ -231,6 +234,7 @@ export function viewerOf(c: Context<AppEnv>): Viewer | null {
       .map((a) => ({ sessionId: a.sessionId, email: a.email })),
     canAddAccount: canAdd(c.get("accounts"), null),
     deletesAt: active.deletesAt,
+    googleLost: active.googleLost,
     // The path only: a query string may carry a token (§13), and never goes in a form.
     here: c.req.path,
   };

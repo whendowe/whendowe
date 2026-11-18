@@ -4,6 +4,7 @@ import type { TokenCipher } from "../crypto/tokens.js";
 import { type SqlStatement, type StoragePort, stmt } from "../db/port.js";
 import type { ProjectionRow } from "../db/schema.js";
 import { feedEntries } from "../feeds/feed.js";
+import type { MailPort } from "../mail/port.js";
 import { HttpError } from "../oauth/http.js";
 import { type CapabilityConfig, hasCapability } from "../people/capability.js";
 import type { CalendarProvider } from "../providers/base.js";
@@ -507,4 +508,62 @@ function upsertProjection(
     r.createdAt,
     r.updatedAt,
   );
+}
+
+/** At most this many reconnect emails a minute; the rest go the next minutes. */
+export const RECONNECT_MAIL_MAX = 20;
+
+const lostSchema = z.object({ id: z.string(), account_email: z.string(), email: z.string() });
+
+/**
+ * "One email says so" (§10 rc40): each connection Google stopped answering for is mailed once,
+ * to its owner's own address — mail they caused, like a sign-in link, so it takes nothing from
+ * anyone's share (rc37) and no opt-out stops it. Recorded on success only, so a failed send — the
+ * cap reached, the provider down — is tried again the next minute, and doesn't stop the others.
+ * With nothing to send it reads only (§16). Counts only: an address is never logged (§14).
+ */
+export async function reconnectMailPass(
+  storage: StoragePort,
+  mail: MailPort,
+  input: { readonly now: string; readonly publicBaseUrl: string },
+): Promise<{ readonly sent: number; readonly failed: number }> {
+  const rows = await storage.query(
+    stmt(
+      `SELECT c.id, c.account_email, p.email FROM calendar_connection c
+         JOIN person p ON p.id = c.owner_id
+        WHERE c.status = 'auth_error' AND c.reconnect_mailed_at IS NULL
+        ORDER BY c.id LIMIT ?`,
+      RECONNECT_MAIL_MAX,
+    ),
+  );
+  let sent = 0;
+  let failed = 0;
+  for (const r of rows) {
+    const lost = lostSchema.parse(r);
+    try {
+      await mail.send({
+        to: lost.email,
+        subject: "Reconnect Google Calendar",
+        text: `Google stopped accepting WhenDoWe's access to ${lost.account_email}, so your WhenDoWe events aren't reaching that calendar any more.
+
+Reconnect it: ${input.publicBaseUrl}/
+
+If you removed WhenDoWe's access on purpose, you can disconnect it there instead.`,
+        cause: { kind: "self" },
+      });
+    } catch {
+      failed += 1;
+      continue;
+    }
+    await storage.batch([
+      stmt(
+        `UPDATE calendar_connection SET reconnect_mailed_at = ?
+          WHERE id = ? AND status = 'auth_error'`,
+        input.now,
+        lost.id,
+      ),
+    ]);
+    sent += 1;
+  }
+  return { sent, failed };
 }

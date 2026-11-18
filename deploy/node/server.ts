@@ -19,7 +19,7 @@ import { eraseDue } from "../../src/privacy/erasure.js";
 import { retentionPass } from "../../src/privacy/purge.js";
 import { isRetentionMinute } from "../../src/privacy/retention.js";
 import { connectionsToTick, runTick, tickFailureLog, tickLog } from "../../src/reconcile/tick.js";
-import { calendarRevoker, createApp, heldRunners } from "../../src/web/app.js";
+import { calendarRevoker, createApp, heldRunners, reconnectMailer } from "../../src/web/app.js";
 import type { AuthDeps } from "../../src/web/routes/auth.js";
 import type { OAuthRouteDeps } from "../../src/web/routes/oauth.js";
 import { buildOAuthDeps, pushTickPorts, tokenCipherFor } from "../../src/web/routes/oauth-deps.js";
@@ -95,6 +95,7 @@ const app = createApp({ auth, oauth });
 const PASS_INTERVAL_MS = 60_000;
 const revokeCalendars = calendarRevoker(oauth);
 const runners = heldRunners(auth);
+const mailReconnects = reconnectMailer(auth);
 const tickPorts =
   oauth === undefined
     ? undefined
@@ -128,6 +129,10 @@ async function purgePass(): Promise<void> {
         console.log(JSON.stringify({ reason: "retention_purged", ...r }));
     }
     await pushTicks(at);
+    // rc40: one email to each account Google stopped answering for, the tick above included.
+    const mailed = await mailReconnects(at);
+    if (mailed.sent + mailed.failed > 0)
+      console.log(JSON.stringify({ reason: "reconnect_mailed", ...mailed }));
   } catch (error) {
     console.error(JSON.stringify({ reason: "purge_pass_failed", error: String(error) }));
   }

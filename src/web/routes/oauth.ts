@@ -54,7 +54,7 @@ import {
 } from "../../people/capability.js";
 import { findOrCreatePerson, findPersonByEmail, normalizeEmail } from "../../people/person.js";
 import { copiesOn, forgetConnection } from "../../reconcile/tick.js";
-import { type Html, html } from "../layout.js";
+import { GOOGLE_CONNECT_PATH, type Html, html } from "../layout.js";
 import {
   type AppEnv,
   page,
@@ -82,7 +82,7 @@ import { type AuthDeps, GOOGLE_SIGN_IN_PATH, SIGN_IN_PATH, tooManyAccounts } fro
 // the purpose, and the callback dispatches on it. The redirect URI registered on the
 // OAuth client therefore stays one URI.
 
-export const CONNECT_PATH = "/oauth/google/connect";
+export const CONNECT_PATH = GOOGLE_CONNECT_PATH;
 export const CALLBACK_PATH = "/oauth/google/callback";
 /** Where a first connection's calendar is chosen (rc40); under /oauth, where its cookie is. */
 export const CHOOSE_PATH = "/oauth/google/calendar";
@@ -884,6 +884,7 @@ ${EMAIL_LINK}`,
     const timestamp = deps.now();
     // Upsert, not insert: (owner_id, provider, calendar_id) is UNIQUE (§10), and
     // reconnecting after an auth_error must refresh the grant rather than collide.
+    // Reconnecting clears the reconnect email's mark, so a later loss mails again (rc40).
     // sync_token and made_by_us are deliberately left alone — an existing cursor stays
     // valid, a dead one is recovered by the 410 GONE full-resync path (§12), and who
     // made the calendar doesn't change by reconnecting.
@@ -900,6 +901,7 @@ ${EMAIL_LINK}`,
            refresh_token_enc = excluded.refresh_token_enc,
            token_expiry = excluded.token_expiry,
            status = 'active',
+           reconnect_mailed_at = NULL,
            updated_at = excluded.updated_at`,
         newId(),
         personId,

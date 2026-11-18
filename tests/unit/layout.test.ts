@@ -45,6 +45,7 @@ const viewer = {
   canAddAccount: true,
   here: "/groups",
   deletesAt: null,
+  googleLost: false,
 };
 
 it("a signed-in page names its account in the header, with the menu (rc18)", () => {

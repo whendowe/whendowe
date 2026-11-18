@@ -58,6 +58,8 @@ export interface Viewer {
   readonly here: string;
   /** When the active account will be deleted, if its deletion was asked for (§10 rc22). */
   readonly deletesAt: string | null;
+  /** Google stopped accepting the active account's calendar connection (rc40). */
+  readonly googleLost: boolean;
 }
 
 // Paths the header posts to (src/web/routes/auth.ts registers them).
@@ -75,6 +77,8 @@ export const GROUPS_PATH = "/groups";
 export const EVENTS_PATH = "/events";
 /** Busy times for the picker (src/web/routes/feeds.ts, rc41); here for the same reason. */
 export const BUSY_PATH = "/busy";
+/** Starting a Google connection (src/web/routes/oauth.ts); here for the reconnect banner. */
+export const GOOGLE_CONNECT_PATH = "/oauth/google/connect";
 
 /** The day an account goes, as pages and mail say it: "2101-11-08 10:00 UTC". */
 export function deletionDay(iso: string): string {
@@ -108,6 +112,18 @@ export function deletionNotice(v: Pick<Viewer, "csrfToken">, deletesAt: string):
   <input type="hidden" name="csrf" value="${v.csrfToken}" />
   <strong>This account will be deleted on ${deletionDay(deletesAt)}.</strong>
   <button type="submit">Keep my account</button>
+</form>`;
+}
+
+/**
+ * "Reconnect Google Calendar" on every page while Google refuses this account's grant (rc40):
+ * the button starts the connect flow, which reconnects to the same calendar.
+ */
+export function reconnectNotice(v: Pick<Viewer, "csrfToken">): Html {
+  return html`<form class="wd-deleting error" method="post" action="${GOOGLE_CONNECT_PATH}">
+  <input type="hidden" name="csrf" value="${v.csrfToken}" />
+  <strong>Google stopped accepting WhenDoWe's access, so your events aren't reaching your Google calendar.</strong>
+  <button type="submit">Reconnect Google Calendar</button>
 </form>`;
 }
 
@@ -361,6 +377,7 @@ ${
 <body>
 ${viewer === null ? "" : accountHeader(viewer)}
 ${viewer === null || viewer.deletesAt === null ? "" : deletionNotice(viewer, viewer.deletesAt)}
+${viewer?.googleLost === true ? reconnectNotice(viewer) : ""}
 ${body}
 </body>
 </html>`.value;
