@@ -340,24 +340,27 @@ export function runErasureContract(makePort: () => Promise<StoragePort>): void {
       const port = await makePort();
       const f = await busyTom(port, "link");
       const revoked: string[] = [];
-      const revokeCalendars = (cs: readonly { id: string }[]) => {
-        for (const c of cs) revoked.push(c.id);
-        return Promise.resolve();
+      const calendars = {
+        revoke: (cs: readonly { id: string }[]) => {
+          for (const c of cs) revoked.push(c.id);
+          return Promise.resolve();
+        },
+        deleteMadeCalendar: () => Promise.resolve(false),
       };
 
       const kept = await requestDeletion(port, f.tom.id, T0);
       expect(await keepAccount(port, kept.token)).toBe(true);
       expect(await keepAccount(port, kept.token)).toBe(false); // single-use
       expect(await pendingDeletion(port, f.tom.id)).toBeNull();
-      expect(await deleteNow(port, kept.token, { now: T1, revokeCalendars })).toBe(false);
+      expect(await deleteNow(port, kept.token, { now: T1, calendars })).toBe("gone");
       expect(await eraseDue(port, { now: "2999-01-01T00:00:00.000Z" })).toBe(0);
       expect(await everywhere(port)).toContain(f.tom.email);
 
       const now = await requestDeletion(port, f.tom.id, T0);
-      expect(await deleteNow(port, now.token, { now: T1, revokeCalendars })).toBe(true);
+      expect(await deleteNow(port, now.token, { now: T1, calendars })).toBe("erased");
       expect(await everywhere(port)).not.toContain(f.tom.id);
       // Clicked twice: the link is gone with the account.
-      expect(await deleteNow(port, now.token, { now: T1, revokeCalendars })).toBe(false);
+      expect(await deleteNow(port, now.token, { now: T1, calendars })).toBe("gone");
     });
 
     it("the pass writes nothing when nothing is due (§16), and erases a bounded number per run", async () => {
