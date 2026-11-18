@@ -37,6 +37,9 @@ export const calendarConnection = sqliteTable(
     madeByUs: integer("made_by_us").notNull().default(0),
     // auth_error: revoked/expired grant (§12); worker skips its projections until reconnected.
     status: text("status").notNull().default("active"),
+    // rc40: when the one "Reconnect Google Calendar" email went for this auth_error; cleared
+    // on reconnecting, so the next loss mails again.
+    reconnectMailedAt: text("reconnect_mailed_at"),
     createdAt: text("created_at").notNull(),
     updatedAt: text("updated_at").notNull(),
   },

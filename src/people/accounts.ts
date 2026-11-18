@@ -21,6 +21,8 @@ export interface Account {
   readonly email: string;
   /** When this account will be deleted, if its deletion was asked for (§10 rc22). */
   readonly deletesAt: string | null;
+  /** Google stopped accepting this account's calendar connection (rc40): every page says so. */
+  readonly googleLost: boolean;
 }
 
 /**

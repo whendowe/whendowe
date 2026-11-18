@@ -7,6 +7,7 @@ import { UNAVAILABLE } from "../people/capability.js";
 import { findPersonById } from "../people/person.js";
 import type { RevokeCalendars } from "../privacy/erasure.js";
 import { suppressingMailPort } from "../privacy/suppression.js";
+import { reconnectMailPass } from "../reconcile/tick.js";
 import { securityHeaders } from "./csp.js";
 import { ACCOUNT_PATH, html } from "./layout.js";
 import { registerAccountRoutes } from "./routes/account.js";
@@ -85,6 +86,18 @@ export function heldRunners(auth: AuthDeps): HeldRunners {
   return { vote_links: voteLinksRunner(deps), choose: chooseRunner(deps) };
 }
 
+/**
+ * The minute's "Reconnect Google Calendar" emails (rc40), for both targets' pass: through the
+ * same mail as every other send, so the cap and the opt-out wrapper see it.
+ */
+export function reconnectMailer(
+  auth: AuthDeps,
+): (at: string) => Promise<{ readonly sent: number; readonly failed: number }> {
+  const deps = withOptOut(auth);
+  return (at) =>
+    reconnectMailPass(deps.storage, deps.mail, { now: at, publicBaseUrl: deps.publicBaseUrl });
+}
+
 export function createApp(options: AppOptions = {}): Hono<AppEnv> {
   const app = new Hono<AppEnv>();
   const { oauth } = options;
@@ -147,7 +160,8 @@ export function createApp(options: AppOptions = {}): Hono<AppEnv> {
           : connection.status === "disconnected"
             ? html`<p class="muted">Disconnecting Google Calendar: removing your WhenDoWe events from it.</p>`
             : connection.status === "auth_error"
-              ? html`<p>Google stopped accepting WhenDoWe's access to <strong>${connection.accountEmail}</strong>.</p>${button("Reconnect Google Calendar")}<p class="muted">${disconnect}</p>`
+              ? // The Reconnect button is the banner every page shows (rc40), this one included.
+                html`<p>Google stopped accepting WhenDoWe's access to <strong>${connection.accountEmail}</strong>. ${disconnect}</p>`
               : allowed
                 ? html`<p class="muted">Google Calendar connected: ${connection.accountEmail}. <a href="${BUSY_PATH}">Choose whose busy times count</a> · ${disconnect}</p>`
                 : html`<p class="muted">Google Calendar connected: ${connection.accountEmail}. The events already there stay, and are no longer updated. ${UNAVAILABLE.calendar_sync} ${disconnect}</p>`;

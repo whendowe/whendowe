@@ -89,6 +89,7 @@ const accountRowSchema = z.object({
   email: z.string(),
   token_hash: z.string(),
   erase_after: z.string().nullable(),
+  google_lost: z.number(),
 });
 
 /**
@@ -108,7 +109,10 @@ export async function resolveAccounts(
   const slots = Array.from({ length: MAX_ACCOUNTS }, (_, i) => hashes[i] ?? "");
   const rows = await storage.query({
     sql: `SELECT session.id, session.person_id, person.email, session.token_hash,
-                 account_deletion.erase_after
+                 account_deletion.erase_after,
+                 EXISTS (SELECT 1 FROM calendar_connection c
+                          WHERE c.owner_id = session.person_id AND c.provider = 'google'
+                            AND c.status = 'auth_error') AS google_lost
           FROM session JOIN person ON person.id = session.person_id
           LEFT JOIN account_deletion ON account_deletion.person_id = session.person_id
           WHERE session.token_hash IN (${SLOTS})
@@ -130,6 +134,7 @@ export async function resolveAccounts(
         personId: row.person_id,
         email: row.email,
         deletesAt: row.erase_after,
+        googleLost: row.google_lost === 1,
       });
     }
   });

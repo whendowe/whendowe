@@ -45,6 +45,7 @@ const viewer = {
   canAddAccount: true,
   here: "/groups",
   deletesAt: null,
+  reconnect: null,
 };
 
 it("a signed-in page names its account in the header, with the menu (rc18)", () => {
@@ -75,4 +76,12 @@ it("the header escapes what it shows, and a lone account has no 'all' button", (
 
 it("a page with no account signed in has no header", () => {
   expect(renderPage("x", html`<p>x</p>`, null)).not.toContain('class="wd-top"');
+});
+
+it("with nothing to warn of, nothing stands between the header and the page (rc22, rc40)", () => {
+  const page = renderPage("Groups", html`<h1>Groups</h1>`, viewer);
+  expect(page).toMatch(/>\n\n\n<h1>Groups<\/h1>/);
+  expect(renderPage("Groups", html`<h1>Groups</h1>`, { ...viewer, reconnect: "offer" })).toMatch(
+    /<\/form>\n<h1>Groups<\/h1>/,
+  );
 });
