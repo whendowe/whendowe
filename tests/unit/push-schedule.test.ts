@@ -5,7 +5,7 @@ import { expect, it } from "vitest";
 import { createTokenCipher } from "../../src/crypto/tokens.js";
 import { sqliteStoragePort } from "../../src/db/sqlite.js";
 import type { HttpRequestInit, HttpResponse } from "../../src/oauth/http.js";
-import { GOOGLE_TOKEN_ENDPOINT } from "../../src/oauth/token-exchange.js";
+import { GOOGLE_REVOKE_ENDPOINT, GOOGLE_TOKEN_ENDPOINT } from "../../src/oauth/token-exchange.js";
 import { EVERYTHING } from "../../src/people/capability.js";
 import { tickFailureLog, tickLog } from "../../src/reconcile/tick.js";
 import type { OAuthRouteDeps } from "../../src/web/routes/oauth.js";
@@ -50,6 +50,7 @@ it("a quiet or skipped tick logs nothing; anything else is counted by reason", (
     outcome: "auth_error",
   });
   expect(tickLog("c1", { outcome: "deferred", decisions: [] })?.outcome).toBe("deferred");
+  expect(tickLog("c1", { outcome: "disconnected", decisions: [] })?.outcome).toBe("disconnected");
 });
 
 it("a tick that threw logs the error's kind, never its message", () => {
@@ -119,6 +120,12 @@ it("the ports refresh with this client's credentials, call this calendar, and li
     /^https:\/\/www\.googleapis\.com\/calendar\/v3\/calendars\/cal%40group\/events\?/,
   );
   expect(lookup?.init.headers.authorization).toBe("Bearer token-1");
+
+  // Disconnecting gives the grant back (rc40): the refresh token, to Google's revoke endpoint.
+  expect(await ports.revoke("refresh-1")).toBe(true);
+  const revoke = calls[2];
+  expect(revoke?.url).toBe(GOOGLE_REVOKE_ENDPOINT);
+  expect(revoke?.init.body).toBe("token=refresh-1");
 });
 
 it("without a client's own fetch or ids, the defaults are used", async () => {

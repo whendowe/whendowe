@@ -121,6 +121,7 @@ async function setUp(
   let n = 0;
   const google = new Recording(); // one across ticks, so Google's state persists
   const refreshes: string[] = [];
+  const revoked: string[] = [];
   let refusal: Error | null = null;
   const ports: TickPorts = {
     storage: port,
@@ -138,6 +139,10 @@ async function setUp(
       return google;
     },
     eventUrl: url,
+    revoke: (refreshToken) => {
+      revoked.push(refreshToken);
+      return Promise.resolve(true);
+    },
     now: () => clock,
     newNonce: () => `nonce-${++n}`,
     newId: () => `${tag}-id-${++n}`,
@@ -168,6 +173,7 @@ async function setUp(
     access,
     rows,
     refreshes,
+    revoked,
     refuse: (e: Error | null) => {
       refusal = e;
     },
@@ -475,22 +481,139 @@ export function runPushTickContract(makePort: () => Promise<StoragePort>): void 
       expect((await t.tick()).decisions).toHaveLength(1);
     });
 
-    it("an unknown or inactive connection is skipped", async () => {
+    it("an unknown connection, or one Google stopped accepting, is skipped", async () => {
       const t = await setUp(makePort, "inactive");
       expect(await runTick(t.ports, "no-such-connection")).toEqual({
         outcome: "skipped",
         decisions: [],
       });
       await t.inner.batch([
-        stmt("UPDATE calendar_connection SET status = 'disconnected' WHERE id = ?", t.connectionId),
+        stmt("UPDATE calendar_connection SET status = 'auth_error' WHERE id = ?", t.connectionId),
       ]);
       await t.event();
       expect(await t.tick()).toEqual({ outcome: "skipped", decisions: [] });
     });
   });
 
+  describe("disconnecting with Remove them (rc40, MVP-4 G3 part 2)", () => {
+    const leave = (t: { inner: StoragePort; connectionId: string }) =>
+      t.inner.batch([
+        stmt("UPDATE calendar_connection SET status = 'disconnected' WHERE id = ?", t.connectionId),
+      ]);
+    const left = async (t: { inner: StoragePort }) =>
+      (await t.inner.query(stmt("SELECT id FROM calendar_connection"))).map((r) => String(r.id));
+
+    it("removes every copy, then gives the grant back and forgets the connection", async () => {
+      const t = await setUp(makePort, "leave");
+      const dinner = await t.event();
+      const lunch = await t.event({ ...DINNER, title: "Lunch" });
+      await t.tick();
+      expect(t.google().fake.pendingNotifications()).toBe(2);
+      await leave(t);
+      const result = await t.tick();
+      expect(result.outcome).toBe("disconnected");
+      expect(result.decisions.map((d) => [d.eventId, d.reason]).sort()).toEqual(
+        [
+          [dinner, "removed"],
+          [lunch, "removed"],
+        ].sort(),
+      );
+      expect(await t.google().fake.findByMetadata(dinner)).toBeNull();
+      expect(await t.google().fake.findByMetadata(lunch)).toBeNull();
+      expect(t.revoked).toEqual(["refresh-1"]);
+      expect(await left(t)).not.toContain(t.connectionId);
+      expect(await t.rows()).toEqual([]);
+      // The events themselves are untouched: only Ann's copies went.
+      expect((await t.access(dinner)).event.status).toBe("scheduled");
+      expect(await t.tick()).toEqual({ outcome: "skipped", decisions: [] });
+    });
+
+    it("works without calendar_sync, and with nothing to remove it finishes at once", async () => {
+      const t = await setUp(makePort, "leave-gated", {
+        capabilities: { default: "granted", operators: [] },
+      });
+      await t.event(); // never pushed: Ann can't sync
+      await leave(t);
+      expect(await t.tick()).toEqual({ outcome: "disconnected", decisions: [] });
+      expect(t.google().calls).toBe(0);
+      expect(t.revoked).toEqual(["refresh-1"]);
+      expect(await left(t)).not.toContain(t.connectionId);
+    });
+
+    it("a copy deleted in Google, or kept out, doesn't hold it up", async () => {
+      const t = await setUp(makePort, "leave-gone");
+      const dinner = await t.event();
+      const lunch = await t.event({ ...DINNER, title: "Lunch" });
+      await t.tick();
+      const gone = await t.google().fake.findByMetadata(dinner);
+      await t.google().fake.delete(gone?.id ?? "");
+      await editEvent(t.inner, await t.access(dinner), {
+        fields: { ...DINNER, title: "Dinner at 7" },
+        actorId: t.ann,
+        now: T0,
+      });
+      await t.tick(); // finds Dinner gone in Google
+      await setInCalendar(t.inner, await t.access(lunch), false);
+      await t.tick(); // removes Lunch
+      await leave(t);
+      const result = await t.tick();
+      expect(result.outcome).toBe("disconnected");
+      expect(result.decisions.map((d) => d.eventId)).not.toContain(dinner);
+      expect(result.decisions.map((d) => d.eventId)).not.toContain(lunch);
+      expect(await left(t)).not.toContain(t.connectionId);
+    });
+
+    it("a removal that fails waits its retry; the connection stays until none is left", async () => {
+      const t = await setUp(makePort, "leave-retry");
+      const dinner = await t.event();
+      await t.tick();
+      await leave(t);
+      t.google().fail = new HttpError(503, "calendar event delete", "backendError");
+      const first = await t.tick();
+      expect(first).toEqual({
+        outcome: "done",
+        decisions: [{ eventId: dinner, reason: "retry_scheduled" }],
+      });
+      expect(t.revoked).toEqual([]);
+      expect(await left(t)).toContain(t.connectionId);
+      t.google().fail = null;
+      expect(await t.tick()).toEqual({ outcome: "done", decisions: [] }); // waiting its retry
+      t.setClock(at(RETRY_FIRST_MS));
+      expect((await t.tick()).outcome).toBe("disconnected");
+      expect(await t.google().fake.findByMetadata(dinner)).toBeNull();
+      expect(await left(t)).not.toContain(t.connectionId);
+    });
+
+    it.each([
+      "refresh",
+      "calendar",
+    ])("a grant Google refused by then (%s): the copies stay and the connection goes", async (where) => {
+      const t = await setUp(makePort, `leave-refused-${where}`);
+      const dinner = await t.event();
+      await t.tick();
+      await leave(t);
+      if (where === "refresh") {
+        await t.inner.batch([
+          stmt(
+            "UPDATE calendar_connection SET token_expiry = ? WHERE id = ?",
+            at(0),
+            t.connectionId,
+          ),
+        ]);
+        t.refuse(new HttpError(400, "token refresh", "invalid_grant"));
+      } else {
+        t.google().fail = new HttpError(401, "calendar event delete", "authError");
+      }
+      expect(await t.tick()).toEqual({ outcome: "disconnected", decisions: [] });
+      expect(await t.google().fake.findByMetadata(dinner)).not.toBeNull();
+      expect(t.revoked).toEqual([]); // nothing to give back
+      expect(await left(t)).not.toContain(t.connectionId);
+      expect(await t.rows()).toEqual([]);
+    });
+  });
+
   describe("choosing whom to tick (MVP-4 G2, part 4)", () => {
-    it("every active connection, in id order, read without writing; past the most, a share a minute in turn", async () => {
+    it("every active or disconnecting connection, in id order, read without writing; past the most, a share a minute in turn", async () => {
       const t = await setUp(makePort, "fan-a");
       // One connection per account: each of these is someone else's.
       for (const [id, status] of [
@@ -517,11 +640,15 @@ export function runPushTickContract(makePort: () => Promise<StoragePort>): void 
       }
       const active = (
         await t.inner.query(
-          stmt("SELECT id FROM calendar_connection WHERE status = 'active' ORDER BY id"),
+          stmt(
+            "SELECT id FROM calendar_connection WHERE status IN ('active', 'disconnected') ORDER BY id",
+          ),
         )
       ).map((r) => String(r.id));
-      expect(active).toEqual(expect.arrayContaining(["conn-fan-a", "conn-fan-c", "conn-fan-e"]));
-      expect(active).not.toContain("conn-fan-b");
+      // A disconnected connection is ticked until its copies are removed (rc40, G3 part 2).
+      expect(active).toEqual(
+        expect.arrayContaining(["conn-fan-a", "conn-fan-b", "conn-fan-c", "conn-fan-e"]),
+      );
       expect(active).not.toContain("conn-fan-d");
 
       const writes = t.port.writes;

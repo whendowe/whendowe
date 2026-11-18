@@ -33,6 +33,8 @@ export interface TickPorts {
   ) => CalendarProvider;
   /** An event's page, the link each copy carries (rc40). */
   readonly eventUrl: (eventId: string) => string;
+  /** Give a grant back to Google (§10 rc40 disconnect): token-exchange's revokeGoogleGrant. */
+  readonly revoke: (refreshToken: string) => Promise<boolean>;
   readonly now: () => string; // injected clock (ISO-8601 UTC) — simulator-friendly (§9)
   readonly newNonce: () => string; // injected nonce generator
   readonly newId: () => string;
@@ -44,8 +46,10 @@ export interface TickResult {
    * `skipped`: no active connection, or no `calendar_sync` (rc43) — nothing touched.
    * `auth_error`: Google refused the grant; the connection is marked and the tick stopped.
    * `deferred`: a token couldn't be had for another reason; the next tick tries again.
+   * `disconnected`: a connection being disconnected has no copies left, or Google refused its
+   * grant; the grant is given back and the connection deleted (rc40).
    */
-  readonly outcome: "done" | "skipped" | "auth_error" | "deferred";
+  readonly outcome: "done" | "skipped" | "auth_error" | "deferred" | "disconnected";
   readonly decisions: readonly { readonly eventId: string; readonly reason: LogReason }[];
 }
 
@@ -67,7 +71,10 @@ export async function connectionsToTick(
 ): Promise<string[]> {
   const ids = (
     await storage.query(
-      stmt("SELECT id FROM calendar_connection WHERE status = 'active' ORDER BY id"),
+      // A disconnected connection is ticked until its copies are removed (rc40).
+      stmt(
+        "SELECT id FROM calendar_connection WHERE status IN ('active', 'disconnected') ORDER BY id",
+      ),
     )
   ).map((r) => idRowSchema.parse(r).id);
   if (ids.length <= max) return ids;
@@ -111,6 +118,7 @@ const TOKEN_MARGIN_MS = 60_000;
 
 const connectionSchema = z.object({
   owner_id: z.string(),
+  status: z.enum(["active", "disconnected"]),
   calendar_id: z.string(),
   access_token_enc: z.string(),
   refresh_token_enc: z.string(),
@@ -182,25 +190,33 @@ export async function runTick(ports: TickPorts, connectionId: string): Promise<T
   const { storage } = ports;
   const [row] = await storage.query(
     stmt(
-      `SELECT owner_id, calendar_id, access_token_enc, refresh_token_enc, token_expiry
-         FROM calendar_connection WHERE id = ? AND status = 'active'`,
+      `SELECT owner_id, status, calendar_id, access_token_enc, refresh_token_enc, token_expiry
+         FROM calendar_connection WHERE id = ? AND status IN ('active', 'disconnected')`,
       connectionId,
     ),
   );
   if (row === undefined) return { outcome: "skipped", decisions: [] };
   const conn = connectionSchema.parse(row);
+  // Disconnecting with "Remove them" (rc40): nothing is wanted, so every copy is removed.
+  const leaving = conn.status === "disconnected";
   // Without calendar_sync the copies are left as they are (rc43): losing it deletes nothing.
-  if (!(await hasCapability(storage, ports.capabilities, conn.owner_id, "calendar_sync"))) {
+  // Removing them on disconnecting still works without it.
+  if (
+    !leaving &&
+    !(await hasCapability(storage, ports.capabilities, conn.owner_id, "calendar_sync"))
+  ) {
     return { outcome: "skipped", decisions: [] };
   }
   const now = ports.now();
 
   const wanted = new Map<string, Want>();
-  for (const entry of await feedEntries(
-    storage,
-    { personId: conn.owner_id, groupId: null, ownCalendar: true },
-    { now, eventUrl: ports.eventUrl },
-  )) {
+  for (const entry of leaving
+    ? []
+    : await feedEntries(
+        storage,
+        { personId: conn.owner_id, groupId: null, ownCalendar: true },
+        { now, eventUrl: ports.eventUrl },
+      )) {
     if (entry.status !== "scheduled") continue; // a cancelled entry is a copy to remove
     const fields = projectEntry(entry);
     wanted.set(entry.id, {
@@ -261,6 +277,11 @@ export async function runTick(ports: TickPorts, connectionId: string): Promise<T
       decisions.push({ eventId, reason });
     } catch (error) {
       if (error instanceof AuthLost || (error instanceof HttpError && error.status === 401)) {
+        // Being disconnected, the copies left can't be removed: the connection goes anyway.
+        if (leaving) {
+          await storage.batch(forgetConnection(connectionId));
+          return { outcome: "disconnected", decisions };
+        }
         await storage.batch([
           stmt(
             `UPDATE calendar_connection SET status = 'auth_error', updated_at = ?
@@ -282,7 +303,37 @@ export async function runTick(ports: TickPorts, connectionId: string): Promise<T
       decisions.push({ eventId, reason: "retry_scheduled" });
     }
   }
+  if (leaving && (await copiesOn(storage, connectionId)) === 0) {
+    await ports.revoke(await ports.cipher.decrypt(conn.refresh_token_enc));
+    await storage.batch(forgetConnection(connectionId));
+    return { outcome: "disconnected", decisions };
+  }
   return { outcome: "done", decisions };
+}
+
+/** How many of WhenDoWe's copies a connection has in Google now (rc40: "Also remove the 23"). */
+export async function copiesOn(storage: StoragePort, connectionId: string): Promise<number> {
+  const [row] = await storage.query(
+    stmt(
+      `SELECT COUNT(*) AS n FROM projection
+        WHERE calendar_connection_id = ? AND provider_event_id IS NOT NULL AND state <> 'deleted'`,
+      connectionId,
+    ),
+  );
+  return z.object({ n: z.number() }).parse(row).n;
+}
+
+/**
+ * A connection's rows, deleted (rc40 disconnect): its tokens, its copies' records and its busy
+ * calendars. Kept copies still carry their canonical id in Google, so connecting again adopts
+ * them (§11) without these.
+ */
+export function forgetConnection(connectionId: string): SqlStatement[] {
+  return [
+    stmt("DELETE FROM projection WHERE calendar_connection_id = ?", connectionId),
+    stmt("DELETE FROM busy_calendar WHERE connection_id = ?", connectionId),
+    stmt("DELETE FROM calendar_connection WHERE id = ?", connectionId),
+  ];
 }
 
 /** Carry out one action against Google, then record it. Returns its §14 reason. */

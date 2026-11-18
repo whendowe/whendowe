@@ -3,6 +3,7 @@ import { expect, it } from "vitest";
 import type { FetchLike, HttpRequestInit } from "../../src/oauth/http.js";
 import {
   createCalendar,
+  deleteCalendar,
   fetchFreeBusy,
   fetchPrimaryCalendar,
   findWritableCalendar,
@@ -332,4 +333,19 @@ it("asks nothing for no calendars, and passes a failure on without the token", a
   const failed = fetchFreeBusy(ACCESS_TOKEN, { ...RANGE, ids: ["a@example.com"] }, impl);
   await expect(failed).rejects.toThrow(/free\/busy failed: HTTP 403/);
   await expect(failed).rejects.not.toThrow(ACCESS_TOKEN);
+});
+
+it("deletes a calendar WhenDoWe made by its id; one already gone is deleted; anything else throws", async () => {
+  const ok = fakeFetch(204, "");
+  await deleteCalendar(ACCESS_TOKEN, "made@group.calendar.google.com", ok.impl);
+  expect(ok.calls).toHaveLength(1);
+  expect(ok.calls[0]?.url).toBe(`${GOOGLE_CALENDARS_URL}/made%40group.calendar.google.com`);
+  expect(ok.calls[0]?.init.method).toBe("DELETE");
+  expect(ok.calls[0]?.init.headers.authorization).toBe(`Bearer ${ACCESS_TOKEN}`);
+  for (const gone of [404, 410]) {
+    await deleteCalendar(ACCESS_TOKEN, "made", fakeFetch(gone, "").impl);
+  }
+  await expect(deleteCalendar(ACCESS_TOKEN, "made", fakeFetch(403, "").impl)).rejects.toThrow(
+    "calendar delete failed: HTTP 403 (not deleted)",
+  );
 });
