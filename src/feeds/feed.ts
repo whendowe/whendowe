@@ -23,6 +23,12 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 export interface FeedScope {
   readonly personId: string;
   readonly groupId: string | null;
+  /**
+   * rc40 (G3): leave out what this person asked to keep out of their calendar. True for their
+   * own feeds and their synced Google calendar; false where the event still counts for them
+   * (their busy times) or the view is someone else's (a group calendar link they keep).
+   */
+  readonly ownCalendar?: boolean;
 }
 
 /** A resolved link: whose feed, and the group's name for a group's feed. */
@@ -149,8 +155,15 @@ export async function feedEntries(
           WHERE ep.visibility <> 'HIDDEN'
             AND (e.status = 'scheduled' OR (e.status = 'cancelled' AND e.updated_at >= ?))
             AND (? IS NULL OR e.group_id = ?)
+            AND (? = 0 OR ep.in_calendar = 1)
           ORDER BY e.start_local, e.id`,
-    params: [scope.personId, since, scope.groupId, scope.groupId],
+    params: [
+      scope.personId,
+      since,
+      scope.groupId,
+      scope.groupId,
+      scope.ownCalendar === true ? 1 : 0,
+    ],
   });
   return rows.map((raw) => {
     const r = entryRowSchema.parse(raw);

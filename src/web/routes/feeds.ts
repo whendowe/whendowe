@@ -313,10 +313,15 @@ export function registerFeedRoutes(app: Hono<AppEnv>, deps: FeedRouteDeps): void
     const body = serializeFeed({
       name: feed.groupName === null ? "WhenDoWe" : `WhenDoWe · ${feed.groupName}`,
       host: base.host,
-      entries: await feedEntries(deps.storage, feed, {
-        now,
-        eventUrl: (id) => new URL(`${EVENTS_PATH}/${id}`, base).toString(),
-      }),
+      // Your own feed: without what you asked to keep out of your calendar (rc40).
+      entries: await feedEntries(
+        deps.storage,
+        { ...feed, ownCalendar: true },
+        {
+          now,
+          eventUrl: (id) => new URL(`${EVENTS_PATH}/${id}`, base).toString(),
+        },
+      ),
       now,
     });
     return serveCalendar(c, body);

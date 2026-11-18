@@ -381,6 +381,9 @@ export const eventParticipation = sqliteTable(
     }),
     // rc42: "only my own email answers for me" here; a person sets it, never an organizer.
     ownAnswersOnly: integer("own_answers_only").notNull().default(0),
+    // rc40 (MVP-4 G3): 0 = "Don't put this in my calendar" — out of this person's feeds and
+    // synced calendar; changes nothing for anyone else. A person sets it, never an organizer.
+    inCalendar: integer("in_calendar").notNull().default(1),
   },
   (t) => [
     unique("event_participation_uq").on(t.canonicalEventId, t.personId),

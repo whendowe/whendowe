@@ -10,6 +10,7 @@ import {
   findEventForParticipant,
   setCancelled,
 } from "../../src/events/event.js";
+import { setInCalendar } from "../../src/events/participation.js";
 import { HttpError } from "../../src/oauth/http.js";
 import { type CapabilityConfig, EVERYTHING, grantCapability } from "../../src/people/capability.js";
 import { findOrCreatePerson } from "../../src/people/person.js";
@@ -245,6 +246,22 @@ export function runPushTickContract(makePort: () => Promise<StoragePort>): void 
       expect(t.port.writes).toBe(writes);
 
       await setCancelled(t.inner, await t.access(dinner), { cancelled: false, now: at(4000) });
+      expect((await t.tick()).decisions).toEqual([{ eventId: dinner, reason: "pushed" }]);
+      expect(await t.google().fake.findByMetadata(dinner)).not.toBeNull();
+    });
+
+    it("an event kept out of your calendar loses its copy; put back, it is pushed again (G3)", async () => {
+      const t = await setUp(makePort, "out");
+      const dinner = await t.event();
+      await t.tick();
+      expect(await t.google().fake.findByMetadata(dinner)).not.toBeNull();
+      await setInCalendar(t.inner, await t.access(dinner), false);
+      expect((await t.tick()).decisions).toEqual([{ eventId: dinner, reason: "removed" }]);
+      expect(await t.google().fake.findByMetadata(dinner)).toBeNull();
+      const writes = t.port.writes;
+      await t.tick();
+      expect(t.port.writes).toBe(writes); // out, it stays out quietly
+      await setInCalendar(t.inner, await t.access(dinner), true);
       expect((await t.tick()).decisions).toEqual([{ eventId: dinner, reason: "pushed" }]);
       expect(await t.google().fake.findByMetadata(dinner)).not.toBeNull();
     });

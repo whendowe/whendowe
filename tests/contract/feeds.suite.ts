@@ -9,7 +9,7 @@ import {
   findEventForParticipant,
   setCancelled,
 } from "../../src/events/event.js";
-import { removeParticipant } from "../../src/events/participation.js";
+import { removeParticipant, setInCalendar } from "../../src/events/participation.js";
 import {
   FEED_CANCELLED_DAYS,
   feedEntries,
@@ -304,6 +304,73 @@ export function runFeedsContract(makePort: () => Promise<StoragePort>): void {
           params: [bob],
         }),
       ).toEqual([]);
+    });
+  });
+
+  describe("not in my calendar (rc40, MVP-4 G3)", () => {
+    it("an event kept out of your calendar leaves your own feeds only, and comes back", async () => {
+      const port = await makePort();
+      const cipher = await createTokenCipher([{ id: 1, material: KEY }], 1);
+      const { ann, group, membership, join } = await table(port, "out");
+      const bob = await join("bob", "FULL");
+      const dinner = await createEvent(port, {
+        creatorId: ann,
+        group: membership,
+        fields: DINNER,
+        now: T0,
+      });
+      // Another of Ann's events, which stays in: only the one she chose goes.
+      const lunch = await createEvent(port, {
+        creatorId: ann,
+        group: null,
+        fields: {
+          ...DINNER,
+          title: "Lunch",
+          startLocal: "2101-11-22T12:00",
+          endLocal: "2101-11-22T13:00",
+        },
+        now: T0,
+      });
+      const own = (personId: string, groupId: string | null = null) =>
+        feedEntries(port, { personId, groupId, ownCalendar: true }, { now: T1, eventUrl: url });
+      const counts = (personId: string) =>
+        feedEntries(port, { personId, groupId: null }, { now: T1, eventUrl: url });
+      const link = await resolveSharedLink(
+        port,
+        (await makeSharedLink(port, cipher, {
+          groupId: group,
+          organizerId: ann,
+          label: "Grandparents",
+          tier: "DETAILS",
+          now: T0,
+        })) ?? "",
+      );
+      if (link === null) throw new Error("link");
+
+      const writes = await port.query({ sql: "SELECT count(*) AS n FROM change_log", params: [] });
+      await setInCalendar(port, await access(port, dinner.id, ann), false);
+      expect((await access(port, dinner.id, ann)).participation.inCalendar).toBe(false);
+      // Out of Ann's own feeds, her personal one and the group's.
+      expect((await own(ann)).map((e) => e.id)).toEqual([lunch.id]);
+      expect(await own(ann, group)).toEqual([]);
+      // Still hers where it counts for her (busy times) or is someone else's view.
+      expect((await counts(ann)).map((e) => e.id)).toEqual([dinner.id, lunch.id]);
+      expect((await sharedEntries(port, link, T1)).map((e) => e.id)).toEqual([dinner.id]);
+      // Nobody else's changes, and it is no edit of the event.
+      expect((await own(bob)).map((e) => e.id)).toEqual([dinner.id]);
+      expect((await access(port, dinner.id, bob)).participation.inCalendar).toBe(true);
+      expect(await port.query({ sql: "SELECT count(*) AS n FROM change_log", params: [] })).toEqual(
+        writes,
+      );
+      // Her export says so.
+      const exported = await exportPerson(port, ann, T1);
+      expect(JSON.stringify(exported)).toContain('"in_your_calendar":false');
+
+      await setInCalendar(port, await access(port, dinner.id, ann), true);
+      expect((await own(ann)).map((e) => e.id)).toEqual([dinner.id, lunch.id]);
+      expect(JSON.stringify(await exportPerson(port, ann, T1))).toContain(
+        '"in_your_calendar":true',
+      );
     });
   });
 

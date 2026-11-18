@@ -43,6 +43,7 @@ import {
   type ParticipantView,
   removeParticipant,
   resolveInvitees,
+  setInCalendar,
   TAKES_PEOPLE,
   UnreachableAddressError,
 } from "../../events/participation.js";
@@ -1359,6 +1360,7 @@ ${retentionSection({
         }
       : null,
 })}
+${inCalendarForm(event.id, participation.inCalendar, csrf)}
 <h2>History</h2>
 <ul>${recent.shown.map((h) => html`<li>${h.entry}</li>`)}</ul>${recent.note}
 <p class="muted"><a href="${EVENTS_PATH}/${event.id}/leave">Leave this event</a>${
@@ -1367,6 +1369,18 @@ ${retentionSection({
         : ""
     }</p>`,
   );
+}
+
+/**
+ * "Don't put this in my calendar", and undoing it (rc40, MVP-4 G3): for you only — it leaves
+ * your calendar feeds and your Google Calendar, and nobody else's.
+ */
+function inCalendarForm(eventId: string, inCalendar: boolean, csrf: string): Html {
+  return html`<form method="post" action="${EVENTS_PATH}/${eventId}/in-calendar"><input type="hidden" name="csrf" value="${csrf}" /><input type="hidden" name="in" value="${inCalendar ? "0" : "1"}" /><p>${
+    inCalendar
+      ? html`<button type="submit">Don't put this in my calendar</button> <span class="muted">Only for you: it leaves your calendar feeds and your Google Calendar. Nobody else's changes.</span>`
+      : html`<strong>Not in your calendar.</strong> <button type="submit">Put it back in my calendar</button>`
+  }</p></form>`;
 }
 
 /** How the event's people see this person: mail names them this way, never by address. */
@@ -2001,6 +2015,21 @@ ${pollForm(`/groups/${membership.group.id}/polls`, csrf, values, error, html`${a
     if (access === null || access.participation.visibility === "HIDDEN")
       return c.html(notFound(c), 404);
     await setOwnAnswersOnly(deps.storage, access, { on: form.on === "1", arrival: SIGNED_IN });
+    return c.redirect(`${EVENTS_PATH}/${access.event.id}`, 303);
+  });
+
+  // rc40 (G3): "Don't put this in my calendar", or put it back — a fact about you only.
+  app.post(`${EVENTS_PATH}/:id/in-calendar`, async (c) => {
+    const me = requireSignedIn(c);
+    if (me instanceof Response) return me;
+    const form = await c.req.parseBody();
+    if (!(await verifyFormCsrf(me, form))) return rejectedPage(c, form);
+    const access = await findEventForParticipant(deps.storage, c.req.param("id"), me.personId);
+    if (access === null || access.participation.visibility === "HIDDEN")
+      return c.html(notFound(c), 404);
+    if (form.in !== "0" && form.in !== "1")
+      return c.html(await eventPage(c, deps, access, me.csrfToken, "Choose one."), 400);
+    await setInCalendar(deps.storage, access, form.in === "1");
     return c.redirect(`${EVENTS_PATH}/${access.event.id}`, 303);
   });
 
