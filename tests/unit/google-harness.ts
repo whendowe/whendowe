@@ -114,20 +114,18 @@ export async function harness(
     now: () => new Date().toISOString(),
     ...(opts.capabilities === undefined ? {} : { capabilities: opts.capabilities }),
   };
-  const app = createApp({
-    auth,
-    oauth: {
-      storage,
-      cipher,
-      clientId: "cid.apps.googleusercontent.com",
-      clientSecret: "client-secret",
-      redirectUri: "http://localhost:8080/oauth/google/callback",
-      now: () => NOW,
-      newId: () => `conn-${++n}`,
-      fetchImpl: google(log, opts),
-      secureCookies: false,
-    },
-  });
+  const oauth = {
+    storage,
+    cipher,
+    clientId: "cid.apps.googleusercontent.com",
+    clientSecret: "client-secret",
+    redirectUri: "http://localhost:8080/oauth/google/callback",
+    now: () => NOW,
+    newId: () => `conn-${++n}`,
+    fetchImpl: google(log, opts),
+    secureCookies: false,
+  };
+  const app = createApp({ auth, oauth });
   const signIn = async (email: string) => {
     await app.request(SIGN_IN_PATH, {
       method: "POST",
@@ -221,6 +219,7 @@ export async function harness(
   return {
     app,
     auth,
+    oauth,
     sent,
     storage,
     log,
