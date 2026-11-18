@@ -9,6 +9,7 @@ import { findPersonByEmail } from "../../src/people/person.js";
 import { suppress } from "../../src/privacy/suppression.js";
 import { createApp } from "../../src/web/app.js";
 import { ACCOUNT_PATH } from "../../src/web/layout.js";
+import { EMAIL_AGAIN_PATH } from "../../src/web/routes/account.js";
 import { CONFIRM_PATH, SIGN_IN_PATH } from "../../src/web/routes/auth.js";
 import { GROUPS_PATH, INVITE_PATH } from "../../src/web/routes/groups.js";
 import { loadMigrationSql } from "../conftest.js";
@@ -2460,4 +2461,45 @@ it("with `verify`: the controls work; taking part in a verified event needs noth
   expect(
     (await h.app.request(`${group}/verified`, post({ csrf: dm.csrf }, dm.cookie))).status,
   ).toBe(303);
+});
+
+it("mail that stops (rc51): a verified event of two says so in its history, to both, never which opt-out", async () => {
+  const h = await harness();
+  const { dm, group } = await setup(h);
+  const ann = await join(h, dm, group, "ann@example.org", "view", "FULL");
+  const event = await createVia(h, dm, group, { ...NIGHT, verified: "on" });
+  const plain = await createVia(h, dm, group, NIGHT);
+  const dmId = (await findPersonByEmail(h.storage, "dm@example.org"))?.id ?? "";
+  const asked = () =>
+    h.sent.filter((m) => m.to === "ann@example.org" && m.subject.startsWith("Are you coming"));
+
+  await suppress(
+    h.storage,
+    "ann@example.org",
+    { kind: "person", id: dmId },
+    new Date().toISOString(),
+  );
+  await sendLinks(h, dm, event);
+  await sendLinks(h, dm, plain);
+  expect(asked()).toHaveLength(0);
+  for (const viewer of [dm, ann]) {
+    const page = await text(h, event, viewer);
+    expect(page).toContain("ann stopped emails about this.");
+    expect(page).toContain(
+      "An answer link to ann didn&#39;t go out: ann isn&#39;t receiving email about this.",
+    );
+  }
+  // Not verified: the opt-out stays silent, as everywhere else (rc24).
+  expect(await text(h, plain, dm)).not.toContain("emails about this");
+
+  // Taking it back from the account page is recorded too.
+  const back = await h.app.request(
+    EMAIL_AGAIN_PATH,
+    post({ csrf: ann.csrf, scope: "person", scope_id: dmId }, ann.cookie),
+  );
+  expect(back.status).toBe(303);
+  expect(await text(h, event, dm)).toContain("ann gets emails about this again.");
+  // Once Ann has left, the lines stay, and say "someone who has left".
+  expect((await act(h, event, ann, "leave")).status).toBe(303);
+  expect(await text(h, event, dm)).toContain("Someone who has left gets emails about this again.");
 });
