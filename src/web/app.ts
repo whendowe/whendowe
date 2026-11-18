@@ -5,7 +5,7 @@ import type { HeldRunners } from "../held.js";
 import { revokeGoogleGrant } from "../oauth/token-exchange.js";
 import { UNAVAILABLE } from "../people/capability.js";
 import { findPersonById } from "../people/person.js";
-import type { RevokeCalendars } from "../privacy/erasure.js";
+import type { CalendarGrants } from "../privacy/erasure.js";
 import { suppressingMailPort } from "../privacy/suppression.js";
 import { reconnectMailPass } from "../reconcile/tick.js";
 import { securityHeaders } from "./csp.js";
@@ -20,6 +20,7 @@ import {
   BUSY_PATH,
   CONNECT_PATH,
   DISCONNECT_PATH,
+  deleteMadeCalendar,
   googleBusySource,
   googleConnectionOf,
   maySync,
@@ -52,17 +53,20 @@ async function nameNudge(auth: AuthDeps, personId: string) {
 }
 
 /**
- * Revoke a person's Google grants before their tokens are deleted (§10 rc21), best
- * effort; undefined on an instance with no Google credentials. Shared by the delete
- * routes and the cron's purge pass.
+ * A person's Google grants, for erasure: revoked before their tokens are deleted (§10 rc21),
+ * best effort, and the calendar WhenDoWe made deleted if asked (rc40); undefined on an
+ * instance with no Google credentials. Shared by the delete routes and the cron's purge pass.
  */
-export function calendarRevoker(oauth: OAuthRouteDeps | undefined): RevokeCalendars | undefined {
+export function calendarGrants(oauth: OAuthRouteDeps | undefined): CalendarGrants | undefined {
   if (oauth === undefined) return undefined;
-  return async (connections) => {
-    for (const conn of connections) {
-      const token = await oauth.cipher.decrypt(conn.refreshTokenEnc);
-      await revokeGoogleGrant(token, oauth.fetchImpl);
-    }
+  return {
+    revoke: async (connections) => {
+      for (const conn of connections) {
+        const token = await oauth.cipher.decrypt(conn.refreshTokenEnc);
+        await revokeGoogleGrant(token, oauth.fetchImpl);
+      }
+    },
+    deleteMadeCalendar: (personId) => deleteMadeCalendar(oauth, personId),
   };
 }
 
@@ -187,7 +191,7 @@ ${connect}`,
 
   if (auth !== undefined) {
     registerAuthRoutes(app, auth, { google: oauth !== undefined });
-    registerAccountRoutes(app, auth, { revokeCalendars: calendarRevoker(oauth) });
+    registerAccountRoutes(app, auth, { calendars: calendarGrants(oauth) });
     registerGroupRoutes(app, auth);
     registerEventRoutes(app, auth);
     registerPlanRoutes(app, auth);
