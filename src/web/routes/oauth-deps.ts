@@ -3,7 +3,7 @@ import { type Config, requireGoogleOAuth } from "../../config.js";
 import { createTokenCipher, type TokenCipher } from "../../crypto/tokens.js";
 import type { StoragePort } from "../../db/port.js";
 import { uuidv7 } from "../../ids.js";
-import { refreshAccessToken } from "../../oauth/token-exchange.js";
+import { refreshAccessToken, revokeGoogleGrant } from "../../oauth/token-exchange.js";
 import type { CapabilityConfig } from "../../people/capability.js";
 import { GoogleCalendarProvider } from "../../providers/google.js";
 import type { TickPorts } from "../../reconcile/tick.js";
@@ -80,6 +80,7 @@ export function pushTickPorts(
         ...(oauth.fetchImpl === undefined ? {} : { fetchImpl: oauth.fetchImpl }),
       }),
     eventUrl: (eventId) => `${input.publicBaseUrl}${EVENTS_PATH}/${eventId}`,
+    revoke: (refreshToken) => revokeGoogleGrant(refreshToken, oauth.fetchImpl),
     now: oauth.now,
     newNonce: () => uuidv7(),
     newId: oauth.newId ?? (() => uuidv7()),

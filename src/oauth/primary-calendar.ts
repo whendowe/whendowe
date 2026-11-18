@@ -222,7 +222,25 @@ export async function createCalendar(
   return created.id;
 }
 
-export const GOOGLE_FREEBUSY_URL = "https://www.googleapis.com/calendar/v3/freeBusy";
+/**
+ * Delete a calendar WhenDoWe made (rc40 disconnect, "Delete the WhenDoWe calendar"), and every
+ * event in it with it. `calendar.app.created` allows this only for calendars the app made. One
+ * already gone is deleted already.
+ */
+export async function deleteCalendar(
+  accessToken: string,
+  calendarId: string,
+  fetchImpl: FetchLike = defaultFetch,
+): Promise<void> {
+  const response = await fetchImpl(`${GOOGLE_CALENDARS_URL}/${encodeURIComponent(calendarId)}`, {
+    method: "DELETE",
+    headers: bearer(accessToken),
+  });
+  if (response.ok || response.status === 404 || response.status === 410) return;
+  throw new HttpError(response.status, "calendar delete", "not deleted");
+}
+
+export const GOOGLE_FREEBUSY_URL ="https://www.googleapis.com/calendar/v3/freeBusy";
 
 const freeBusySchema = z.object({
   calendars: z

@@ -18,6 +18,7 @@ import { GROUPS_PATH, registerGroupRoutes } from "./routes/groups.js";
 import {
   BUSY_PATH,
   CONNECT_PATH,
+  DISCONNECT_PATH,
   googleBusySource,
   googleConnectionOf,
   maySync,
@@ -136,16 +137,20 @@ export function createApp(options: AppOptions = {}): Hono<AppEnv> {
   <button type="submit">${label}</button>
 </form>`
           : html`<p><button type="button" disabled>${label}</button> ${unavailable}</p>`;
+    // A link to a page that asks (rc40); disconnecting works with or without calendar_sync.
+    const disconnect = html`<a href="${DISCONNECT_PATH}">Disconnect</a>`;
     const connect =
       oauth === undefined
         ? html`<p class="muted">Google credentials are not configured on this instance.</p>`
         : connection === null
           ? button("Connect Google Calendar")
-          : connection.status === "auth_error"
-            ? html`<p>Google stopped accepting WhenDoWe's access to <strong>${connection.accountEmail}</strong>.</p>${button("Reconnect Google Calendar")}`
-            : allowed
-              ? html`<p class="muted">Google Calendar connected: ${connection.accountEmail}. <a href="${BUSY_PATH}">Choose whose busy times count</a></p>`
-              : html`<p class="muted">Google Calendar connected: ${connection.accountEmail}. The events already there stay, and are no longer updated. ${UNAVAILABLE.calendar_sync}</p>`;
+          : connection.status === "disconnected"
+            ? html`<p class="muted">Disconnecting Google Calendar: removing your WhenDoWe events from it.</p>`
+            : connection.status === "auth_error"
+              ? html`<p>Google stopped accepting WhenDoWe's access to <strong>${connection.accountEmail}</strong>.</p>${button("Reconnect Google Calendar")}<p class="muted">${disconnect}</p>`
+              : allowed
+                ? html`<p class="muted">Google Calendar connected: ${connection.accountEmail}. <a href="${BUSY_PATH}">Choose whose busy times count</a> · ${disconnect}</p>`
+                : html`<p class="muted">Google Calendar connected: ${connection.accountEmail}. The events already there stay, and are no longer updated. ${UNAVAILABLE.calendar_sync} ${disconnect}</p>`;
     return c.html(
       page(
         c,

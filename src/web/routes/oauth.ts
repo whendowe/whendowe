@@ -32,6 +32,7 @@ import {
   type BusyChoice,
   type CalendarChoice,
   createCalendar,
+  deleteCalendar,
   fetchFreeBusy,
   fetchPrimaryCalendar,
   findWritableCalendar,
@@ -52,6 +53,7 @@ import {
   UNAVAILABLE,
 } from "../../people/capability.js";
 import { findOrCreatePerson, findPersonByEmail, normalizeEmail } from "../../people/person.js";
+import { copiesOn, forgetConnection } from "../../reconcile/tick.js";
 import { type Html, html } from "../layout.js";
 import {
   type AppEnv,
@@ -86,6 +88,8 @@ export const CALLBACK_PATH = "/oauth/google/callback";
 export const CHOOSE_PATH = "/oauth/google/calendar";
 /** Where the calendars whose busy times count are changed later (rc41). */
 export const BUSY_PATH = "/oauth/google/busy";
+/** Where disconnecting asks what to do with the copies (rc40). */
+export const DISCONNECT_PATH = "/oauth/google/disconnect";
 
 /** The choice that makes a new calendar, and that calendar's name (rc40). */
 const NEW_CALENDAR = "new";
@@ -95,6 +99,9 @@ const choiceSchema = z.string().min(1).max(1024);
 
 /** The calendars whose busy times count (rc41): none, one or several ticks of `busy`. */
 const MAX_BUSY = 50;
+/** What disconnecting does with the copies (rc40); `calendar` only for one WhenDoWe made. */
+const copiesSchema = z.enum(["remove", "keep", "calendar"]);
+
 const busySchema = z
   .union([choiceSchema, z.array(choiceSchema)])
   .optional()
@@ -719,6 +726,146 @@ ${EMAIL_LINK}`,
         ),
     ]);
     return c.redirect("/", 303);
+  });
+
+  /** The person's Google connection, whatever its status, for disconnecting it (rc40). */
+  async function connectionToLeave(personId: string) {
+    const [row] = await deps.storage.query(
+      stmt(
+        `SELECT id, status, made_by_us, refresh_token_enc
+           FROM calendar_connection WHERE owner_id = ? AND provider = 'google'`,
+        personId,
+      ),
+    );
+    if (row === undefined) return null;
+    const conn = z
+      .object({
+        id: z.string(),
+        status: z.string(),
+        made_by_us: z.number(),
+        refresh_token_enc: z.string(),
+      })
+      .parse(row);
+    return {
+      id: conn.id,
+      status: conn.status,
+      madeByUs: conn.made_by_us === 1,
+      refreshTokenEnc: conn.refresh_token_enc,
+      copies: await copiesOn(deps.storage, conn.id),
+    };
+  }
+
+  const events = (n: number) => (n === 1 ? "1 WhenDoWe event" : `${n} WhenDoWe events`);
+  const REMOVING = html`<p>WhenDoWe is removing its events from your Google calendar, then giving its access back to Google. It takes a minute or two.</p>`;
+
+  // Disconnecting asks what to do with the copies (rc40). A GET: it counts and writes nothing.
+  app.get(DISCONNECT_PATH, async (c) => {
+    const me = requireSignedIn(c);
+    if (me instanceof Response) return me;
+    const conn = await connectionToLeave(me.personId);
+    if (conn === null) {
+      return c.html(result(c, "Disconnect", html`<p>No Google Calendar is connected.</p>`), 404);
+    }
+    if (conn.status === "disconnected") return c.html(result(c, "Disconnecting", REMOVING));
+    const choice = (copies: string, label: string) =>
+      html`<button type="submit" name="copies" value="${copies}">${label}</button> `;
+    const calendar = conn.madeByUs ? choice("calendar", "Delete the WhenDoWe calendar") : "";
+    // Google no longer answers for this grant: nothing can be removed from here.
+    const question =
+      conn.status === "auth_error"
+        ? html`<p>Google stopped accepting WhenDoWe's access, so ${conn.copies === 0 ? "nothing can be removed from here" : html`the ${events(conn.copies)} in your Google calendar can't be removed from here; remove them in Google Calendar yourself`}.</p>
+  <p>${choice("keep", "Disconnect")}</p>`
+        : conn.copies === 0
+          ? html`<p>None of your WhenDoWe events are in your Google calendar.</p>
+  <p>${calendar}${choice("keep", "Disconnect")}</p>`
+          : html`<p>Also remove the ${events(conn.copies)} from your Google calendar?</p>
+  <p>${choice("remove", "Remove them")}${choice("keep", "Keep them")}${calendar}</p>`;
+    return c.html(
+      result(
+        c,
+        "Disconnect Google Calendar",
+        html`<form method="post" action="${DISCONNECT_PATH}">
+  <input type="hidden" name="csrf" value="${me.csrfToken}" />
+  ${question}
+  <p class="muted">Either way, WhenDoWe gives its access back to Google and forgets it. Events you keep can be taken over again if you connect again.</p>
+</form>`,
+      ),
+    );
+  });
+
+  // POST, CSRF-checked. Keep, or delete the calendar WhenDoWe made, here and now; removing the
+  // copies one by one is the push tick's (§11: one path to Google), which then finishes.
+  app.post(DISCONNECT_PATH, async (c) => {
+    const me = requireSignedIn(c);
+    if (me instanceof Response) return me;
+    const body = await c.req.parseBody();
+    if (!(await verifyFormCsrf(me, body))) {
+      return c.html(result(c, "Request rejected", html`<p>Please try again.</p>`), 403);
+    }
+    const copies = copiesSchema.safeParse(body.copies);
+    if (!copies.success) {
+      return c.html(result(c, "Disconnect", html`<p>Choose one.</p>`), 400);
+    }
+    const conn = await connectionToLeave(me.personId);
+    if (conn === null) {
+      return c.html(result(c, "Disconnect", html`<p>No Google Calendar is connected.</p>`), 404);
+    }
+    if (conn.status === "disconnected") return c.html(result(c, "Disconnecting", REMOVING));
+    const stillAnswers = conn.status === "active";
+    const chosen = copies.data;
+    switch (chosen) {
+      case "keep":
+        await revokeGoogleGrant(await deps.cipher.decrypt(conn.refreshTokenEnc), deps.fetchImpl);
+        await deps.storage.batch(forgetConnection(conn.id));
+        return c.html(
+          result(
+            c,
+            "Disconnected",
+            html`<p>Google Calendar is disconnected.${conn.copies === 0 ? "" : html` The ${events(conn.copies)} there stay, and are no longer updated.`}</p>`,
+          ),
+        );
+      case "remove":
+        if (!stillAnswers) break;
+        // Busy times stop now; the copies go on the next ticks, and then the connection.
+        await deps.storage.batch([
+          stmt(
+            `UPDATE calendar_connection SET status = 'disconnected', updated_at = ?
+              WHERE id = ? AND status = 'active'`,
+            deps.now(),
+            conn.id,
+          ),
+          stmt("DELETE FROM busy_calendar WHERE connection_id = ?", conn.id),
+        ]);
+        return c.html(result(c, "Disconnecting", REMOVING));
+      case "calendar": {
+        if (!stillAnswers || !conn.madeByUs) break;
+        try {
+          const live = await liveConnection(deps, me.personId);
+          if (live === null) break;
+          await deleteCalendar(live.accessToken, live.calendarId, deps.fetchImpl);
+        } catch {
+          // Neither Google's answer nor the reason is shown or logged: either could carry a token.
+          return c.html(result(c, "Disconnect", UNREACHABLE), 502);
+        }
+        await revokeGoogleGrant(await deps.cipher.decrypt(conn.refreshTokenEnc), deps.fetchImpl);
+        await deps.storage.batch(forgetConnection(conn.id));
+        return c.html(
+          result(
+            c,
+            "Disconnected",
+            html`<p>Google Calendar is disconnected, and the WhenDoWe calendar deleted.</p>`,
+          ),
+        );
+      }
+      default: {
+        const unreachable: never = chosen;
+        return unreachable;
+      }
+    }
+    return c.html(
+      result(c, "Disconnect", html`<p>That isn't one of the choices. Please start again.</p>`),
+      409,
+    );
   });
 
   async function store(
