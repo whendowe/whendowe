@@ -209,6 +209,9 @@ export const loginToken = sqliteTable(
     createdAt: text("created_at").notNull(),
     // rc30: the guest this link moves to the address it signs in (Confirm with email).
     guestId: text("guest_id").references(() => person.id, { onDelete: "set null" }),
+    // rc51: the page that asked for sign-in, a path on this instance, checked when written
+    // and again when read; the emailed link never carries it.
+    nextPath: text("next_path"),
   },
   (t) => [
     // Rate limiting counts recent tokens per address.

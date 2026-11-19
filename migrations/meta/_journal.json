@@ -337,6 +337,13 @@
       "when": 1795038287404,
       "tag": "0047_prefers_links",
       "breakpoints": true
+    },
+    {
+      "idx": 48,
+      "version": "6",
+      "when": 1795096396989,
+      "tag": "0048_sign_in_next",
+      "breakpoints": true
     }
   ]
 }

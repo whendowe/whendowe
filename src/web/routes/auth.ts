@@ -30,7 +30,7 @@ import {
 
 // Magic-link sign-in (MVP-1 slice C). Sign-up and sign-in are one flow.
 //
-//   GET  /auth/sign-in   form: your email
+//   GET  /auth/sign-in   form: your email; ?next=/path is where it lands after (rc51)
 //   POST /auth/sign-in   issue a link, email it, "check your inbox"
 //   GET  /auth/confirm   "Sign in as ann@…? [Continue]" — reads, never consumes
 //   POST /auth/confirm   consume the link, create the person if new, start a session;
@@ -57,6 +57,9 @@ import {
 //   Token-bearing responses send no-referrer and no-store.
 // - Requesting a link for an address says the same thing whether or not an account
 //   exists for it (none exist until a link is consumed), so it reveals nothing.
+// - `next` is a path on this site or it is home (backTo), checked when the form is sent
+//   and again when the link is used: an open redirect after sign-in would make our own
+//   sign-in page the start of a phishing flow. It is kept with the token, not in the link.
 
 export const SIGN_IN_PATH = "/auth/sign-in";
 export const CONFIRM_PATH = "/auth/confirm";
@@ -102,7 +105,10 @@ function signInForm(
   error: string | null,
   signedInAs: string | null,
   options: SignInOptions,
+  next: string,
 ) {
+  // Home is where every sign-in lands anyway: no field for it.
+  const nextField = next === "/" ? "" : html`<input type="hidden" name="next" value="${next}" />`;
   return html`${
     signedInAs === null
       ? html`<h1>Sign in</h1>
@@ -112,6 +118,7 @@ function signInForm(
   }
 ${error === null ? "" : html`<p class="error">${error}</p>`}
 <form method="post" action="${SIGN_IN_PATH}">
+  ${nextField}
   <label for="email">Email address</label>
   <input id="email" name="email" type="email" autocomplete="email" required value="${email}" />
   <p><button type="submit">Email me a sign-in link</button></p>
@@ -120,6 +127,7 @@ ${
   options.google
     ? html`<p class="muted">or</p>
 <form method="post" action="${GOOGLE_SIGN_IN_PATH}">
+  ${nextField}
   <p><button type="submit">Sign in with Google</button></p>
 </form>`
     : ""
@@ -154,13 +162,18 @@ export type SendResult = "sent" | "rate_limited" | "capped" | "failed";
 /**
  * Issue a sign-in link for an address and email it. With a guest (rc30), using the link
  * also moves that guest's answers to the address: Confirm with email on a shared link.
+ * With `next` (rc51), using it lands there; the caller has checked it with backTo.
  */
 export async function sendSignInLink(
   deps: Pick<AuthDeps, "storage" | "mail" | "publicBaseUrl" | "now">,
   email: string,
-  guestId?: string,
+  carries: { readonly guestId?: string; readonly next?: string } = {},
 ): Promise<SendResult> {
-  const issued = await issueLoginToken(deps.storage, email, { now: deps.now(), guestId });
+  const issued = await issueLoginToken(deps.storage, email, {
+    now: deps.now(),
+    guestId: carries.guestId,
+    next: carries.next === "/" ? undefined : carries.next,
+  });
   if (!issued.ok) return "rate_limited";
   // From the configured origin — never c.req.url / Host (see the header comment).
   const link = new URL(CONFIRM_PATH, deps.publicBaseUrl);
@@ -226,14 +239,16 @@ export function registerAuthRoutes(
 ): void {
   app.get(SIGN_IN_PATH, (c) => {
     if (!roomFor(c, null)) return tooManyAccounts(c);
+    const next = backTo(c.req.query("next"));
     return c.html(
-      page(c, "Sign in", signInForm("", null, c.get("signedIn")?.email ?? null, options)),
+      page(c, "Sign in", signInForm("", null, c.get("signedIn")?.email ?? null, options, next)),
     );
   });
 
   app.post(SIGN_IN_PATH, async (c) => {
     const form = await c.req.parseBody();
     const raw = typeof form.email === "string" ? form.email : "";
+    const next = backTo(form.next);
 
     let email: string;
     try {
@@ -248,13 +263,14 @@ export function registerAuthRoutes(
             "That doesn't look like an email address.",
             c.get("signedIn")?.email ?? null,
             options,
+            next,
           ),
         ),
         400,
       );
     }
 
-    const sent = await sendSignInLink(deps, email);
+    const sent = await sendSignInLink(deps, email, { next });
     if (sent !== "sent") return notSent(c, sent);
     return c.html(
       page(
@@ -310,7 +326,8 @@ export function registerAuthRoutes(
       const [thread] = moved.kind === "moved" ? moved.threadIds : [];
       if (thread !== undefined) return c.redirect(`${PLANS_PATH}/${thread}`, 303);
     }
-    return c.redirect("/", 303);
+    // Checked again on the way out: the row is ours, but a check here costs nothing.
+    return c.redirect(backTo(used.next), 303);
   });
 
   app.post(SIGN_OUT_PATH, async (c) => {
@@ -350,9 +367,10 @@ export function registerAuthRoutes(
 }
 
 /**
- * Where a switch returns to: this site's own path, or home. Never another origin —
- * "//evil.example" and "/\\evil.example" are protocol-relative to a browser.
+ * Where a switch, or a sign-in (rc51), returns to: this site's own path, or home. Never
+ * another origin — "//evil.example" and "/\\evil.example" are protocol-relative to a
+ * browser — and nothing a Location header can't carry.
  */
 export function backTo(value: unknown): string {
-  return typeof value === "string" && /^\/(?![/\\])[^\s]{0,500}$/.test(value) ? value : "/";
+  return typeof value === "string" && /^\/(?![/\\])[^\s\p{Cc}]{0,500}$/u.test(value) ? value : "/";
 }

@@ -48,6 +48,8 @@ export async function issueLoginToken(
     readonly newId?: () => string;
     /** rc30: the guest whose answers using this link moves to the address (L2). */
     readonly guestId?: string | undefined;
+    /** rc51: the page to land on once the link is used; the caller checks it is local. */
+    readonly next?: string | undefined;
   },
 ): Promise<IssueResult> {
   const email = normalizeEmail(rawEmail);
@@ -55,8 +57,8 @@ export async function issueLoginToken(
   const expiresAt = plusMs(options.now, LOGIN_TOKEN_TTL_MS);
   const windowStart = plusMs(options.now, -LOGIN_RATE_WINDOW_MS);
   const rows = await storage.query({
-    sql: `INSERT INTO login_token (id, token_hash, email, expires_at, created_at, guest_id)
-          SELECT ?, ?, ?, ?, ?, ?
+    sql: `INSERT INTO login_token (id, token_hash, email, expires_at, created_at, guest_id, next_path)
+          SELECT ?, ?, ?, ?, ?, ?, ?
           WHERE (SELECT count(*) FROM login_token WHERE email = ? AND created_at > ?) < ?
           RETURNING id`,
     params: [
@@ -66,6 +68,7 @@ export async function issueLoginToken(
       expiresAt,
       options.now,
       options.guestId ?? null,
+      options.next ?? null,
       email,
       windowStart,
       LOGIN_REQUESTS_PER_WINDOW,
@@ -77,12 +80,20 @@ export async function issueLoginToken(
 }
 
 const consumedSchema = z.object({ email: z.string() });
-const linkSchema = z.object({ email: z.string(), guest_id: z.string().nullable() });
+const linkSchema = z.object({
+  email: z.string(),
+  guest_id: z.string().nullable(),
+  next_path: z.string().nullable(),
+});
 
-/** What a used login link proves: its address, and the guest it moves there, if any (rc30). */
+/**
+ * What a used login link proves: its address, the guest it moves there, if any (rc30), and
+ * the page that asked for it (rc51), unchecked — the caller checks it is local.
+ */
 export interface UsedLoginLink {
   readonly email: string;
   readonly guestId: string | null;
+  readonly next: string | null;
 }
 
 /**
@@ -101,7 +112,7 @@ export async function consumeLoginToken(
   return (await consumeLoginLink(storage, token, options))?.email ?? null;
 }
 
-/** consumeLoginToken, with the guest the link carries (rc30). The same single statement. */
+/** consumeLoginToken, with what the link carries (rc30, rc51). The same single statement. */
 export async function consumeLoginLink(
   storage: StoragePort,
   token: string,
@@ -110,12 +121,12 @@ export async function consumeLoginLink(
   const rows = await storage.query({
     sql: `UPDATE login_token SET consumed_at = ?
           WHERE token_hash = ? AND consumed_at IS NULL AND expires_at > ?
-          RETURNING email, guest_id`,
+          RETURNING email, guest_id, next_path`,
     params: [options.now, await hashToken(token), options.now],
   });
   if (rows[0] === undefined) return null;
   const row = linkSchema.parse(rows[0]);
-  return { email: row.email, guestId: row.guest_id };
+  return { email: row.email, guestId: row.guest_id, next: row.next_path };
 }
 
 /**

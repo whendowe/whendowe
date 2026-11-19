@@ -450,7 +450,7 @@ export function registerShareRoutes(app: Hono<AppEnv>, deps: ShareRouteDeps): vo
         400,
       );
     }
-    const sent = await sendSignInLink(deps, email, who.access.personId);
+    const sent = await sendSignInLink(deps, email, { guestId: who.access.personId });
     if (sent !== "sent") return notSent(c, sent);
     return c.html(
       linkPage(
