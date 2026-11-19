@@ -1204,3 +1204,30 @@ it("mail that stops (rc51): a verified thread of two says who stopped email, and
   await suppress(b.storage, "david@example.org", { kind: "all" }, NOW);
   expect(await (await sendLinks(b, g.thread)).text()).not.toContain("emails about this");
 });
+
+it("mail that stops (rc51): in a verified thread of two, the line and Copy link replace vote links", async () => {
+  const b = await browser({ now: () => NOW });
+  const f = await signedInPoll(b, ["ana"]);
+  const csrf = async () => (await home(b)).csrf;
+  await b.request(`${f.thread}/verify`, post({ csrf: await csrf() }));
+  const ana = guestName(f.threadId, f.rest[0]?.id ?? "");
+  const line = new RegExp(`${ana} isn(&#39;|')t receiving email about this\\.`);
+  const box = `<textarea class="paste wide" rows="1" readonly aria-label="Link to this page">https://whendowe.example${f.thread}</textarea>`;
+  const page = async () => (await b.request(f.thread)).text();
+
+  expect(await page()).toContain("Email vote links");
+  await suppress(b.storage, "ana@example.org", { kind: "person", id: f.mara.id }, NOW);
+  const stopped = await page();
+  expect(stopped).toMatch(line);
+  expect(stopped).not.toContain("asked for the link instead");
+  expect(stopped).toContain(box);
+  expect(stopped).not.toContain("Email vote links");
+
+  // A thread of three says nothing, and still offers the mail.
+  const g = await signedInPoll(b, ["david", "cat"]);
+  await b.request(`${g.thread}/verify`, post({ csrf: await csrf() }));
+  await suppress(b.storage, "david@example.org", { kind: "all" }, NOW);
+  const three = await (await b.request(g.thread)).text();
+  expect(three).not.toMatch(/receiving email about this/);
+  expect(three).toContain("Email vote links");
+});

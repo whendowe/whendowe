@@ -6,7 +6,7 @@ import { MailCapReachedError, SenderShareReachedError } from "../../src/mail/cap
 import type { MailMessage } from "../../src/mail/port.js";
 import { type CapabilityConfig, grantCapability } from "../../src/people/capability.js";
 import { findPersonByEmail } from "../../src/people/person.js";
-import { suppress } from "../../src/privacy/suppression.js";
+import { suppress, undoOptOut } from "../../src/privacy/suppression.js";
 import { createApp } from "../../src/web/app.js";
 import { ACCOUNT_PATH } from "../../src/web/layout.js";
 import { EMAIL_AGAIN_PATH } from "../../src/web/routes/account.js";
@@ -2502,4 +2502,66 @@ it("mail that stops (rc51): a verified event of two says so in its history, to b
   // Once Ann has left, the lines stay, and say "someone who has left".
   expect((await act(h, event, ann, "leave")).status).toBe(303);
   expect(await text(h, event, dm)).toContain("Someone who has left gets emails about this again.");
+});
+
+it("mail that stops (rc51): the other of two sees it on the name, and Copy link instead of email", async () => {
+  const h = await harness();
+  const { dm, group } = await setup(h);
+  const ann = await join(h, dm, group, "ann@example.org", "view", "FULL");
+  const event = await createVia(h, dm, group, { ...NIGHT, verified: "on" });
+  const plain = await createVia(h, dm, group, NIGHT);
+  const groupId = group.split("/").at(-1) ?? "";
+  const q = "(&#39;|')";
+  const line = new RegExp(`ann isn${q}t receiving email about this`);
+  const url = `https://whendowe.example${event}`;
+  const box = `<textarea class="paste wide" rows="1" readonly aria-label="Link to this page">${url}</textarea>`;
+
+  expect(await text(h, event, dm)).toContain("Email everyone a link");
+  expect(await text(h, event, dm)).not.toMatch(line);
+
+  await suppress(
+    h.storage,
+    "ann@example.org",
+    { kind: "group", id: groupId },
+    new Date().toISOString(),
+    { prefersLinks: true },
+  );
+  const page = await text(h, event, dm);
+  expect(page).toMatch(
+    new RegExp(`ann isn${q}t receiving email about this, and asked for the link instead\\.`),
+  );
+  // The plain address: no token, nothing but the event's own path.
+  expect(page).toContain(box);
+  expect(page).not.toContain("Email everyone a link");
+  // Ann's own page has nothing to say about her; an event that isn't verified, nothing at all.
+  expect(await text(h, event, ann)).not.toMatch(/receiving email about this/);
+  expect(await text(h, plain, dm)).not.toMatch(line);
+  expect(await text(h, plain, dm)).toContain("Email everyone a link");
+
+  // Opened signed out, it asks Ann to sign in and comes back; her answer there is signed in.
+  const asked = await get(h, event);
+  expect(asked.headers.get("location")).toBe(`${SIGN_IN_PATH}?next=${encodeURIComponent(event)}`);
+  await h.app.request(SIGN_IN_PATH, post({ email: "ann@example.org", next: event }));
+  const t =
+    new URL(/https?:\/\/\S+/.exec(h.sent.at(-1)?.text ?? "")?.[0] ?? "").searchParams.get("t") ??
+    "";
+  const confirmed = await h.app.request(CONFIRM_PATH, post({ t }));
+  expect(confirmed.headers.get("location")).toBe(event);
+  const cookie = (confirmed.headers.get("set-cookie") ?? "").split(";")[0] ?? "";
+  const answered = await h.app.request(
+    `${event}/attendance`,
+    post({ csrf: await csrfOf(h, cookie), attendance: "going" }, cookie),
+  );
+  expect(answered.status).toBe(303);
+  const via = await h.storage.query({
+    sql: `SELECT ep.attendance_via FROM event_participation ep JOIN person p ON p.id = ep.person_id
+          WHERE p.email = ? AND ep.canonical_event_id = ?`,
+    params: ["ann@example.org", event.split("/").at(-1) ?? ""],
+  });
+  expect(via).toEqual([{ attendance_via: "session" }]);
+
+  // Started again, the line goes and email is offered again.
+  await undoOptOut(h.storage, "ann@example.org", "group", groupId, new Date().toISOString());
+  expect(await text(h, event, dm)).not.toMatch(line);
+  expect(await text(h, event, dm)).toContain("Email everyone a link");
 });

@@ -16,6 +16,8 @@ import {
   mailTrailText,
   pairWarning,
   recordUnsentMail,
+  stoppedInPair,
+  stoppedLine,
   suppress,
   suppressingMailPort,
   undoOptOut,
@@ -466,6 +468,86 @@ export function runMailTrailContract(makePort: () => Promise<StoragePort>): void
       expect(unsent("vote_link")).toBe(`A vote link ${tail}`);
       expect(unsent("request")).toBe(`A request to agree ${tail}`);
       expect(unsent("result")).toBe(`The email saying what was agreed ${tail}`);
+    });
+
+    it("the line on the name (rc51): the same for every scope, and only for the other of two", async () => {
+      const port = await makePort();
+      const { bob, ann } = await two(port, "line");
+      const group = await createGroup(port, { name: "Line grp", creatorId: bob.id, now: T0 });
+      const event = await eventOf(port, bob.id, [ann.id]);
+      await port.batch([
+        {
+          sql: "UPDATE canonical_event SET group_id = ? WHERE id = ?",
+          params: [group.id, event.id],
+        },
+      ]);
+      const thread = await createThread(port, {
+        name: "Line",
+        tzid: "Europe/Prague",
+        creatorId: bob.id,
+        memberIds: [ann.id],
+        verified: true,
+        now: T0,
+      });
+      const ev = { kind: "event", id: event.id } as const;
+      const th = { kind: "thread", id: thread.id } as const;
+      const plain = await eventOf(port, bob.id, [ann.id], { verified: false });
+      const plainThread = await createThread(port, {
+        name: "Line, unverified",
+        tzid: "Europe/Prague",
+        creatorId: bob.id,
+        memberIds: [ann.id],
+        verified: false,
+        now: T0,
+      });
+
+      expect(await stoppedInPair(port, ev, bob.id)).toBeNull();
+      const scopes = [
+        { kind: "person", id: bob.id },
+        { kind: "group", id: group.id },
+        { kind: "all" },
+      ] as const;
+      for (const [i, scope] of scopes.entries()) {
+        await suppress(port, ann.email, scope, at(2 * i + 1));
+        // A thread has no group here, so a group opt-out doesn't reach it.
+        const expected = { personId: ann.id, prefersLinks: false };
+        expect(await stoppedInPair(port, ev, bob.id)).toEqual(expected);
+        expect(await stoppedInPair(port, th, bob.id)).toEqual(
+          scope.kind === "group" ? null : expected,
+        );
+        // Ann, viewing, sees nothing of her own; nor does a plan that isn't verified.
+        expect(await stoppedInPair(port, ev, ann.id)).toBeNull();
+        expect(await stoppedInPair(port, { kind: "event", id: plain.id }, bob.id)).toBeNull();
+        expect(
+          await stoppedInPair(port, { kind: "thread", id: plainThread.id }, bob.id),
+        ).toBeNull();
+        await undoOptOut(port, ann.email, scope.kind, "id" in scope ? scope.id : "", at(2 * i + 2));
+        expect(await stoppedInPair(port, ev, bob.id)).toBeNull();
+      }
+
+      await suppress(port, ann.email, { kind: "person", id: bob.id }, at(7), {
+        prefersLinks: true,
+      });
+      const links = await stoppedInPair(port, ev, bob.id);
+      expect(links).toEqual({ personId: ann.id, prefersLinks: true });
+      expect(links === null ? "" : stoppedLine("Ann", links)).toBe(
+        "Ann isn't receiving email about this, and asked for the link instead.",
+      );
+      expect(stoppedLine("Ann", { personId: ann.id, prefersLinks: false })).toBe(
+        "Ann isn't receiving email about this.",
+      );
+      // Someone who isn't on it learns nothing; a third person ends it.
+      const cy = await findOrCreatePerson(port, "cy-line@example.org", { now: T0 });
+      expect(await stoppedInPair(port, ev, cy.id)).toBeNull();
+      await port.batch([
+        {
+          sql: `INSERT INTO event_participation
+                  (canonical_event_id, person_id, edit_tier, visibility, created_at)
+                VALUES (?, ?, 'view', 'FULL', ?)`,
+          params: [event.id, cy.id, T0],
+        },
+      ]);
+      expect(await stoppedInPair(port, ev, bob.id)).toBeNull();
     });
   });
 }
