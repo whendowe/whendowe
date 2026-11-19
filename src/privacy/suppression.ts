@@ -148,23 +148,31 @@ export async function peekOptOut(
 }
 
 /**
- * Opt the address out. From everyone, its opt-out links go too: there's nothing left for
- * them to do, and they hold the address.
+ * Opt the address out. From everyone, its opt-out links go too: they hold the address (rc24),
+ * so starting that one again is on the account page. `prefersLinks` is "{name} can send me
+ * the link" (rc51); choosing again replaces it, so the latest choice stands.
  */
 export async function suppress(
   storage: StoragePort,
   email: string,
   scope: SuppressionScope,
   now: string,
+  options: { readonly prefersLinks?: boolean } = {},
 ): Promise<void> {
   const id = scope.kind === "all" ? "" : scope.id;
+  const prefers = options.prefersLinks === true ? 1 : 0;
   const before = await suppressionsOn(storage, email);
-  const after = [...before, { scope: scope.kind, scope_id: id }];
+  const after = [
+    ...before.filter((r) => r.scope !== scope.kind || r.scope_id !== id),
+    { scope: scope.kind, scope_id: id, prefers_links: prefers },
+  ];
   await storage.batch([
     {
-      sql: `INSERT INTO mail_suppression (address_hash, scope, scope_id, created_at)
-            VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING`,
-      params: [await addressHash(email), scope.kind, id, now],
+      sql: `INSERT INTO mail_suppression (address_hash, scope, scope_id, created_at, prefers_links)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT (address_hash, scope, scope_id)
+            DO UPDATE SET prefers_links = excluded.prefers_links`,
+      params: [await addressHash(email), scope.kind, id, now, prefers],
     },
     ...(await trailStatements(storage, email, before, after, now)),
     ...(scope.kind === "all"
@@ -271,28 +279,44 @@ export async function undoOptOut(
 // people, the history records when one of them stops the other's email or takes it back, and
 // each email of the other's that then doesn't go out — never which opt-out it was.
 
-const suppressionRowSchema = z.object({ scope: z.string(), scope_id: z.string() });
+const suppressionRowSchema = z.object({
+  scope: z.string(),
+  scope_id: z.string(),
+  prefers_links: z.number(),
+});
 type SuppressionRow = z.infer<typeof suppressionRowSchema>;
 
 async function suppressionsOn(storage: StoragePort, email: string): Promise<SuppressionRow[]> {
   const rows = await storage.query({
-    sql: "SELECT scope, scope_id FROM mail_suppression WHERE address_hash = ?",
+    sql: "SELECT scope, scope_id, prefers_links FROM mail_suppression WHERE address_hash = ?",
     params: [await addressHash(email)],
   });
   return rows.map((r) => suppressionRowSchema.parse(r));
 }
 
-/** The test the mail wrapper makes (`isSuppressed`), over rows already read. */
-function covers(
+/** The test the mail wrapper makes (`isSuppressed`), over rows already read: what covers. */
+function covering(
   rows: readonly SuppressionRow[],
   from: { readonly senderId: string; readonly groupId: string | null },
-): boolean {
-  return rows.some(
+): readonly SuppressionRow[] {
+  return rows.filter(
     (r) =>
       r.scope === "all" ||
       (r.scope === "person" && r.scope_id === from.senderId) ||
       (r.scope === "group" && from.groupId !== null && r.scope_id === from.groupId),
   );
+}
+
+/** Where one person's mail to an address stands: it arrives, it stops, or it stops for links. */
+type Reach = "again" | "stopped" | "stopped_links";
+
+function reach(
+  rows: readonly SuppressionRow[],
+  from: { readonly senderId: string; readonly groupId: string | null },
+): Reach {
+  const by = covering(rows, from);
+  if (by.length === 0) return "again";
+  return by.some((r) => r.prefers_links === 1) ? "stopped_links" : "stopped";
 }
 
 /** Counted as people: neither a guest (rc25) nor erased (rc21). */
@@ -336,8 +360,8 @@ async function pairsOf(storage: StoragePort, email: string) {
 
 /**
  * What changing this address's opt-outs from `before` to `after` records: in each verified
- * plan of two it is on, whether the other's email now stops or starts again. Only changes —
- * a second opt-out covering the same mail adds nothing.
+ * plan of two it is on, whether the other's email now stops, stops with "send me the link",
+ * or starts again. Only changes — a second opt-out covering the same mail adds nothing.
  */
 async function trailStatements(
   storage: StoragePort,
@@ -349,8 +373,8 @@ async function trailStatements(
   const statements: SqlStatement[] = [];
   for (const pair of await pairsOf(storage, email)) {
     const from = { senderId: pair.other_id, groupId: pair.group_id };
-    const was = covers(before, from);
-    const is = covers(after, from);
+    const was = reach(before, from);
+    const is = reach(after, from);
     if (was === is) continue;
     statements.push({
       sql:
@@ -359,10 +383,31 @@ async function trailStatements(
              VALUES (?, ?, ?, ?, ?)`
           : `INSERT INTO mail_trail (id, thread_id, person_id, kind, created_at)
              VALUES (?, ?, ?, ?, ?)`,
-      params: [uuidv7(), pair.id, pair.me_id, is ? "stopped" : "again", now],
+      params: [uuidv7(), pair.id, pair.me_id, is, now],
     });
   }
   return statements;
+}
+
+/**
+ * What the opt-out page warns before its buttons (rc51): whether this address is in a
+ * verified plan of two whose other person's email still reaches it, and whether `senderId`
+ * — the email's own sender — is the other person in one of them, stopped or not.
+ */
+export async function pairWarning(
+  storage: StoragePort,
+  email: string,
+  senderId: string | null,
+): Promise<{ readonly warn: boolean; readonly sender: boolean }> {
+  const rows = await suppressionsOn(storage, email);
+  const pairs = await pairsOf(storage, email);
+  const open = pairs.filter(
+    (p) => reach(rows, { senderId: p.other_id, groupId: p.group_id }) === "again",
+  );
+  return {
+    warn: open.length > 0,
+    sender: senderId !== null && pairs.some((p) => p.other_id === senderId),
+  };
 }
 
 /**

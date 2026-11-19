@@ -2,8 +2,15 @@
 import { createClient } from "@libsql/client";
 import { expect, it } from "vitest";
 import { sqliteStoragePort } from "../../src/db/sqlite.js";
+import { createEvent } from "../../src/events/event.js";
 import type { MailMessage } from "../../src/mail/port.js";
-import { OPT_OUT_PATH } from "../../src/privacy/suppression.js";
+import { findOrCreatePerson } from "../../src/people/person.js";
+import {
+  mailTrailOf,
+  OPT_OUT_PATH,
+  suppress,
+  suppressingMailPort,
+} from "../../src/privacy/suppression.js";
 import { createApp } from "../../src/web/app.js";
 import { ACCOUNT_PATH } from "../../src/web/layout.js";
 import { CONFIRM_PATH, SIGN_IN_PATH } from "../../src/web/routes/auth.js";
@@ -342,4 +349,219 @@ it("deleting your account can also stop anyone emailing the address", async () =
     const { invite } = await invited(h, "kim@example.org");
     expect((await invite()).status).toBe(checked ? 422 : 200);
   }
+});
+
+const NOW = "2101-11-01T10:00:00.000Z";
+
+const FIELDS = {
+  title: "Handover",
+  description: null,
+  location: null,
+  allDay: false,
+  startLocal: "2101-12-20T10:00",
+  endLocal: "2101-12-20T11:00",
+  tzid: "Europe/Prague",
+};
+
+/** Text as a person reads it: the page escapes what it writes in (§13). */
+const asRead = (t: string) =>
+  t
+    .replace(/&#39;/g, "'")
+    .replace(/&quot;/g, '"')
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&");
+
+/** The opt-out page as a person uses it: read its buttons, press one by its label. */
+function optOutPage(h: H, token: string) {
+  const read = async () =>
+    (await h.app.request(`${OPT_OUT_PATH}?t=${encodeURIComponent(token)}`)).text();
+  const buttons = (p: string) =>
+    [...p.matchAll(/<form method="post" action="\/opt-out">([\s\S]*?)<\/form>/g)].map((m) =>
+      asRead((/<button type="submit">([^<]*)<\/button>/.exec(m[1] ?? "")?.[1] ?? "").trim()),
+    );
+  const press = async (label: string) => {
+    const p = await read();
+    const form = [...p.matchAll(/<form method="post" action="\/opt-out">([\s\S]*?)<\/form>/g)]
+      .map((m) => m[1] ?? "")
+      .find((f) => asRead(f).includes(`>${label}</button>`));
+    if (form === undefined) throw new Error(`no button "${label}"`);
+    const fields = Object.fromEntries(
+      [...form.matchAll(/<input type="hidden" name="([^"]+)" value="([^"]*)" \/>/g)].map((m) => [
+        m[1] ?? "",
+        m[2] ?? "",
+      ]),
+    );
+    const res = await h.app.request(OPT_OUT_PATH, post(fields));
+    expect(res.status).toBe(200);
+    return asRead(/<p>([^<]*)<\/p>/.exec(await res.text())?.[1] ?? "");
+  };
+  /** What the page says between its heading and its buttons, as words. */
+  const words = (p: string) =>
+    asRead(/<h1>Stop emails to[\s\S]*$/.exec(p)?.[0] ?? "")
+      .replace(/<form[\s\S]*?<\/form>/g, "")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  return { read, buttons, press, words };
+}
+
+/** An email from dm about nothing in a group, as the seam sends it; its opt-out link. */
+async function groupless(h: H, to: string, senderId: string) {
+  const sent: MailMessage[] = [];
+  const mail = suppressingMailPort(
+    {
+      send: (m) => {
+        sent.push(m);
+        return Promise.resolve();
+      },
+    },
+    h.storage,
+    { publicBaseUrl: "https://whendowe.example", now: () => new Date().toISOString() },
+  );
+  await mail.send({
+    to,
+    subject: "s",
+    text: "t",
+    cause: { kind: "from", senderId, groupId: null, why: "dm added this address" },
+  });
+  return optOutToken(sent[0]);
+}
+
+const SIGN_IN_LINE =
+  "Sign-in links you ask for yourself still arrive: none of these stop you signing in.";
+
+it("mail that stops (rc51): the page warns first, offers the link instead, and starts them again", async () => {
+  const h = await harness();
+  await signIn(h, "dm@example.org", "dm");
+  const dm = await findOrCreatePerson(h.storage, "dm@example.org", { now: NOW });
+  const ann = await findOrCreatePerson(h.storage, "ann@example.org", { now: NOW });
+  const o = optOutPage(h, await groupless(h, "ann@example.org", dm.id));
+  const head = `Stop emails to ann@example.org ${SIGN_IN_LINE}`;
+
+  // Not in a verified plan of two: the page is as it was, and the link choice is refused.
+  let p = await o.read();
+  expect(o.words(p)).toBe(
+    `${head} Or delete everything This address has never signed in. Deleting removes it from every group, event and plan it was added to, at once, and stops all email to it. This can't be undone.`,
+  );
+  expect(o.buttons(p)).toEqual([
+    "Stop emails from the person who sent this",
+    "Stop emails from anyone on WhenDoWe",
+    "Delete everything about this address",
+  ]);
+  const t = /name="t" value="([^"]+)"/.exec(p)?.[1] ?? "";
+  expect((await h.app.request(OPT_OUT_PATH, post({ t, do: "links" }))).status).toBe(400);
+
+  const event = await createEvent(h.storage, {
+    creatorId: dm.id,
+    group: null,
+    fields: FIELDS,
+    now: NOW,
+    verified: true,
+    people: [{ personId: ann.id, editTier: "view", visibility: "FULL" }],
+  });
+  p = await o.read();
+  // Before the buttons, about whoever sent this email, the other one there — named as
+  // the page names them: with no group, never by a name from elsewhere (rc21).
+  expect(o.words(p)).toMatch(
+    new RegExp(
+      `^${head} The person who sent this will see in the history of a verified plan you share with only them that you stopped these emails, and when\\. Or delete`,
+    ),
+  );
+  expect(o.buttons(p)).toEqual([
+    "Stop emails from the person who sent this",
+    "Stop emails — the person who sent this can send me the link",
+    "Stop emails from anyone on WhenDoWe",
+    "Delete everything about this address",
+  ]);
+
+  expect(await o.press("Stop emails — the person who sent this can send me the link")).toBe(
+    "You won't get email from that person any more. They'll see that you asked for the link instead.",
+  );
+  const trail = async () =>
+    (await mailTrailOf(h.storage, { kind: "event", id: event.id })).map((e) => e.kind);
+  expect(await trail()).toEqual(["stopped_links"]);
+  p = await o.read();
+  // Nothing of dm's reaches her any more, so nothing is left to warn about.
+  expect(o.words(p)).toMatch(new RegExp(`^${head} You've stopped these emails Or delete`));
+  expect(o.buttons(p)).toEqual([
+    "Start emails from the person who sent this again",
+    "Stop emails — the person who sent this can send me the link",
+    "Stop emails from anyone on WhenDoWe",
+    "Delete everything about this address",
+  ]);
+
+  // A plain stop replaces the preference; starting again is recorded.
+  expect(await o.press("Start emails from the person who sent this again")).toBe(
+    "Emails from that person will reach you again.",
+  );
+  expect(await o.press("Stop emails from the person who sent this")).toBe(
+    "You won't get email from that person any more.",
+  );
+  expect(await o.press("Start emails from the person who sent this again")).toBe(
+    "Emails from that person will reach you again.",
+  );
+  expect(await trail()).toEqual(["stopped_links", "again", "stopped", "again"]);
+
+  // Opt-outs this link didn't make aren't its to start again.
+  const cat = await findOrCreatePerson(h.storage, "cat@example.org", { now: NOW });
+  await suppress(h.storage, "ann@example.org", { kind: "person", id: cat.id }, NOW);
+  await suppress(h.storage, "ann@example.org", { kind: "group", id: "another-group" }, NOW);
+  p = await o.read();
+  expect(o.words(p)).not.toContain("You've stopped these emails");
+  expect(o.buttons(p)[0]).toBe("Stop emails from the person who sent this");
+});
+
+it("mail that stops (rc51): through a group, it starts again from the same link", async () => {
+  const h = await harness();
+  await invited(h, "ann@example.org");
+  const o = optOutPage(h, optOutToken(h.sent.at(-1)));
+  expect(await o.press("Stop emails through “Thursday Table”")).toBe(
+    "You won't get email through that group any more.",
+  );
+  let p = await o.read();
+  expect(o.words(p)).toBe(
+    `Stop emails to ann@example.org ${SIGN_IN_LINE} You've stopped these emails Or delete everything This address has never signed in. Deleting removes it from every group, event and plan it was added to, at once, and stops all email to it. This can't be undone.`,
+  );
+  expect(o.buttons(p)).toEqual([
+    "Start emails through “Thursday Table” again",
+    "Stop emails from dm",
+    "Stop emails from anyone on WhenDoWe",
+    "Delete everything about this address",
+  ]);
+  expect(await o.press("Start emails through “Thursday Table” again")).toBe(
+    "Emails through that group will reach you again.",
+  );
+  p = await o.read();
+  expect(o.buttons(p)[0]).toBe("Stop emails from dm");
+  expect(o.buttons(p)).toContain("Stop emails through “Thursday Table”");
+  // From everyone: as before (rc24), the links go with it, so this one no longer opens.
+  expect(await o.press("Stop emails from anyone on WhenDoWe")).toBe(
+    "You won't get email from anyone on WhenDoWe. Sign-in links you ask for still arrive.",
+  );
+  expect(await o.read()).toContain("This link has expired");
+});
+
+it("mail that stops (rc51): with someone else as the other one, the warning names nobody", async () => {
+  const h = await harness();
+  await signIn(h, "dm@example.org", "dm");
+  const dm = await findOrCreatePerson(h.storage, "dm@example.org", { now: NOW });
+  const o = optOutPage(h, await groupless(h, "ann@example.org", dm.id));
+  const cat = await findOrCreatePerson(h.storage, "cat@example.org", { now: NOW });
+  const ann = await findOrCreatePerson(h.storage, "ann@example.org", { now: NOW });
+  await createEvent(h.storage, {
+    creatorId: cat.id,
+    group: null,
+    fields: FIELDS,
+    now: NOW,
+    verified: true,
+    people: [{ personId: ann.id, editTier: "view", visibility: "FULL" }],
+  });
+  const p = await o.read();
+  expect(o.words(p)).toContain(
+    "In a verified plan with only one other person, they'll see in its history that you stopped these emails, and when.",
+  );
+  expect(p).not.toContain("cat");
+  expect(p).not.toContain("Handover");
+  expect(o.buttons(p).some((b) => b.includes("can send me the link"))).toBe(false);
 });

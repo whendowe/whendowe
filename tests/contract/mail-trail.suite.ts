@@ -10,9 +10,11 @@ import { createThread, findThreadForMember, leaveThread } from "../../src/plans/
 import { eraseAccount } from "../../src/privacy/erasure.js";
 import { purgeEventStatements, purgeThreadStatements } from "../../src/privacy/purge.js";
 import {
+  addressHash,
   type MailTrailEntry,
   mailTrailOf,
   mailTrailText,
+  pairWarning,
   recordUnsentMail,
   suppress,
   suppressingMailPort,
@@ -101,6 +103,57 @@ export function runMailTrailContract(makePort: () => Promise<StoragePort>): void
       // Bob stopping Ann's is his row, not hers.
       await suppress(port, bob.email, { kind: "person", id: ann.id }, at(7));
       expect((await trail()).at(-1)).toEqual({ personId: bob.id, kind: "stopped", at: at(7) });
+    });
+
+    it("asking for the link instead is its own state: recorded when it starts and when it ends", async () => {
+      const port = await makePort();
+      const { bob, ann } = await two(port, "links");
+      const event = await eventOf(port, bob.id, [ann.id]);
+      const trail = async () => kinds(await mailTrailOf(port, { kind: "event", id: event.id }));
+      const links = { prefersLinks: true } as const;
+
+      await suppress(port, ann.email, { kind: "person", id: bob.id }, at(1), links);
+      expect(await trail()).toEqual(["stopped_links"]);
+      // A plain opt-out over it changes nothing: she still asked for the link.
+      await suppress(port, ann.email, { kind: "all" }, at(2));
+      expect(await trail()).toEqual(["stopped_links"]);
+      // Undoing the one that asked for the link leaves her plainly stopped.
+      await undoOptOut(port, ann.email, "person", bob.id, at(3));
+      expect(await trail()).toEqual(["stopped_links", "stopped"]);
+      // Choosing it again on the same opt-out replaces the plain one, and back.
+      await suppress(port, ann.email, { kind: "all" }, at(4), links);
+      await suppress(port, ann.email, { kind: "all" }, at(5));
+      expect(await trail()).toEqual(["stopped_links", "stopped", "stopped_links", "stopped"]);
+      await undoOptOut(port, ann.email, "all", "", at(6));
+      expect(await trail()).toEqual([
+        "stopped_links",
+        "stopped",
+        "stopped_links",
+        "stopped",
+        "again",
+      ]);
+      const [row] = await port.query({
+        sql: "SELECT COUNT(*) AS n FROM mail_suppression WHERE address_hash = ?",
+        params: [await addressHash(ann.email)],
+      });
+      expect(Number(row?.n)).toBe(0);
+    });
+
+    it("the warning: only while the other one's email still reaches her; the sender, stopped or not", async () => {
+      const port = await makePort();
+      const { bob, ann } = await two(port, "warn");
+      const cat = await findOrCreatePerson(port, "cat-warn@example.org", { now: T0 });
+      expect(await pairWarning(port, ann.email, bob.id)).toEqual({ warn: false, sender: false });
+      await eventOf(port, bob.id, [ann.id], { verified: false });
+      expect(await pairWarning(port, ann.email, bob.id)).toEqual({ warn: false, sender: false });
+      await eventOf(port, bob.id, [ann.id]);
+      expect(await pairWarning(port, ann.email, bob.id)).toEqual({ warn: true, sender: true });
+      expect(await pairWarning(port, ann.email, cat.id)).toEqual({ warn: true, sender: false });
+      expect(await pairWarning(port, ann.email, null)).toEqual({ warn: true, sender: false });
+      await suppress(port, ann.email, { kind: "person", id: bob.id }, at(1));
+      expect(await pairWarning(port, ann.email, bob.id)).toEqual({ warn: false, sender: true });
+      // Bob is the other one; Cat stopping hers changes nothing for Ann.
+      expect(await pairWarning(port, cat.email, bob.id)).toEqual({ warn: false, sender: false });
     });
 
     it("an email the seam drops is recorded in a verified event of two, and only there", async () => {
