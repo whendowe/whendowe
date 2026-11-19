@@ -98,6 +98,9 @@ import {
   mailTrailOf,
   mailTrailText,
   recordUnsentMail,
+  type StoppedInPair,
+  stoppedInPair,
+  stoppedLine,
 } from "../../privacy/suppression.js";
 import {
   cappedText,
@@ -106,6 +109,7 @@ import {
   html,
   ownAnswersForm,
   PLANS_PATH,
+  plainLinkBox,
   SHARE_BUTTONS,
   shareBox,
   ZONE_GUESS,
@@ -196,6 +200,8 @@ interface View {
   readonly requests: readonly ThreadRequest[];
   /** rc51: in a verified thread of two, mail that stopped and started again. */
   readonly trail: readonly MailTrailEntry[];
+  /** rc51: the other of two stopped the viewer's email, and the thread's own plain link. */
+  readonly stopped: { readonly who: StoppedInPair; readonly url: string } | null;
   /** rc43: whether the viewer may turn verifying on. */
   readonly mayVerify: boolean;
   /** rc43: whether the viewer sees history older than 90 days, and the moment it's counted from. */
@@ -207,6 +213,11 @@ interface View {
 
 async function load(deps: PlanRouteDeps, access: ThreadAccess, me: SignedIn): Promise<View> {
   const plans = await listPlans(deps.storage, access);
+  const stopped = await stoppedInPair(
+    deps.storage,
+    { kind: "thread", id: access.thread.id },
+    access.personId,
+  );
   const agreed = await agreedEvents(deps.storage, access);
   const names = new Map(access.members.map((m) => [m.personId, memberName(m)]));
   return {
@@ -225,6 +236,13 @@ async function load(deps: PlanRouteDeps, access: ThreadAccess, me: SignedIn): Pr
     unsent: await listUnsentThreadReceipts(deps.storage, access),
     requests: await listThreadRequests(deps.storage, access, deps.now()),
     trail: await mailTrailOf(deps.storage, { kind: "thread", id: access.thread.id }),
+    stopped:
+      stopped === null
+        ? null
+        : {
+            who: stopped,
+            url: new URL(threadPath(access.thread.id), deps.publicBaseUrl).toString(),
+          },
     mayVerify: await mayVerify(deps, access.personId),
     longHistory: await mayLongHistory(deps, access.personId),
     now: deps.now(),
@@ -832,6 +850,12 @@ function threadPage(v: View, day: string | null, notice: string | null = null): 
       .map((m) => (m.shown.email === null ? memberName(m) : `${memberName(m)} (${m.shown.email})`))
       .join(", ")} · ${decideHint(v)}</div></div><span></span></div>
 ${stepLine(v)}
+${
+  v.stopped === null
+    ? ""
+    : html`<p class="attn">${stoppedLine(v.nameOf(v.stopped.who.personId), v.stopped.who)}</p>
+${plainLinkBox(v.nameOf(v.stopped.who.personId), v.stopped.url)}${SHARE_BUTTONS}`
+}
 ${answersGrid(v)}
 ${
   waiting.length > 0
@@ -856,6 +880,8 @@ ${
       onTable.length > 0 &&
       t.organizerId === v.access.personId &&
       v.access.members.length > 1 &&
+      // rc51: the only other person stopped this mail; Copy link is above instead.
+      v.stopped === null &&
       !v.held.some((h) => h.kind === "vote_links" && h.takenAt === null)
         ? html`<form method="post" action="${threadPath(t.id)}/links"><input type="hidden" name="csrf" value="${v.csrf}" /><button type="submit">Email vote links</button></form>`
         : ""

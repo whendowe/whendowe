@@ -389,6 +389,79 @@ async function trailStatements(
   return statements;
 }
 
+const pairOtherSchema = z.object({
+  other_id: z.string(),
+  email: z.string(),
+  group_id: z.string().nullable(),
+});
+
+/** Someone who has stopped the viewer's email in a verified plan of two (rc51). */
+export interface StoppedInPair {
+  readonly personId: string;
+  /** They asked for the link instead (rc51 "can send me the link"). */
+  readonly prefersLinks: boolean;
+}
+
+/**
+ * Whether the other person in a verified event or thread of exactly two has stopped the
+ * viewer's email about it — the wrapper's own test, with the viewer as the sender. Null
+ * anywhere else, and for a viewer who isn't one of the two: there an opt-out stays silent.
+ */
+export async function stoppedInPair(
+  storage: StoragePort,
+  about: { readonly kind: "event" | "thread"; readonly id: string },
+  viewerId: string,
+): Promise<StoppedInPair | null> {
+  const rows = await storage.query(
+    about.kind === "event"
+      ? {
+          sql: `SELECT o.person_id AS other_id, xp.email, e.group_id
+                FROM canonical_event e
+                  JOIN event_participation me
+                    ON me.canonical_event_id = e.id AND me.person_id = ?
+                  JOIN person mp
+                    ON mp.id = me.person_id AND mp.guest_at IS NULL AND mp.erased_at IS NULL
+                  JOIN event_participation o
+                    ON o.canonical_event_id = e.id AND o.person_id <> me.person_id
+                  JOIN person xp ON xp.id = o.person_id AND ${COUNTED}
+                WHERE e.id = ? AND e.verified_at IS NOT NULL
+                  AND (SELECT COUNT(*) FROM event_participation x
+                         JOIN person xp ON xp.id = x.person_id
+                       WHERE x.canonical_event_id = e.id AND ${COUNTED}) = 2`,
+          params: [viewerId, about.id],
+        }
+      : {
+          sql: `SELECT o.person_id AS other_id, xp.email, t.group_id
+                FROM plan_thread t
+                  JOIN plan_thread_member me ON me.thread_id = t.id AND me.person_id = ?
+                  JOIN person mp
+                    ON mp.id = me.person_id AND mp.guest_at IS NULL AND mp.erased_at IS NULL
+                  JOIN plan_thread_member o ON o.thread_id = t.id AND o.person_id <> me.person_id
+                  JOIN person xp ON xp.id = o.person_id AND ${COUNTED}
+                WHERE t.id = ? AND t.verified_at IS NOT NULL
+                  AND (SELECT COUNT(*) FROM plan_thread_member x
+                         JOIN person xp ON xp.id = x.person_id
+                       WHERE x.thread_id = t.id AND ${COUNTED}) = 2`,
+          params: [viewerId, about.id],
+        },
+  );
+  if (rows[0] === undefined) return null;
+  const other = pairOtherSchema.parse(rows[0]);
+  const now = reach(await suppressionsOn(storage, other.email), {
+    senderId: viewerId,
+    groupId: other.group_id,
+  });
+  if (now === "again") return null;
+  return { personId: other.other_id, prefersLinks: now === "stopped_links" };
+}
+
+/** The line on their name (rc51), never saying which opt-out it was. */
+export function stoppedLine(name: string, stopped: StoppedInPair): string {
+  return stopped.prefersLinks
+    ? `${name} isn't receiving email about this, and asked for the link instead.`
+    : `${name} isn't receiving email about this.`;
+}
+
 /**
  * What the opt-out page warns before its buttons (rc51): whether this address is in a
  * verified plan of two whose other person's email still reaches it, and whether `senderId`
