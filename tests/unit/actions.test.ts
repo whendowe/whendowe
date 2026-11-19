@@ -31,6 +31,8 @@ describe("actionReason — the Action↔§14-log-vocabulary mapping", () => {
     [{ kind: "suppress_echo", incoming: INCOMING }, "echo_suppressed"],
     [{ kind: "apply_inbound", incoming: INCOMING }, "inbound_applied"],
     [{ kind: "delete_mirror", providerEventId: "p1" }, "removed"],
+    [{ kind: "unsubscribe" }, "inbound_delete_unsubscribed"],
+    [{ kind: "skip_instance" }, "skipped_instance_edit"],
     [{ kind: "noop" }, "skipped_unchanged"],
   ])("maps %o", (action, reason) => {
     expect(actionReason(action)).toBe(reason);
