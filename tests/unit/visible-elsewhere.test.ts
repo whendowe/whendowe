@@ -86,6 +86,15 @@ it("with no account here that can see it, a page is not found, existing or not",
     expect(other.status, path).toBe(404);
     expect(masked(await other.text(), path), path).toBe(masked(text, group));
   }
+  // From a form there is no page to come back to: a POST's address isn't one.
+  const posted = await b.request(
+    `${event}/retention`,
+    post({ csrf: (await home(b)).csrf, days: "365" }),
+  );
+  expect(posted.status).toBe(404);
+  const postedText = await posted.text();
+  expect(postedText).toContain("add another account");
+  expect(postedText).not.toContain("next=");
 });
 
 it("an account that may see the group but not the event (HIDDEN) is not offered for it", async () => {

@@ -2533,6 +2533,8 @@ it("mail that stops (rc51): the other of two sees it on the name, and Copy link 
   // The plain address: no token, nothing but the event's own path.
   expect(page).toContain(box);
   expect(page).not.toContain("Email everyone a link");
+  // On her name only: the viewer's own row says nothing.
+  expect(page.match(/receiving email about this/g)).toHaveLength(1);
   // Ann's own page has nothing to say about her; an event that isn't verified, nothing at all.
   expect(await text(h, event, ann)).not.toMatch(/receiving email about this/);
   expect(await text(h, plain, dm)).not.toMatch(line);
