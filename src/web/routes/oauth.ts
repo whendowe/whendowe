@@ -65,7 +65,13 @@ import {
   signInAs,
   verifyFormCsrf,
 } from "../session.js";
-import { type AuthDeps, GOOGLE_SIGN_IN_PATH, SIGN_IN_PATH, tooManyAccounts } from "./auth.js";
+import {
+  type AuthDeps,
+  backTo,
+  GOOGLE_SIGN_IN_PATH,
+  SIGN_IN_PATH,
+  tooManyAccounts,
+} from "./auth.js";
 
 // The Google connect flow (DESIGN.md §12/§13), owned by a signed-in person (MVP-1 E).
 //
@@ -210,9 +216,10 @@ const UNREACHABLE = html`<p>Google didn't answer just now. Please try again in a
 const EMAIL_LINK = html`<p><a href="${SIGN_IN_PATH}">Sign in with an email link</a></p>`;
 
 /** "Email me a link" for an address Google named but can't vouch for (§13 rc20). */
-function offerEmailLink(email: string): Html {
+function offerEmailLink(email: string, next: string): Html {
   return html`<form method="post" action="${SIGN_IN_PATH}">
   <input type="hidden" name="email" value="${email}" />
+  ${next === "/" ? "" : html`<input type="hidden" name="next" value="${next}" />`}
   <button type="submit">Email me a sign-in link</button>
 </form>`;
 }
@@ -360,7 +367,7 @@ export function registerOAuthRoutes(
   /** Seal a new flow into the cookie and send the browser to Google. */
   async function begin(
     c: Context<AppEnv>,
-    flow: { purpose: "connect"; personId: string } | { purpose: "sign-in" },
+    flow: { purpose: "connect"; personId: string } | { purpose: "sign-in"; next?: string },
   ) {
     const pkce = await createPkcePair();
     const state = createState();
@@ -400,7 +407,11 @@ export function registerOAuthRoutes(
   // there is no session to bind one to, as with the magic-link request. Login CSRF is
   // the callback's to stop, and `state` does.
   if (auth !== undefined) {
-    app.post(GOOGLE_SIGN_IN_PATH, (c) => begin(c, { purpose: "sign-in" }));
+    app.post(GOOGLE_SIGN_IN_PATH, async (c) => {
+      // Where to land after (rc51), from the sign-in form; home is no field at all.
+      const next = backTo((await c.req.parseBody()).next);
+      return begin(c, next === "/" ? { purpose: "sign-in" } : { purpose: "sign-in", next });
+    });
   }
 
   // GET, because Google decides the method — the one mutating GET in the app, and
@@ -1000,7 +1011,7 @@ ${EMAIL_LINK}`,
           c,
           "Use the email link",
           html`<p>Google doesn't look after the mailbox for <strong>${email}</strong>, so it can't vouch that it's still yours. We can email you a sign-in link instead.</p>
-${offerEmailLink(email)}`,
+${offerEmailLink(email, backTo(flow.next))}`,
         ),
         400,
       );
@@ -1012,6 +1023,6 @@ ${offerEmailLink(email)}`,
     if (!roomFor(c, known?.id ?? null)) return tooManyAccounts(c);
     const person = await findOrCreatePerson(auth.storage, email, { now: auth.now() });
     if (!(await signInAs(c, auth, person.id, "google"))) return tooManyAccounts(c);
-    return c.redirect("/", 303);
+    return c.redirect(backTo(flow.next), 303);
   }
 }

@@ -135,7 +135,15 @@ it("ignores what in the cookie is not a token", async () => {
 
 it("a switch only ever returns to this site", () => {
   expect(backTo("/groups/abc")).toBe("/groups/abc");
-  for (const bad of ["//evil.example", "/\\evil.example", "https://evil.example", "", 3, "/a b"]) {
+  for (const bad of [
+    "//evil.example",
+    "/\\evil.example",
+    "https://evil.example",
+    "",
+    3,
+    "/a b",
+    "/a\u0000b",
+  ]) {
     expect(backTo(bad)).toBe("/");
   }
 });

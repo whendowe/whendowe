@@ -237,3 +237,71 @@ it("signing in again after sign-out reuses the same person", async () => {
   });
   expect(rows[0]?.n).toBe(1);
 });
+
+// --- coming back to the page that asked (rc51) --------------------------------------
+
+async function confirmLocation(h: Harness, link: URL): Promise<string | null> {
+  const res = await h.app.request(CONFIRM_PATH, form({ t: link.searchParams.get("t") ?? "" }));
+  expect(res.status).toBe(303);
+  return res.headers.get("location");
+}
+
+it("a page that needs sign-in sends you to it, and the link brings you back", async () => {
+  const h = await harness();
+  const asked = await h.app.request("/groups");
+  expect(asked.status).toBe(303);
+  expect(asked.headers.get("location")).toBe(`${SIGN_IN_PATH}?next=%2Fgroups`);
+
+  const page = await (await h.app.request(`${SIGN_IN_PATH}?next=%2Fgroups`)).text();
+  expect(page).toContain('<input type="hidden" name="next" value="/groups" />');
+  const res = await h.app.request(
+    SIGN_IN_PATH,
+    form({ email: "ann@example.org", next: "/groups" }),
+  );
+  expect(res.status).toBe(200);
+  // Kept with the token, never in the emailed link.
+  const link = new URL(/https?:\/\/\S+/.exec(h.sent.at(-1)?.text ?? "")?.[0] ?? "");
+  expect([...link.searchParams.keys()]).toEqual(["t"]);
+  expect(h.sent.at(-1)?.text).not.toContain("groups");
+  expect(await confirmLocation(h, link)).toBe("/groups");
+});
+
+it("without a page to return to, or from a form, sign-in lands on home", async () => {
+  const h = await harness();
+  expect(await (await h.app.request(SIGN_IN_PATH)).text()).not.toContain('name="next"');
+  expect(await confirmLocation(h, await requestLink(h, "ann@example.org"))).toBe("/");
+  const posted = await h.app.request("/groups", form({ name: "Book club" }));
+  expect(posted.status).toBe(303);
+  expect(posted.headers.get("location")).toBe(SIGN_IN_PATH);
+});
+
+it("next is a path on this site, checked when asked and when used; anything else is home", async () => {
+  const h = await harness();
+  const bad = [
+    "//evil.example",
+    "/\\evil.example",
+    "https://evil.example/",
+    "javascript:alert(1)",
+    "groups",
+    "/a b",
+    "/a\u0000b",
+    `/${"x".repeat(600)}`,
+  ];
+  for (const next of bad) {
+    const page = await (
+      await h.app.request(`${SIGN_IN_PATH}?next=${encodeURIComponent(next)}`)
+    ).text();
+    expect(page).not.toContain('name="next"');
+    await h.app.request(SIGN_IN_PATH, form({ email: "ann@example.org", next }));
+    const link = new URL(/https?:\/\/\S+/.exec(h.sent.at(-1)?.text ?? "")?.[0] ?? "");
+    expect(await confirmLocation(h, link)).toBe("/");
+    await h.storage.query({ sql: "DELETE FROM login_token", params: [] });
+  }
+  // A row that says otherwise is checked again on the way out.
+  const link = await requestLink(h, "ann@example.org");
+  await h.storage.query({
+    sql: "UPDATE login_token SET next_path = ?",
+    params: ["//evil.example"],
+  });
+  expect(await confirmLocation(h, link)).toBe("/");
+});

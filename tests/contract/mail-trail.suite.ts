@@ -91,18 +91,20 @@ export function runMailTrailContract(makePort: () => Promise<StoragePort>): void
         { personId: ann.id, kind: "again", at: at(4) },
       ]);
       // Undoing an opt-out from someone else leaves the one from Bob standing.
-      await suppress(port, ann.email, { kind: "person", id: bob.id }, at(4));
-      await suppress(port, ann.email, { kind: "person", id: "someone-else" }, at(4));
-      await undoOptOut(port, ann.email, "person", "someone-else", at(4));
+      // Each change at an instant of its own: rows of one instant have no order (ids are
+      // random within a millisecond), and real changes never share one.
+      await suppress(port, ann.email, { kind: "person", id: bob.id }, at(5));
+      await suppress(port, ann.email, { kind: "person", id: "someone-else" }, at(6));
+      await undoOptOut(port, ann.email, "person", "someone-else", at(7));
       expect(kinds(await trail())).toEqual(["stopped", "again", "stopped"]);
-      await undoOptOut(port, ann.email, "person", bob.id, at(4));
+      await undoOptOut(port, ann.email, "person", bob.id, at(8));
       // Undoing what isn't there, or opting out from someone else, records nothing.
-      await undoOptOut(port, ann.email, "all", "", at(5));
-      await suppress(port, ann.email, { kind: "person", id: ann.id }, at(6));
+      await undoOptOut(port, ann.email, "all", "", at(9));
+      await suppress(port, ann.email, { kind: "person", id: ann.id }, at(10));
       expect(kinds(await trail())).toEqual(["stopped", "again", "stopped", "again"]);
       // Bob stopping Ann's is his row, not hers.
-      await suppress(port, bob.email, { kind: "person", id: ann.id }, at(7));
-      expect((await trail()).at(-1)).toEqual({ personId: bob.id, kind: "stopped", at: at(7) });
+      await suppress(port, bob.email, { kind: "person", id: ann.id }, at(11));
+      expect((await trail()).at(-1)).toEqual({ personId: bob.id, kind: "stopped", at: at(11) });
     });
 
     it("asking for the link instead is its own state: recorded when it starts and when it ends", async () => {

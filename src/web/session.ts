@@ -270,8 +270,13 @@ export function page(c: Context<AppEnv>, title: string, body: Html): string {
 /**
  * The signed-in person, or a redirect to sign-in. Routes that need a person call
  * this first: `const me = requireSignedIn(c); if (me instanceof Response) return me;`
+ *
+ * From a page (a GET), sign-in comes back to it (rc51): the path only, since a query
+ * string may carry a token (§13). From a form, home: a POST can't be replayed by a link.
  */
 export function requireSignedIn(c: Context<AppEnv>): SignedIn | Response {
   const signedIn = c.get("signedIn");
-  return signedIn ?? c.redirect("/auth/sign-in", 303);
+  if (signedIn !== null) return signedIn;
+  if (c.req.method !== "GET" || c.req.path === "/") return c.redirect("/auth/sign-in", 303);
+  return c.redirect(`/auth/sign-in?next=${encodeURIComponent(c.req.path)}`, 303);
 }

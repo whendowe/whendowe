@@ -53,7 +53,12 @@ const flowPayloadSchema = z.discriminatedUnion("purpose", [
     personId: z.string().min(1),
   }),
   // Nobody need be signed in to start: the person is whoever Google says, at the end.
-  z.object({ ...flowFields, purpose: z.literal("sign-in") }),
+  z.object({
+    ...flowFields,
+    purpose: z.literal("sign-in"),
+    /** rc51: the page that asked for sign-in; checked local when sealed and when used. */
+    next: z.string().max(512).optional(),
+  }),
 ]);
 
 export type OAuthFlow = z.infer<typeof flowPayloadSchema>;
