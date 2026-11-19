@@ -95,7 +95,13 @@ import {
   type ThreadSummary,
 } from "../../plans/thread.js";
 import { RETAIN_CHOICES, retainDaysSchema } from "../../privacy/retention.js";
-import { mailTrailOf, mailTrailText } from "../../privacy/suppression.js";
+import {
+  mailTrailOf,
+  mailTrailText,
+  type StoppedInPair,
+  stoppedInPair,
+  stoppedLine,
+} from "../../privacy/suppression.js";
 import {
   formatRRule,
   parseRRule,
@@ -110,6 +116,7 @@ import {
   type Html,
   html,
   ownAnswersForm,
+  plainLinkBox,
   retentionSection,
   SHARE_BUTTONS,
   who,
@@ -766,6 +773,8 @@ async function responsesSection(
   deps: EventRouteDeps,
   access: EventAccess,
   csrf: string,
+  /** rc51: the other of two stopped this mail, so it isn't offered; Copy link is instead. */
+  stopped: StoppedInPair | null,
 ): Promise<Html> {
   const { event, participation } = access;
   const names = canSee(participation.visibility, "participants");
@@ -805,7 +814,7 @@ async function responsesSection(
     : "";
   const action = actionFor(access);
   const sendLinks =
-    participation.editTier === "edit" && action !== null
+    participation.editTier === "edit" && action !== null && stopped === null
       ? html`<form method="post" action="${EVENTS_PATH}/${event.id}/links">
   <input type="hidden" name="csrf" value="${csrf}" />
   <p><button type="submit">${action === "attend" ? "Email everyone a link to say if they're coming" : "Email a link to agree or decline"}</button>
@@ -1226,6 +1235,8 @@ function peopleSection(
   csrf: string,
   /** The people picker for adding more (rc48), drawn only for someone who may. */
   picker: Html,
+  /** rc51: the other of two who stopped this viewer's email, and this page's plain link. */
+  stopped: { readonly who: StoppedInPair; readonly url: string } | null,
 ): Html {
   const { event } = access;
   const editing = access.participation.editTier === "edit";
@@ -1255,6 +1266,11 @@ function peopleSection(
           : copyable(p)
             ? html` <form method="post" action="${EVENTS_PATH}/${event.id}/people/link" style="display:inline"><input type="hidden" name="csrf" value="${csrf}" /><input type="hidden" name="person" value="${p.personId}" /><button type="submit">Copy their link</button></form>`
             : ""
+      }${
+        stopped !== null && stopped.who.personId === p.personId
+          ? html`<br /><span class="attn">${stoppedLine(p.shown.name, stopped.who)}</span>
+${plainLinkBox(p.shown.name, stopped.url)}${SHARE_BUTTONS}`
+          : ""
       }</li>`,
   )}</ul>
 ${
@@ -1298,6 +1314,10 @@ async function eventPage(
     ? await mailTrailOf(deps.storage, { kind: "event", id: event.id })
     : [];
   const nameOf = new Map(people.map((p) => [p.personId, p.shown.name]));
+  // rc51: in a verified event of two, whether the other stopped this viewer's email.
+  const stopped = see("participants")
+    ? await stoppedInPair(deps.storage, { kind: "event", id: event.id }, participation.personId)
+    : null;
   const requests = await listVerifiedRequests(deps.storage, access, deps.now());
   // One attributed trail, newest first (DESIGN rc15): edits and people changes together.
   const history = [
@@ -1348,12 +1368,12 @@ ${
 }
 ${await requestsSection(deps, access, csrf)}
 ${await proposalsSection(deps, access, csrf)}
-${people.length === 0 ? "" : peopleSection(access, people, csrf, participation.editTier === "edit" && TAKES_PEOPLE.has(event.status) ? peoplePicker({ chips: adding.chips, known: await listKnownPeople(deps.storage, participation.personId), levers: { terms: true, asking: false }, filter: adding.filter, lead: "Each gets an email with a link to answer, no account needed.", group: null, exclude: new Set(people.map((p) => p.personId)) }) : html``)}
+${people.length === 0 ? "" : peopleSection(access, people, csrf, participation.editTier === "edit" && TAKES_PEOPLE.has(event.status) ? peoplePicker({ chips: adding.chips, known: await listKnownPeople(deps.storage, participation.personId), levers: { terms: true, asking: false }, filter: adding.filter, lead: "Each gets an email with a link to answer, no account needed.", group: null, exclude: new Set(people.map((p) => p.personId)) }) : html``, stopped === null ? null : { who: stopped, url: new URL(`${EVENTS_PATH}/${event.id}`, deps.publicBaseUrl).toString() })}
 ${see("participants") ? await appearanceSection(deps.storage, { kind: "event", id: event.id }, { personId: participation.personId, csrfToken: csrf }, `${EVENTS_PATH}/${event.id}/me`, "event") : ""}
 ${event.verifiedAt === null ? ownAnswersForm({ action: `${EVENTS_PATH}/${event.id}/own-answers`, hidden: { csrf }, on: participation.ownAnswersOnly, where: "here" }) : ""}
 ${event.verifiedAt === null && participation.editTier === "edit" ? verifyForm(event.id, csrf, await mayVerify(deps, participation.personId)) : ""}
 ${requestSection(access, requests, await eventRetention(deps.storage, access), csrf)}
-${await responsesSection(deps, access, csrf)}
+${await responsesSection(deps, access, csrf, stopped)}
 ${retentionSection({
   days: await eventRetention(deps.storage, access),
   subject: "This event is",

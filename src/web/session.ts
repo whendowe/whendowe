@@ -200,6 +200,13 @@ export async function rejectedPage(c: Context<AppEnv>, form: Record<string, unkn
   return c.html(page(c, "Request rejected", body), 403);
 }
 
+/** Add another account, and come back to this page after (rc51): the path only, from a GET. */
+function addAccountHere(c: Context<AppEnv>): string {
+  return c.req.method === "GET" && c.req.path !== "/"
+    ? `${ADD_ACCOUNT_PATH}?next=${encodeURIComponent(c.req.path)}`
+    : ADD_ACCOUNT_PATH;
+}
+
 /**
  * The answer when the active account may not see an event, poll or group page (§13
  * rc18). If another account on this browser can, say so and offer the switch; otherwise
@@ -234,7 +241,7 @@ ${switchForm(viewer, other)}`,
       html`<h1>Not found</h1>
 <p>You're signed in as <strong>${viewer.email}</strong>.${
         viewer.canAddAccount
-          ? html` If this was shared with another of your addresses, <a href="${ADD_ACCOUNT_PATH}">add another account</a>.`
+          ? html` If this was shared with another of your addresses, <a href="${addAccountHere(c)}">add another account</a>.`
           : ""
       }</p>
 <p><a href="/groups">Your groups</a></p>`,

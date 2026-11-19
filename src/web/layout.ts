@@ -287,6 +287,16 @@ ${shareBox(`${name}'s link`, url, 2)}
 <p><a href="${back}">Back</a></p>`;
 }
 
+/**
+ * Copy link (rc51): in a verified plan of two, for the person whose email stopped — the
+ * page's own address, with no token in it, so opening it means signing in as them and an
+ * answer given there is a signed-in one. Follow it with SHARE_BUTTONS.
+ */
+export function plainLinkBox(name: string, url: string): Html {
+  return html`<p class="muted">Send ${name} the link instead. Opening it asks them to sign in, so only ${name} can answer through it.</p>
+${shareBox("Link to this page", url, 1)}`;
+}
+
 /** Wires every shareBox on the page. One fixed script, so the CSP allows it by hash. */
 export const SHARE_BUTTONS = html`<script>
   document.querySelectorAll("[data-share]").forEach(function (box) {

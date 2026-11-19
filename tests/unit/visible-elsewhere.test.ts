@@ -75,13 +75,26 @@ it("with no account here that can see it, a page is not found, existing or not",
   const text = await res.text();
   expect(text).toContain("You're signed in as <strong>bob@example.org</strong>");
   expect(text).toContain("add another account");
+  // rc51: and it comes back to this page once that account is signed in.
+  expect(text).toContain(`href="/auth/sign-in?next=${encodeURIComponent(group)}"`);
   expect(text).not.toContain("ann@example.org");
-  // The same page for a group and an event that exist, and ones that never did.
+  // The same page for a group and an event that exist, and ones that never did — but for
+  // the address asked for, which the visitor typed and which tells them nothing.
+  const masked = (page: string, path: string) => page.replace(encodeURIComponent(path), "PATH");
   for (const path of [event, `${GROUPS_PATH}/nope`, "/events/nope"]) {
     const other = await b.request(path);
     expect(other.status, path).toBe(404);
-    expect(await other.text(), path).toBe(text);
+    expect(masked(await other.text(), path), path).toBe(masked(text, group));
   }
+  // From a form there is no page to come back to: a POST's address isn't one.
+  const posted = await b.request(
+    `${event}/retention`,
+    post({ csrf: (await home(b)).csrf, days: "365" }),
+  );
+  expect(posted.status).toBe(404);
+  const postedText = await posted.text();
+  expect(postedText).toContain("add another account");
+  expect(postedText).not.toContain("next=");
 });
 
 it("an account that may see the group but not the event (HIDDEN) is not offered for it", async () => {
