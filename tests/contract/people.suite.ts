@@ -2,6 +2,7 @@
 import { describe, expect, it } from "vitest";
 import type { StoragePort } from "../../src/db/port.js";
 import {
+  consumeLoginLink,
   consumeLoginToken,
   issueLoginToken,
   LOGIN_REQUESTS_PER_WINDOW,
@@ -87,6 +88,18 @@ export function runPeopleContract(makePort: () => Promise<StoragePort>): void {
       if (!issued.ok) throw new Error("expected issue");
       expect(await consumeLoginToken(port, issued.token, { now: at(1) })).toBe("once@example.org");
       expect(await consumeLoginToken(port, issued.token, { now: at(2) })).toBeNull();
+    });
+
+    it("keeps the page that asked for sign-in with the token, and gives it back once (rc51)", async () => {
+      const port = await makePort();
+      const issued = await issueLoginToken(port, "next@example.org", { now: T0, next: "/groups" });
+      if (!issued.ok) throw new Error("expected issue");
+      expect(await consumeLoginLink(port, issued.token, { now: at(1) })).toEqual({
+        email: "next@example.org",
+        guestId: null,
+        next: "/groups",
+      });
+      expect(await consumeLoginLink(port, issued.token, { now: at(2) })).toBeNull();
     });
 
     it("concurrent consumption succeeds for exactly one caller", async () => {

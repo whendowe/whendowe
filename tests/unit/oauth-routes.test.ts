@@ -1337,8 +1337,8 @@ function signInFake(idToken: string): FetchLike {
 }
 
 /** Press "Sign in with Google", signed out unless a cookie is given. */
-async function startSignIn(h: Harness, cookie?: string) {
-  const res = await h.app.request(GOOGLE_SIGN_IN_PATH, form({}, cookie));
+async function startSignIn(h: Harness, cookie?: string, fields: Record<string, string> = {}) {
+  const res = await h.app.request(GOOGLE_SIGN_IN_PATH, form(fields, cookie));
   expect(res.status).toBe(303);
   const flowCookie = (res.headers.get("set-cookie") ?? "").split(";")[0] ?? "";
   const location = new URL(res.headers.get("location") ?? "");
@@ -1359,8 +1359,12 @@ async function people(h: Harness): Promise<string[]> {
   return rows.map((r) => String(r.email));
 }
 
-async function finishSignIn(h: Harness, as: Session | null = null) {
-  const { cookie, state } = await startSignIn(h, as?.cookie);
+async function finishSignIn(
+  h: Harness,
+  as: Session | null = null,
+  fields: Record<string, string> = {},
+) {
+  const { cookie, state } = await startSignIn(h, as?.cookie, fields);
   return callback(h, `code=c&state=${encodeURIComponent(state)}`, cookie, as);
 }
 
@@ -1441,6 +1445,27 @@ it("offers the email link for an address Google doesn't host, and signs no one i
   expect(text).toContain('name="email" value="ann@old-job.example"');
   expect(sessionCookie(res)).toBeNull();
   expect(await people(h)).toEqual([OWNER_EMAIL]);
+});
+
+it("comes back to the page that asked for sign-in (rc51), and only to a page on this site", async () => {
+  const h = await harness(signInFake(idTokenFor("ann@gmail.com")));
+  const page = await (await h.app.request(`${SIGN_IN_PATH}?next=%2Fgroups`)).text();
+  const google = page.slice(page.indexOf(`action="${GOOGLE_SIGN_IN_PATH}"`));
+  expect(google).toContain('<input type="hidden" name="next" value="/groups" />');
+  const back = await finishSignIn(h, null, { next: "/groups" });
+  expect(back.headers.get("location")).toBe("/groups");
+  for (const next of ["//evil.example", "https://evil.example/", "/\\evil.example"]) {
+    const res = await finishSignIn(h, null, { next });
+    expect(res.headers.get("location")).toBe("/");
+  }
+});
+
+it("the email link offered instead carries the page too", async () => {
+  const h = await harness(signInFake(idTokenFor("ann@old-job.example")));
+  const text = await (await finishSignIn(h, null, { next: "/groups" })).text();
+  expect(text).toContain('<input type="hidden" name="next" value="/groups" />');
+  const home = await (await finishSignIn(h)).text();
+  expect(home).not.toContain('name="next"');
 });
 
 it("refuses an unverified address, and a token for another client", async () => {
