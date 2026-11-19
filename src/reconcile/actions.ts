@@ -13,6 +13,10 @@ export type Action =
   | { readonly kind: "suppress_echo"; readonly incoming: ProviderEvent }
   | { readonly kind: "apply_inbound"; readonly incoming: ProviderEvent }
   | { readonly kind: "delete_mirror"; readonly providerEventId: string }
+  /** PULL (rc45): the copy was deleted in the provider — for its person, never put back. */
+  | { readonly kind: "unsubscribe" }
+  /** PULL (§11): a change to one occurrence of a series, which isn't taken in yet. */
+  | { readonly kind: "skip_instance" }
   | { readonly kind: "noop" };
 
 /** Exhaustiveness backstop: reachable only if a switch misses a variant. */
@@ -49,6 +53,10 @@ export function actionReason(action: Action): LogReason {
       return "inbound_applied";
     case "delete_mirror":
       return "removed"; // our own removal (§11 PUSH); an inbound delete never deletes a mirror
+    case "unsubscribe":
+      return "inbound_delete_unsubscribed";
+    case "skip_instance":
+      return "skipped_instance_edit";
     case "noop":
       return "skipped_unchanged";
     default:

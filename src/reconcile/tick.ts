@@ -401,6 +401,8 @@ async function apply(
     case "adopt_orphan":
     case "suppress_echo":
     case "apply_inbound":
+    case "unsubscribe":
+    case "skip_instance":
       throw new Error(`${action.kind} is PULL's, which MVP-5 adds`);
     default:
       return assertNever(action);
