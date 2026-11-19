@@ -75,12 +75,16 @@ it("with no account here that can see it, a page is not found, existing or not",
   const text = await res.text();
   expect(text).toContain("You're signed in as <strong>bob@example.org</strong>");
   expect(text).toContain("add another account");
+  // rc51: and it comes back to this page once that account is signed in.
+  expect(text).toContain(`href="/auth/sign-in?next=${encodeURIComponent(group)}"`);
   expect(text).not.toContain("ann@example.org");
-  // The same page for a group and an event that exist, and ones that never did.
+  // The same page for a group and an event that exist, and ones that never did — but for
+  // the address asked for, which the visitor typed and which tells them nothing.
+  const masked = (page: string, path: string) => page.replace(encodeURIComponent(path), "PATH");
   for (const path of [event, `${GROUPS_PATH}/nope`, "/events/nope"]) {
     const other = await b.request(path);
     expect(other.status, path).toBe(404);
-    expect(await other.text(), path).toBe(text);
+    expect(masked(await other.text(), path), path).toBe(masked(text, group));
   }
 });
 
