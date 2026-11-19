@@ -70,7 +70,8 @@ it("requires sign-in for every group page", async () => {
   for (const path of [GROUPS_PATH, `${GROUPS_PATH}/anything`]) {
     const res = await h.app.request(path);
     expect(res.status).toBe(303);
-    expect(res.headers.get("location")).toBe(SIGN_IN_PATH);
+    // rc51: and comes back to it after.
+    expect(res.headers.get("location")).toBe(`${SIGN_IN_PATH}?next=${encodeURIComponent(path)}`);
   }
   expect((await h.app.request(GROUPS_PATH, post({ name: "x" }))).status).toBe(303);
 });

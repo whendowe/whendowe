@@ -542,16 +542,19 @@ export function runShareLinksContract(makePort: () => Promise<StoragePort>): voi
       expect(await consumeLoginLink(port, carrying.token, { now: T0 })).toEqual({
         email: "share-ana-s@example.org",
         guestId,
+        next: null,
       });
       expect(await consumeLoginLink(port, plain.token, { now: T0 })).toEqual({
         email: "share-bo-s@example.org",
         guestId: null,
+        next: null,
       });
       await leaveThread(port, r.access, LATER);
       await port.query({ sql: "DELETE FROM person WHERE id = ?", params: [guestId] });
       expect(await consumeLoginLink(port, stale.token, { now: T0 })).toEqual({
         email: "share-cy-s@example.org",
         guestId: null,
+        next: null,
       });
     });
   });
