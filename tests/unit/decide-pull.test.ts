@@ -36,7 +36,10 @@ function row(overrides: Partial<ProjectionRow> = {}): ProjectionRow {
     providerEventId: "g1",
     providerEtag: "e1",
     lastPushedHash: "h1",
-    recentWriteNonces: JSON.stringify(["n1", "n2"]),
+    recentWriteNonces: JSON.stringify([
+      ["n1", "e0"],
+      ["n2", "e1"],
+    ]),
     baseRevision: 3,
     state: "synced",
     lastError: null,
@@ -68,12 +71,17 @@ describe("decidePull", () => {
 
   it("recognises our own write read back, by any one of the three layers", () => {
     for (const [incoming, hash] of [
-      [change({ metadata: { canonicalUid: "evt-1", writeNonce: "n1" } }), "h2"],
+      [change({ etag: "e0", metadata: { canonicalUid: "evt-1", writeNonce: "n1" } }), "h2"],
       [change({ etag: "e1" }), "h2"],
       [change(), "h1"],
     ] as const) {
       expect(decidePull(row(), incoming, hash).kind).toBe("suppress_echo");
     }
+  });
+
+  it("rc53: our last nonce on a new etag is a person's edit, kept through it by Google", () => {
+    const incoming = change({ metadata: { canonicalUid: "evt-1", writeNonce: "n2" } });
+    expect(decidePull(row(), incoming, "h2")).toEqual({ kind: "apply_inbound", incoming });
   });
 
   it("skips a change to one occurrence of a series, first of all", () => {
@@ -98,7 +106,7 @@ describe("decidePull", () => {
   });
 
   it("a ring that isn't a list of nonces is no ring", () => {
-    const incoming = change({ metadata: { canonicalUid: "evt-1", writeNonce: "n1" } });
+    const incoming = change({ etag: "e0", metadata: { canonicalUid: "evt-1", writeNonce: "n1" } });
     expect(decidePull(row({ recentWriteNonces: '{"n1":1}' }), incoming, "h2").kind).toBe(
       "apply_inbound",
     );
