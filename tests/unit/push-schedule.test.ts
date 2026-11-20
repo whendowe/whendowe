@@ -90,12 +90,22 @@ it("the ports refresh with this client's credentials, call this calendar, and li
   const ports = pushTickPorts(oauth, {
     publicBaseUrl: "https://whendowe.example",
     capabilities: EVERYTHING,
+    pushChannels: false,
   });
   expect(ports.storage).toBe(oauth.storage);
   expect(ports.cipher).toBe(oauth.cipher);
   expect(ports.capabilities).toBe(EVERYTHING);
   expect(ports.now()).toBe("2101-12-01T09:00:00.000Z");
   expect(ports.newId()).toBe("id-1");
+  // rc53: push channels are off unless the instance turns them on.
+  expect(ports.hookUrl).toBeNull();
+  expect(
+    pushTickPorts(oauth, {
+      publicBaseUrl: "https://whendowe.example",
+      capabilities: EVERYTHING,
+      pushChannels: true,
+    }).hookUrl,
+  ).toBe("https://whendowe.example/hooks/google");
   expect(ports.newNonce()).not.toBe(ports.newNonce());
   expect(ports.eventUrl("e1")).toBe("https://whendowe.example/events/e1");
 
@@ -138,7 +148,7 @@ it("without a client's own fetch or ids, the defaults are used", async () => {
       redirectUri: "https://whendowe.example/oauth/callback",
       now: () => "2101-12-01T09:00:00.000Z",
     },
-    { publicBaseUrl: "https://whendowe.example", capabilities: EVERYTHING },
+    { publicBaseUrl: "https://whendowe.example", capabilities: EVERYTHING, pushChannels: false },
   );
   expect(ports.newId()).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7/);
   expect(ports.newId()).not.toBe(ports.newId());

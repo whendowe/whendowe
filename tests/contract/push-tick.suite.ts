@@ -16,6 +16,7 @@ import { PROPOSAL_CEILING } from "../../src/events/proposal.js";
 import { HttpError } from "../../src/oauth/http.js";
 import { type CapabilityConfig, EVERYTHING, grantCapability } from "../../src/people/capability.js";
 import { findOrCreatePerson } from "../../src/people/person.js";
+import { hashToken } from "../../src/people/tokens.js";
 import type {
   CalendarProvider,
   EventFields,
@@ -118,12 +119,25 @@ class Recording implements CalendarProvider {
     await this.call();
     return this.fake.findByMetadata(uid);
   }
+  async watch(input: Parameters<CalendarProvider["watch"]>[0]) {
+    await this.call();
+    return this.fake.watch(input);
+  }
+  async stopWatch(input: Parameters<CalendarProvider["stopWatch"]>[0]) {
+    await this.call();
+    return this.fake.stopWatch(input);
+  }
 }
 
 async function setUp(
   makePort: () => Promise<StoragePort>,
   tag: string,
-  opts: { readonly expiry?: string | null; readonly capabilities?: CapabilityConfig } = {},
+  opts: {
+    readonly expiry?: string | null;
+    readonly capabilities?: CapabilityConfig;
+    /** rc53: push channels on, posting here. */
+    readonly hookUrl?: string;
+  } = {},
 ) {
   const inner = await makePort();
   const port = counting(inner);
@@ -148,6 +162,7 @@ async function setUp(
   let clock = T0;
   let n = 0;
   const google = new Recording(); // one across ticks, so Google's state persists
+  google.fake.now = () => Date.parse(clock); // channel expiries count from the test's clock
   const refreshes: string[] = [];
   const revoked: string[] = [];
   let refusal: Error | null = null;
@@ -174,6 +189,7 @@ async function setUp(
     now: () => clock,
     newNonce: () => `nonce-${++n}`,
     newId: () => `${tag}-id-${++n}`,
+    hookUrl: opts.hookUrl ?? null,
   };
   const event = async (fields: EventFieldsInput = DINNER) =>
     (await createEvent(inner, { creatorId: ann.id, group: null, fields, now: clock })).id;
@@ -1259,6 +1275,98 @@ export function runPushTickContract(makePort: () => Promise<StoragePort>): void 
           expect.objectContaining({ args: { outcome: "put_back", moved: false, eventId: bens } }),
         ]);
       });
+    });
+  });
+
+  describe("push channels (rc53, T3a)", () => {
+    const HOOK = "https://whendowe.example/hooks/google";
+    const DAY = 24 * 60 * 60 * 1000;
+    const channelRow = async (t: Awaited<ReturnType<typeof setUp>>) =>
+      (
+        await t.inner.query(
+          stmt(
+            `SELECT watch_channel, watch_token_hash, watch_resource_id, watch_expires_at
+               FROM calendar_connection WHERE id = ?`,
+            t.connectionId,
+          ),
+        )
+      )[0];
+
+    it("on, a connection gets a channel, its secret kept hashed; then a quiet tick calls and writes nothing", async () => {
+      const t = await setUp(makePort, "watch-make", { hookUrl: HOOK });
+      expect(await t.tick()).toEqual({ outcome: "done", decisions: [], channel: "made" });
+      const row = await channelRow(t);
+      const made = t.google().fake.channels.get(String(row?.watch_channel));
+      expect(made).toMatchObject({ address: HOOK, resourceId: row?.watch_resource_id });
+      expect(row?.watch_token_hash).toBe(await hashToken(made?.token ?? ""));
+      expect(row?.watch_token_hash).not.toBe(made?.token);
+      expect(row?.watch_expires_at).toBe(at(7 * DAY));
+
+      t.setClock(at(5 * DAY));
+      const calls = t.google().calls;
+      const writes = t.port.writes;
+      expect(await t.tick()).toEqual({ outcome: "done", decisions: [] });
+      expect(t.google().calls).toBe(calls);
+      expect(t.port.writes).toBe(writes);
+    });
+
+    it("within a day of expiry it is replaced: the new one first, then the old one stopped", async () => {
+      const t = await setUp(makePort, "watch-renew", { hookUrl: HOOK });
+      await t.tick();
+      const old = String((await channelRow(t))?.watch_channel);
+      t.setClock(at(6 * DAY + 60_000));
+      expect((await t.tick()).channel).toBe("made");
+      const row = await channelRow(t);
+      expect(row?.watch_channel).not.toBe(old);
+      expect([...t.google().fake.channels.keys()]).toEqual([row?.watch_channel]);
+      expect(row?.watch_expires_at).toBe(at(13 * DAY + 60_000));
+    });
+
+    it("refused, there is none, and it is asked for again only after an hour", async () => {
+      const t = await setUp(makePort, "watch-refused", { hookUrl: HOOK });
+      t.google().fake.failWatch = new HttpError(
+        400,
+        "calendar watch",
+        "pushNotSupportedForRequestedResource",
+      );
+      expect((await t.tick()).channel).toBe("failed");
+      expect(await channelRow(t)).toEqual({
+        watch_channel: null,
+        watch_token_hash: null,
+        watch_resource_id: null,
+        watch_expires_at: at(60 * 60 * 1000),
+      });
+      t.setClock(at(59 * 60 * 1000));
+      const calls = t.google().calls;
+      expect((await t.tick()).channel).toBeUndefined();
+      expect(t.google().calls).toBe(calls);
+      t.setClock(at(60 * 60 * 1000));
+      expect((await t.tick()).channel).toBe("made");
+    });
+
+    it("refused because the grant is gone: the connection is marked, as for any call", async () => {
+      const t = await setUp(makePort, "watch-401", { hookUrl: HOOK });
+      t.google().fake.failWatch = new HttpError(401, "calendar watch", "unauthorized");
+      expect(await t.tick()).toEqual({ outcome: "auth_error", decisions: [] });
+      const [conn] = await t.inner.query(
+        stmt("SELECT status, watch_channel FROM calendar_connection WHERE id = ?", t.connectionId),
+      );
+      expect(conn).toEqual({ status: "auth_error", watch_channel: null });
+    });
+
+    it("off, there is never a channel; disconnecting stops one", async () => {
+      const off = await setUp(makePort, "watch-off");
+      expect(await off.tick()).toEqual({ outcome: "done", decisions: [] });
+      expect(off.google().fake.channels.size).toBe(0);
+
+      const t = await setUp(makePort, "watch-leave", { hookUrl: HOOK });
+      await t.tick();
+      expect(t.google().fake.channels.size).toBe(1);
+      await t.inner.batch([
+        stmt("UPDATE calendar_connection SET status = 'disconnected' WHERE id = ?", t.connectionId),
+      ]);
+      expect((await t.tick()).outcome).toBe("disconnected");
+      expect(t.google().fake.channels.size).toBe(0);
     });
   });
 }
