@@ -1,19 +1,45 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import type { CanonicalEventRow, ProjectionRow } from "../db/schema.js";
+import type { ProjectionRow } from "../db/schema.js";
 import type { EventFields, ProviderEvent } from "../providers/base.js";
 import type { Action } from "./actions.js";
+import { isEcho, parseRing } from "./echo.js";
 
 // The functional core (DESIGN.md §9): one pure decision per reconcile step.
 // Effects (provider calls, storage writes) live in the thin interpreter in tick.ts.
 // This purity is what lets Hegel exercise decisions cheaply under plain vitest.
-// decide() is PULL's, for MVP-5 (§15); the signature is the M0 seam. decidePush() is PUSH's,
-// MVP-4 G2.
-export function decide(
-  _projection: ProjectionRow,
-  _canonical: CanonicalEventRow,
-  _incoming: ProviderEvent | null,
+// decidePull() is PULL's, MVP-5 (rc53); decidePush() is PUSH's, MVP-4 G2.
+
+/**
+ * PULL's decision for one change Google reports on a connection's calendar (§11
+ * classify_and_apply). `projection` is this connection's copy of the event the change names by
+ * its canonical id, or null when it names none of ours (an event of the person's own). The
+ * caller hashes the incoming fields (fieldsHash), since hashing is async and this is pure.
+ *
+ * In order: one occurrence of a series is not taken in yet; a change to no copy of ours, to a
+ * copy already given up, or to an older copy since replaced, is nothing to do; a deletion is
+ * the person unsubscribing (rc45) unless the copy is already gone; our own write read back is
+ * an echo (any of the three layers); anything else is a real edit.
+ */
+export function decidePull(
+  projection: ProjectionRow | null,
+  incoming: ProviderEvent,
+  contentHash: string,
 ): Action {
-  throw new Error("decide() lands in M2 (DESIGN.md §15)");
+  if (incoming.recurringEventId !== null) return { kind: "skip_instance" };
+  if (projection === null || projection.unsubscribedAt !== null) return { kind: "noop" };
+  if (projection.providerEventId !== incoming.id) return { kind: "noop" };
+  if (incoming.isDeleted) {
+    return projection.state === "deleted" ? { kind: "noop" } : { kind: "unsubscribe" };
+  }
+  const echo = isEcho(
+    { nonce: incoming.metadata.writeNonce ?? null, etag: incoming.etag, contentHash },
+    {
+      recentWrites: parseRing(projection.recentWriteNonces),
+      providerEtag: projection.providerEtag,
+      lastPushedHash: projection.lastPushedHash,
+    },
+  );
+  return echo ? { kind: "suppress_echo", incoming } : { kind: "apply_inbound", incoming };
 }
 
 /** What a copy should be, worked out from the person's feed (§10 rc40), with its push hash. */

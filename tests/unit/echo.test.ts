@@ -1,15 +1,24 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { expect, it } from "vitest";
-import { isEcho, pushNonce } from "../../src/reconcile/echo.js";
+import { isEcho, parseRing, pushWrite, type Written } from "../../src/reconcile/echo.js";
 
 const cleanProjection = {
-  recentWriteNonces: ["n1", "n2"],
+  recentWrites: [
+    ["n1", "etag-1"],
+    ["n2", "etag-5"],
+  ] satisfies Written[],
   providerEtag: "etag-5",
   lastPushedHash: "hash-abc",
 };
 
-it("layer 1: a nonce in the ring is an echo", () => {
-  expect(isEcho({ nonce: "n1", etag: null, contentHash: null }, cleanProjection)).toBe(true);
+it("layer 1: one of our writes in the ring, nonce and etag both, is an echo", () => {
+  expect(isEcho({ nonce: "n1", etag: "etag-1", contentHash: null }, cleanProjection)).toBe(true);
+});
+
+it("rc53: our nonce with an etag our write didn't make is a person's edit in Google", () => {
+  // Google keeps the hidden properties through their edit, so our last nonce survives it.
+  expect(isEcho({ nonce: "n2", etag: "etag-6", contentHash: null }, cleanProjection)).toBe(false);
+  expect(isEcho({ nonce: "n1", etag: null, contentHash: null }, cleanProjection)).toBe(false);
 });
 
 it("layer 2: a matching etag is an echo", () => {
@@ -30,15 +39,20 @@ it("null markers never match null projection state", () => {
   expect(
     isEcho(
       { nonce: null, etag: null, contentHash: null },
-      { recentWriteNonces: [], providerEtag: null, lastPushedHash: null },
+      { recentWrites: [], providerEtag: null, lastPushedHash: null },
     ),
   ).toBe(false);
 });
 
-it("pushNonce evicts the oldest entry beyond the ring size", () => {
-  let ring: readonly string[] = [];
+it("pushWrite evicts the oldest entry beyond the ring size", () => {
+  let ring: readonly Written[] = [];
   for (const n of ["a", "b", "c", "d", "e", "f"]) {
-    ring = pushNonce(ring, n);
+    ring = pushWrite(ring, [n, `etag-${n}`]);
   }
-  expect(ring).toEqual(["b", "c", "d", "e", "f"]);
+  expect(ring.map(([n]) => n)).toEqual(["b", "c", "d", "e", "f"]);
+});
+
+it("a ring from before rc53 holds bare nonces, which recognise nothing; junk is no ring", () => {
+  expect(parseRing(JSON.stringify(["n1", ["n2", "etag-2"], "n3"]))).toEqual([["n2", "etag-2"]]);
+  for (const junk of ["", "{", '{"n1":1}', "null", "[[1,2]]"]) expect(parseRing(junk)).toEqual([]);
 });
