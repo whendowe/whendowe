@@ -1694,8 +1694,10 @@ push notifications instead of polling.
     one first, then the old one stopped — and makes one for a connection that has none.
     Disconnecting stops it. An account without `calendar_sync` (rc43) has none.
   - **A slow backstop.** Google doesn't promise every notification arrives, so each connection is
-    also read once every 6 hours. The read is incremental, so a quiet one costs a request and
-    writes nothing (§6).
+    also read once every 6 hours, in a turn of its own worked out from its id, as
+    `connectionsToTick` shares out minutes — so the backstop keeps no clock and writes nothing
+    to remember it. The read is incremental: a quiet one costs a request and writes at most the
+    new cursor Google returns, and only when it differs (§6).
   - **Deploying it** needs the instance's own HTTPS domain for the endpoint, never `workers.dev`.
     Google has required that domain to be verified in Search Console; whether it still does is
     checked when it is deployed (the deployments repo's launch checklist).
@@ -1703,8 +1705,7 @@ push notifications instead of polling.
   <link>." For an occurrence, it adds "Change single occurrences there."
 - **Slices, one PR each:** (1) reading back — the incremental read, classification, echo
   detection, and an editor's change applied and merged, run by the backstop so it works before
-  push; built in two, the pure decisions and merge first, then the read in the tick with
-  `pulled_at` (migration first); (2) people who can't edit — proposals, put-backs and their emails; (3) push — channels,
+  push; built in two, the pure decisions and merge first, then the read in the tick; (2) people who can't edit — proposals, put-backs and their emails; (3) push — channels,
   the endpoint, renewal and stopping (migration first); (4) the 410 full resync with its reverse
   diff (§12), occurrences put back, and the copy's new line.
 - **Verified (§9):**
@@ -1721,7 +1722,6 @@ push notifications instead of polling.
 ALTER TABLE calendar_connection ADD watch_token_hash  text;  -- the channel's secret, hashed
 ALTER TABLE calendar_connection ADD watch_resource_id text;  -- Google's id for it, to stop it
 ALTER TABLE calendar_connection ADD watch_expires_at  text;  -- renewed within a day of this
-ALTER TABLE calendar_connection ADD pulled_at         text;  -- the last read; the backstop's clock (slice 1)
 ```
 
 ### Busy times while you pick (rc41 — MVP-4)
@@ -2726,7 +2726,7 @@ The new milestones are labelled **MVP-1…MVP-5**, deliberately *not* reusing M2
 - **MVP-4 — Google one-way.** "Sign in with Google" on its own Production client if not moved already (built in rc20, §13; basic scopes only — must not consume the sensitive-scope user cap, §12), calendar connection as a *separate*, opt-in grant, token refresh, the reconcile loop and PUSH (§11). rc40 specifies it: §10 *Google Calendar, one way* — three narrow scopes, a calendar you choose, your feed's events, edits in Google overwritten until MVP-5 and said so, deletes there an unsubscribe, an explicit choice on disconnect. rc41 adds §10 *Busy times while you pick*. Slices, one PR at a time: G1 connect, choose the calendar, the narrow scopes · B1 (rc41) your WhenDoWe events in the picker · B2 the fourth scope, `busy_calendar` and choosing what counts (migration first) · B3 Google's busy times in the picker, for accounts with `calendar_sync` (rc44), and the busy-times page disabled without it · G2 the push tick on both targets, which pushes nothing for an account without `calendar_sync` (rc43) · G3 disconnect, account deletion's choice, the reconnect banner and email, Don't put this in my calendar. *Accept: the owner's household lives on it.*
 - **Asking when (rc46) — before the rest of MVP-4** (owner, 2026-11-15: A1 and its follow-ups first, then G2 part 4 and G3). §10 *Asking when*. Slices, one PR at a time: A0 the held minute — `held_action`, its pass on both targets, Undo, and "Email vote links" held (migration first) · A1 answering saved per tap, taken back by tapping again, and the answers grid where it stands · A2 the draft question (migration first) and the Ask page in the Days view — lettered options, the sheet, Undo, "+ and", the read-back and the status line · A3 the Hours view and dragging · A4 the people picker · A5 options of several events on the Ask page, with their changes drawn (P4's editor and diff) — A5a each event's own name, its identity, "+ Like A" and the changes from A drawn, A5b the week-row editor behind Edit (rc49) · A6 in three (rc50): A6a the status line on the remaining pages, A6b the colour channels, A6c Ask as the starting point — a lone time with nobody to ask made as an event, the old links retired. *Accept: the owner asks a group when to meet here rather than in Rallly.*
 - **Mail that stops (rc51) — before showing it to people** (owner, 2026-11-18). §10 *Mail that stops*. Slices, one PR at a time: M1 the trail — `mail_trail`, the changes on opting out and taking it back, what a message is about, the unsent lines in the history (migration first) · M2 the opt-out page — the warning, "can send me the link", Start them again · M3 the line on the name, Copy link, and sign-in's `next` (migration first).
-- **MVP-5 — Google two-way.** PULL classification, echo detection, tier-gated inbound edits (§11), inbound deletes as unsubscribe, conflict policy, 410 full resync with the reverse diff. rc53 specifies it: §10 *Google Calendar, both ways* — title, time, place and description come back; merged per field, the later write winning a collision; proposals and put-backs, never silent; push channels with a 6-hour backstop. Slices, one PR at a time: T1a the pure decisions and merge · T1b the read in the tick, with `pulled_at` (migration first) · T2 people who can't edit · T3 push (its own migration) · T4 the 410 resync, occurrences put back, the copy's new line. *Accept: a member moves an event in Google and the group follows or receives a proposal (US-15).*
+- **MVP-5 — Google two-way.** PULL classification, echo detection, tier-gated inbound edits (§11), inbound deletes as unsubscribe, conflict policy, 410 full resync with the reverse diff. rc53 specifies it: §10 *Google Calendar, both ways* — title, time, place and description come back; merged per field, the later write winning a collision; proposals and put-backs, never silent; push channels with a 6-hour backstop. Slices, one PR at a time: T1a the pure decisions and merge · T1b the read in the tick · T2 people who can't edit · T3 push (migration first) · T4 the 410 resync, occurrences put back, the copy's new line. *Accept: a member moves an event in Google and the group follows or receives a proposal (US-15).*
 - **→ Public MVP: the first ~100.**
 - **Later:** Microsoft Graph and CalDAV two-way; Google OAuth verification (required before user 101 — start it before it is needed); hardening of whole-series recurrence end to end.
 
