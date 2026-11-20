@@ -31,6 +31,8 @@ export type LogReason =
   | "skipped_unchanged"
   | "echo_suppressed"
   | "inbound_applied"
+  | "inbound_proposed" // rc54: from someone who may only propose — now their proposal
+  | "inbound_put_back" // rc54: from someone who may only view — their copy put back
   | "inbound_delete_unsubscribed"
   | "skipped_instance_edit"
   | "adopted_orphan"

@@ -793,6 +793,8 @@ function heldWhat(v: View, h: HeldAction): string {
       const p = v.plans.find((x) => x.id === id);
       return p === undefined ? "Choosing" : `Choosing ${p.letter ?? ""} · ${optionLabel(p)}`;
     }
+    case "google_notice": // rc54: never a thread's; named for completeness
+      return "Emailing you about a change in Google";
   }
 }
 

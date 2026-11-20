@@ -11,7 +11,9 @@ import {
   findEventForParticipant,
   flatten,
 } from "../events/event.js";
+import { proposeChange } from "../events/proposal.js";
 import { feedEntries } from "../feeds/feed.js";
+import { noticeStatement } from "../held.js";
 import type { MailPort } from "../mail/port.js";
 import { HttpError } from "../oauth/http.js";
 import { type CapabilityConfig, hasCapability } from "../people/capability.js";
@@ -466,6 +468,7 @@ async function pull(
       case "apply_inbound": {
         if (copy === null) break;
         const reason = await takeIn(ports, {
+          connectionId,
           copy,
           incoming: action.incoming,
           ownerId: conn.owner_id,
@@ -509,13 +512,20 @@ function inbound(f: InboundFields): InboundFields {
 }
 
 /**
- * An editor's change from Google, merged into the event (rc53) and written as their edit, from
- * Google. Null when it isn't theirs to make here: the event is gone or not agreed, or they may
- * not edit it — people who can't are T2's (a proposal, or their copy put back).
+ * A change from Google, merged into the event (rc53) and done as the person may do it here,
+ * by their edit tier (§11):
+ *   - `edit`: written as their edit, from Google — "changed it in Google";
+ *   - `propose`: made their proposal (WORKFLOWS §5), their copy put back until it is accepted;
+ *   - `view`: their copy put back.
+ * Either of the last two is told in one email, held for the minute's pass (rc54), at most one a
+ * day per person per event. A change only to what never comes back — reminders, the copy's
+ * link — merges to nothing and is left alone. Null when there is no event to change: it is
+ * gone, or no longer agreed.
  */
 async function takeIn(
   ports: TickPorts,
   at: {
+    readonly connectionId: string;
     readonly copy: ProjectionRow;
     readonly incoming: ProviderEvent;
     readonly ownerId: string;
@@ -526,7 +536,6 @@ async function takeIn(
   for (let attempt = 0; attempt < TAKE_IN_ATTEMPTS; attempt += 1) {
     const access = await findEventForParticipant(storage, at.copy.canonicalEventId, at.ownerId);
     if (access === null || access.event.status !== "scheduled") return null;
-    if (access.participation.editTier !== "edit") return null;
     const current = access.event;
     const base =
       at.copy.baseRevision === null
@@ -539,10 +548,58 @@ async function takeIn(
       visibility: access.participation.visibility,
     });
     if (merge.applied.length === 0) return "skipped_unchanged";
+    const tier = access.participation.editTier;
+    const moved = merge.applied.includes("time");
+    // The copy is put back by the push that follows in this tick: pending_update is pushed.
+    const putBack = (outcome: "proposed" | "put_back"): SqlStatement[] => [
+      upsertProjection(ports, {
+        connectionId: at.connectionId,
+        eventId: current.id,
+        previous: at.copy,
+        now: at.now,
+        change: { state: "pending_update" },
+      }),
+      noticeStatement({
+        actorId: at.ownerId,
+        eventId: current.id,
+        args: { outcome, moved },
+        now: at.now,
+        newId: ports.newId,
+      }),
+    ];
+    if (tier === "view") {
+      await storage.batch(putBack("put_back"));
+      return "inbound_put_back";
+    }
     const parsed = eventFieldsSchema.safeParse({ ...current, ...merge.fields });
     // Google allows nothing the form refuses that we know of; if it ever does, the event is
     // left as it is and the next push puts the copy back.
     if (!parsed.success) return "error";
+    if (tier === "propose") {
+      const proposed = await proposeChange(storage, access, {
+        fields: parsed.data,
+        now: at.now,
+        expectedRevision: current.revision,
+        newId: ports.newId,
+      });
+      switch (proposed.kind) {
+        case "proposed":
+          await storage.batch(putBack("proposed"));
+          return "inbound_proposed";
+        case "unchanged":
+          return "skipped_unchanged";
+        case "conflict":
+          continue; // someone's edit landed first: merge again against it
+        case "forbidden":
+        case "closed":
+        case "limit":
+          // No longer theirs to propose, or past the most proposals one person may make.
+          await storage.batch(putBack("put_back"));
+          return "inbound_put_back";
+        default:
+          return assertNever(proposed);
+      }
+    }
     const change = diff(flatten(current), flatten(parsed.data));
     if (Object.keys(change).length === 0) return "skipped_unchanged";
     try {
