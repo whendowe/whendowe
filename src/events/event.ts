@@ -525,9 +525,10 @@ export function fieldEditStatements(input: {
   readonly now: string;
   readonly gate?: SqlStatement;
   readonly afterLog?: readonly SqlStatement[];
+  /** Where the change was made: here, or in a person's Google calendar (rc53). */
+  readonly source?: ChangeSource;
 }): SqlStatement[] {
   const { fields } = input;
-  const log = logRow(input.eventId, input.expected + 1, input.actorId, input.change, input.now);
   return [
     {
       sql: `UPDATE canonical_event SET title = ?, description = ?, location = ?, all_day = ?,
@@ -550,8 +551,15 @@ export function fieldEditStatements(input: {
     },
     {
       sql: `INSERT INTO change_log (canonical_event_id, revision, actor, source, diff, created_at)
-            SELECT ?, ?, ?, 'ui', ?, ? WHERE changes() = 1`,
-      params: log.params,
+            SELECT ?, ?, ?, ?, ?, ? WHERE changes() = 1`,
+      params: [
+        input.eventId,
+        input.expected + 1,
+        input.actorId,
+        input.source ?? "ui",
+        JSON.stringify(input.change),
+        input.now,
+      ],
     },
     ...(input.afterLog ?? []),
     // A material change (time, date, place — DESIGN §10 rc13) asks everyone who had
@@ -644,8 +652,13 @@ export async function editEvent(
   };
 }
 
+/** Where a change was made (rc53): here, or in a person's Google calendar. */
+export type ChangeSource = "ui" | "inbound_sync";
+
 export interface HistoryEntry {
   readonly revision: number;
+  /** "inbound_sync": made in the actor's Google calendar and taken in (rc53). */
+  readonly source: string;
   readonly actorId: string;
   /** As the event's people see the actor (DESIGN §10 rc21); null when it wasn't a person. */
   readonly actor: Shown | null;
@@ -667,6 +680,7 @@ const historyRowSchema = z.object({
   proposer_display_name: z.string().nullable(),
   proposer_handle: z.string().nullable(),
   proposer_show_email: z.number().nullable(),
+  source: z.string(),
   diff: z.string(),
   created_at: z.string(),
 });
@@ -690,7 +704,7 @@ export async function listHistory(
     sql: `SELECT c.revision, c.actor, p.email, p.display_name, ap.handle, ${shownEmailSql("ap")} AS show_email,
                  ecp.proposed_by AS proposer_id, pp.email AS proposer_email,
                  pp.display_name AS proposer_display_name, xp.handle AS proposer_handle,
-                 ${shownEmailSql("xp")} AS proposer_show_email, c.diff, c.created_at
+                 ${shownEmailSql("xp")} AS proposer_show_email, c.source, c.diff, c.created_at
           FROM change_log c LEFT JOIN person p ON p.id = c.actor
             LEFT JOIN event_participation ap
               ON ap.canonical_event_id = c.canonical_event_id AND ap.person_id = c.actor
@@ -707,6 +721,7 @@ export async function listHistory(
     const r = historyRowSchema.parse(row);
     return {
       revision: r.revision,
+      source: r.source,
       actorId: r.actor,
       actor:
         r.email === null
@@ -738,6 +753,42 @@ export async function listHistory(
       at: r.created_at,
     };
   });
+}
+
+/**
+ * An event's fields as they were at `revision` (rc53): what a copy made then holds. Worked
+ * back from the event now by undoing, newest first, every logged change after it, so no
+ * second copy of an event's fields is kept. A revision at or past the current one is the
+ * event as it is.
+ */
+export async function fieldsAtRevision(
+  storage: StoragePort,
+  event: CanonicalEvent,
+  revision: number,
+): Promise<EventFields> {
+  const rows = await storage.query({
+    sql: `SELECT diff FROM change_log WHERE canonical_event_id = ? AND revision > ?
+          ORDER BY revision DESC`,
+    params: [event.id, revision],
+  });
+  const flat = flatten(event);
+  for (const row of rows) {
+    const change = diffSchema.parse(JSON.parse(z.object({ diff: z.string() }).parse(row).diff));
+    for (const [field, { before }] of Object.entries(change))
+      if (field in flat) flat[field] = before;
+  }
+  const text = (v: string | number | null | undefined): string | null =>
+    typeof v === "string" ? v : null;
+  return {
+    title: text(flat.title) ?? event.title,
+    description: text(flat.description ?? null),
+    location: text(flat.location ?? null),
+    allDay: flat.allDay === 1,
+    startLocal: text(flat.startLocal) ?? event.startLocal,
+    endLocal: text(flat.endLocal) ?? event.endLocal,
+    tzid: text(flat.tzid ?? null),
+    rrule: text(flat.rrule ?? null),
+  };
 }
 
 // --- Lifecycle transitions (WORKFLOWS §5, DESIGN §10 rc13) ------------------------------

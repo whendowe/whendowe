@@ -17,7 +17,7 @@ import { disabledMailPort, type MailPort } from "../../src/mail/port.js";
 import { type CalendarGrants, eraseDue } from "../../src/privacy/erasure.js";
 import { retentionPass } from "../../src/privacy/purge.js";
 import { isRetentionMinute } from "../../src/privacy/retention.js";
-import { connectionsToTick, tickFailureLog } from "../../src/reconcile/tick.js";
+import { tickFailureLog, ticksDue } from "../../src/reconcile/tick.js";
 import { calendarGrants, createApp, heldRunners, reconnectMailer } from "../../src/web/app.js";
 import type { AuthDeps } from "../../src/web/routes/auth.js";
 import { buildOAuthDeps, tokenCipherFor } from "../../src/web/routes/oauth-deps.js";
@@ -157,18 +157,21 @@ async function build(env: Env): Promise<Built> {
 }
 
 /** Ask each connection's Durable Object to tick; one failing doesn't stop the rest. */
-async function fanOut(env: Env, ids: readonly string[]): Promise<void> {
+async function fanOut(
+  env: Env,
+  due: readonly { readonly connectionId: string; readonly pull: boolean }[],
+): Promise<void> {
   const asked = await Promise.allSettled(
-    ids.map((connectionId) =>
+    due.map(({ connectionId, pull }) =>
       env.CONNECTION_DO.get(env.CONNECTION_DO.idFromName(connectionId)).fetch(TICK_URL, {
         method: "POST",
-        body: JSON.stringify({ connectionId }),
+        body: JSON.stringify({ connectionId, pull }),
       }),
     ),
   );
   asked.forEach((r, i) => {
     if (r.status === "rejected")
-      console.error(JSON.stringify(tickFailureLog(ids[i] ?? "", r.reason)));
+      console.error(JSON.stringify(tickFailureLog(due[i]?.connectionId ?? "", r.reason)));
   });
 }
 
@@ -205,6 +208,7 @@ export default {
     // The push tick (MVP-4 G2): fan out to one ConnectionDO per active calendar_connection,
     // its single writer (§11). Cron is the only scheduler of regular ticks — never per-tick DO
     // alarms (§16). Choosing whom to tick reads only; a quiet tick writes nothing (§6).
-    if (pushing) await fanOut(env, await connectionsToTick(storage, at));
+    // rc53: with each connection's turn to be read in Google, every 6 hours.
+    if (pushing) await fanOut(env, await ticksDue(storage, at));
   },
 };

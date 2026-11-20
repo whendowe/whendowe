@@ -7,7 +7,7 @@ import type {
   ProviderMetadata,
   UpsertResult,
 } from "./base.js";
-import { ProviderEventGoneError } from "./base.js";
+import { ProviderEventGoneError, SyncTokenExpiredError } from "./base.js";
 
 // In-memory fake provider (DESIGN.md §9): all reconcile/property tests run against
 // this, never the real Google API. Change notifications go into an explicit outbox
@@ -28,12 +28,22 @@ export class FakeCalendarProvider implements CalendarProvider {
   private etagCounter = 0;
   private syncCounter = 0;
 
-  listChanges(_syncToken: string | null): Promise<ChangeBatch> {
-    const changes = [...this.outbox];
+  listChanges(syncToken: string | null): Promise<ChangeBatch> {
+    if (this.expireNext) {
+      this.expireNext = false;
+      return Promise.reject(new SyncTokenExpiredError());
+    }
+    // A full listing (null cursor) is everything there; otherwise what changed since.
+    const changes =
+      syncToken === null ? [...this.events.values()].map((e) => e.event) : [...this.outbox];
     this.outbox.length = 0;
-    this.syncCounter += 1;
+    // The cursor moves only when something changed, so a quiet read is visibly quiet.
+    if (changes.length > 0 || syncToken === null) this.syncCounter += 1;
     return Promise.resolve({ changes, nextSyncToken: `sync-${this.syncCounter}` });
   }
+
+  /** Test hook: the next read finds its cursor expired (410, §12). */
+  expireNext = false;
 
   upsert(
     providerEventId: string | null,
@@ -77,6 +87,33 @@ export class FakeCalendarProvider implements CalendarProvider {
       }
     }
     return Promise.resolve(null);
+  }
+
+  /**
+   * Test hook: a person edits the event in the provider's own app (rc53). As Google does, the
+   * hidden metadata — the canonical id and the nonce of our last write — is kept, and the etag
+   * changes. `recurringEventId` set makes it an edit to one occurrence of a series.
+   */
+  editByPerson(
+    providerEventId: string,
+    fields: Partial<EventFields>,
+    recurringEventId: string | null = null,
+  ): void {
+    const stored = this.events.get(providerEventId);
+    if (stored === undefined || stored.deleted) throw new Error("no such event to edit");
+    const event: ProviderEvent = {
+      ...stored.event,
+      etag: `etag-${++this.etagCounter}`,
+      fields: { ...stored.event.fields, ...fields },
+      recurringEventId,
+    };
+    this.events.set(providerEventId, { event, deleted: false });
+    this.outbox.push(event);
+  }
+
+  /** Test hook: what the provider holds for an event now. */
+  holds(providerEventId: string): ProviderEvent | null {
+    return this.events.get(providerEventId)?.event ?? null;
   }
 
   /** Test hook: number of undelivered change notifications. */

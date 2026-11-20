@@ -1,21 +1,31 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { z } from "zod";
+import { diff } from "../changelog.js";
 import type { TokenCipher } from "../crypto/tokens.js";
 import { type SqlStatement, type StoragePort, stmt } from "../db/port.js";
 import type { ProjectionRow } from "../db/schema.js";
+import {
+  eventFieldsSchema,
+  fieldEditStatements,
+  fieldsAtRevision,
+  findEventForParticipant,
+  flatten,
+} from "../events/event.js";
 import { feedEntries } from "../feeds/feed.js";
 import type { MailPort } from "../mail/port.js";
 import { HttpError } from "../oauth/http.js";
 import { type CapabilityConfig, hasCapability } from "../people/capability.js";
-import type { CalendarProvider } from "../providers/base.js";
-import { ProviderEventGoneError } from "../providers/base.js";
+import type { CalendarProvider, ChangeBatch, ProviderEvent } from "../providers/base.js";
+import { ProviderEventGoneError, SyncTokenExpiredError } from "../providers/base.js";
 import { type Action, actionReason, assertNever, type LogReason } from "./actions.js";
-import { type DesiredCopy, decidePush, nextRetryAt } from "./decide.js";
+import { fromCopy, type InboundFields, mergeInbound } from "./conflict.js";
+import { type DesiredCopy, decidePull, decidePush, nextRetryAt } from "./decide.js";
 import { parseRing, pushWrite } from "./echo.js";
 import { fieldsHash, projectEntry } from "./project.js";
 
-// One reconcile tick for one connection (DESIGN.md §11). MVP-4 is PUSH only (rc40): the
-// calendar holds what the person's feed holds, at their tier. Orchestration over the ports —
+// One reconcile tick for one connection (DESIGN.md §11). PUSH (rc40): the calendar holds what
+// the person's feed holds, at their tier. PULL (rc53), when the tick is asked to read: changes
+// made in Google come in first, so the push that follows starts from the merged event. Orchestration over the ports —
 // the imperative shell around the pure decidePush(). What it must uphold (§9): idempotency,
 // convergence, and the steady-state ZERO-WRITE path (§6): when every copy matches, nothing is
 // written and Google is not called, so no token is refreshed either.
@@ -86,6 +96,50 @@ export async function connectionsToTick(
 const idRowSchema = z.object({ id: z.string() });
 
 /**
+ * The backstop (rc53): Google doesn't promise every push notification arrives, so each
+ * connection is also read once every this many minutes.
+ */
+export const PULL_EVERY_MINUTES = 6 * 60;
+
+/**
+ * A connection's own minute in every PULL_EVERY_MINUTES, from its id (FNV-1a), so reads are
+ * spread out and the backstop keeps no clock: nothing is written to remember when it ran.
+ */
+export function pullTurn(connectionId: string): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < connectionId.length; i += 1) {
+    h ^= connectionId.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h % PULL_EVERY_MINUTES;
+}
+
+/**
+ * What to tick in the minute `at`, and which of them to read first (rc53): this minute's share
+ * (connectionsToTick), and every active connection whose turn to be read it is, ticked whether
+ * or not its share is now, so a long rotation can't make it miss its turn. Reads only (§6).
+ */
+export async function ticksDue(
+  storage: StoragePort,
+  at: string,
+  max: number = FAN_OUT_MAX,
+): Promise<{ readonly connectionId: string; readonly pull: boolean }[]> {
+  const minute = Math.floor(Date.parse(at) / 60_000) % PULL_EVERY_MINUTES;
+  const reading = new Set(
+    (
+      await storage.query(
+        stmt("SELECT id FROM calendar_connection WHERE status = 'active' ORDER BY id"),
+      )
+    )
+      .map((r) => idRowSchema.parse(r).id)
+      .filter((id) => pullTurn(id) === minute),
+  );
+  const share = await connectionsToTick(storage, at, max);
+  const ids = [...new Set([...share, ...reading])];
+  return ids.map((connectionId) => ({ connectionId, pull: reading.has(connectionId) }));
+}
+
+/**
  * A tick's log line (§14): its outcome and how many decisions of each reason, by connection
  * id — never event content. Null for a quiet tick (nothing but `skipped_unchanged`) or a
  * skipped one, so a steady state logs nothing.
@@ -124,6 +178,7 @@ const connectionSchema = z.object({
   access_token_enc: z.string(),
   refresh_token_enc: z.string(),
   token_expiry: z.string().nullable(),
+  sync_token: z.string().nullable(),
 });
 
 const projectionSchema = z
@@ -185,11 +240,17 @@ interface Want extends DesiredCopy {
   readonly visibility: string;
 }
 
-export async function runTick(ports: TickPorts, connectionId: string): Promise<TickResult> {
+export async function runTick(
+  ports: TickPorts,
+  connectionId: string,
+  /** `pull`: read what changed in Google first (rc53) — the backstop's turn, or a push poke. */
+  options: { readonly pull?: boolean } = {},
+): Promise<TickResult> {
   const { storage } = ports;
   const [row] = await storage.query(
     stmt(
-      `SELECT owner_id, status, calendar_id, access_token_enc, refresh_token_enc, token_expiry
+      `SELECT owner_id, status, calendar_id, access_token_enc, refresh_token_enc, token_expiry,
+              sync_token
          FROM calendar_connection WHERE id = ? AND status IN ('active', 'disconnected')`,
       connectionId,
     ),
@@ -207,31 +268,6 @@ export async function runTick(ports: TickPorts, connectionId: string): Promise<T
     return { outcome: "skipped", decisions: [] };
   }
   const now = ports.now();
-
-  const wanted = new Map<string, Want>();
-  for (const entry of leaving
-    ? []
-    : await feedEntries(
-        storage,
-        { personId: conn.owner_id, groupId: null, ownCalendar: true },
-        { now, eventUrl: ports.eventUrl },
-      )) {
-    if (entry.status !== "scheduled") continue; // a cancelled entry is a copy to remove
-    const fields = projectEntry(entry);
-    wanted.set(entry.id, {
-      fields,
-      hash: await fieldsHash(fields),
-      revision: entry.revision,
-      visibility: entry.visibility,
-    });
-  }
-  const existing = new Map<string, ProjectionRow>();
-  for (const r of await storage.query(
-    stmt("SELECT * FROM projection WHERE calendar_connection_id = ?", connectionId),
-  )) {
-    const p = projectionSchema.parse(r);
-    existing.set(p.canonicalEventId, p);
-  }
 
   // The token, fetched on the first call out and refreshed (and kept) only if it must be.
   let token: Promise<string> | null = null;
@@ -263,6 +299,44 @@ export async function runTick(ports: TickPorts, connectionId: string): Promise<T
   const provider = ports.providerFor(conn.calendar_id, getAccessToken);
 
   const decisions: { eventId: string; reason: LogReason }[] = [];
+  if (options.pull === true && !leaving) {
+    try {
+      decisions.push(...(await pull(ports, provider, { connectionId, conn, now })));
+    } catch (error) {
+      if (error instanceof AuthLost || (error instanceof HttpError && error.status === 401)) {
+        await storage.batch([authError(connectionId, now)]);
+        return { outcome: "auth_error", decisions };
+      }
+      if (error instanceof NoToken) return { outcome: "deferred", decisions };
+      throw error;
+    }
+  }
+
+  const wanted = new Map<string, Want>();
+  for (const entry of leaving
+    ? []
+    : await feedEntries(
+        storage,
+        { personId: conn.owner_id, groupId: null, ownCalendar: true },
+        { now, eventUrl: ports.eventUrl },
+      )) {
+    if (entry.status !== "scheduled") continue; // a cancelled entry is a copy to remove
+    const fields = projectEntry(entry);
+    wanted.set(entry.id, {
+      fields,
+      hash: await fieldsHash(fields),
+      revision: entry.revision,
+      visibility: entry.visibility,
+    });
+  }
+  const existing = new Map<string, ProjectionRow>();
+  for (const r of await storage.query(
+    stmt("SELECT * FROM projection WHERE calendar_connection_id = ?", connectionId),
+  )) {
+    const p = projectionSchema.parse(r);
+    existing.set(p.canonicalEventId, p);
+  }
+
   const ids = [...new Set([...wanted.keys(), ...existing.keys()])].sort();
   for (const eventId of ids) {
     const want = wanted.get(eventId) ?? null;
@@ -281,14 +355,7 @@ export async function runTick(ports: TickPorts, connectionId: string): Promise<T
           await storage.batch(forgetConnection(connectionId));
           return { outcome: "disconnected", decisions };
         }
-        await storage.batch([
-          stmt(
-            `UPDATE calendar_connection SET status = 'auth_error', updated_at = ?
-               WHERE id = ? AND status = 'active'`,
-            now,
-            connectionId,
-          ),
-        ]);
+        await storage.batch([authError(connectionId, now)]);
         return { outcome: "auth_error", decisions };
       }
       if (error instanceof NoToken) return { outcome: "deferred", decisions };
@@ -308,6 +375,202 @@ export async function runTick(ports: TickPorts, connectionId: string): Promise<T
     return { outcome: "disconnected", decisions };
   }
   return { outcome: "done", decisions };
+}
+
+/** Google refused the grant (§12): the connection waits for its person to reconnect. */
+function authError(connectionId: string, now: string): SqlStatement {
+  return stmt(
+    `UPDATE calendar_connection SET status = 'auth_error', updated_at = ?
+       WHERE id = ? AND status = 'active'`,
+    now,
+    connectionId,
+  );
+}
+
+/** A rival edit landing between reading the event and writing the merge: try this often. */
+const TAKE_IN_ATTEMPTS = 3;
+
+/**
+ * PULL (§11, rc53): read what changed on the connection's calendar since its cursor, and
+ * decide each change (decidePull). Our own writes read back are echoes; a copy deleted there
+ * is its person unsubscribing (rc45); an editor's change is merged in (mergeInbound). The
+ * cursor is kept after the changes it covers, and only when Google moved it, so a quiet read
+ * writes nothing (§6). A change applied twice — a read repeated after a crash — merges to
+ * nothing the second time (§11 "inbound apply is idempotent").
+ */
+async function pull(
+  ports: TickPorts,
+  provider: CalendarProvider,
+  at: {
+    readonly connectionId: string;
+    readonly conn: z.infer<typeof connectionSchema>;
+    readonly now: string;
+  },
+): Promise<{ eventId: string; reason: LogReason }[]> {
+  const { storage } = ports;
+  const { connectionId, conn, now } = at;
+  let batch: ChangeBatch;
+  try {
+    batch = await provider.listChanges(conn.sync_token);
+  } catch (error) {
+    // The cursor expired (§12): read everything. The reverse diff — copies deleted while the
+    // cursor was dead — is T4's.
+    if (!(error instanceof SyncTokenExpiredError)) throw error;
+    batch = await provider.listChanges(null);
+  }
+  const copies = new Map<string, ProjectionRow>();
+  for (const r of await storage.query(
+    stmt("SELECT * FROM projection WHERE calendar_connection_id = ?", connectionId),
+  )) {
+    const p = projectionSchema.parse(r);
+    copies.set(p.canonicalEventId, p);
+  }
+  const decisions: { eventId: string; reason: LogReason }[] = [];
+  for (const change of batch.changes) {
+    const uid = change.metadata.canonicalUid ?? null;
+    const copy = uid === null ? null : (copies.get(uid) ?? null);
+    const action = decidePull(copy, change, await fieldsHash(change.fields));
+    switch (action.kind) {
+      case "noop":
+        break;
+      case "skip_instance":
+        // Only one of ours is worth a line: the person's own series are their business.
+        if (copy !== null)
+          decisions.push({ eventId: copy.canonicalEventId, reason: "skipped_instance_edit" });
+        break;
+      case "suppress_echo":
+        if (copy !== null)
+          decisions.push({ eventId: copy.canonicalEventId, reason: "echo_suppressed" });
+        break;
+      case "unsubscribe":
+        if (copy === null) break;
+        await storage.batch([
+          upsertProjection(ports, {
+            connectionId,
+            eventId: copy.canonicalEventId,
+            previous: copy,
+            now,
+            change: {
+              state: "deleted",
+              providerEventId: null,
+              providerEtag: null,
+              lastPushedHash: null,
+              lastError: null,
+              retryAt: null,
+              unsubscribedAt: now,
+            },
+          }),
+        ]);
+        decisions.push({ eventId: copy.canonicalEventId, reason: "inbound_delete_unsubscribed" });
+        break;
+      case "apply_inbound": {
+        if (copy === null) break;
+        const reason = await takeIn(ports, {
+          copy,
+          incoming: action.incoming,
+          ownerId: conn.owner_id,
+          now,
+        });
+        if (reason !== null) decisions.push({ eventId: copy.canonicalEventId, reason });
+        break;
+      }
+      case "create_mirror":
+      case "adopt_orphan":
+      case "push":
+      case "delete_mirror":
+        throw new Error(`${action.kind} is PUSH's, never PULL's`);
+      default:
+        assertNever(action);
+    }
+  }
+  if (batch.nextSyncToken !== conn.sync_token) {
+    await storage.batch([
+      stmt(
+        "UPDATE calendar_connection SET sync_token = ? WHERE id = ?",
+        batch.nextSyncToken,
+        connectionId,
+      ),
+    ]);
+  }
+  return decisions;
+}
+
+/** The parts of an event a copy can bring back (rc53). */
+function inbound(f: InboundFields): InboundFields {
+  return {
+    title: f.title,
+    description: f.description,
+    location: f.location,
+    startLocal: f.startLocal,
+    endLocal: f.endLocal,
+    tzid: f.tzid,
+    allDay: f.allDay,
+  };
+}
+
+/**
+ * An editor's change from Google, merged into the event (rc53) and written as their edit, from
+ * Google. Null when it isn't theirs to make here: the event is gone or not agreed, or they may
+ * not edit it — people who can't are T2's (a proposal, or their copy put back).
+ */
+async function takeIn(
+  ports: TickPorts,
+  at: {
+    readonly copy: ProjectionRow;
+    readonly incoming: ProviderEvent;
+    readonly ownerId: string;
+    readonly now: string;
+  },
+): Promise<LogReason | null> {
+  const { storage } = ports;
+  for (let attempt = 0; attempt < TAKE_IN_ATTEMPTS; attempt += 1) {
+    const access = await findEventForParticipant(storage, at.copy.canonicalEventId, at.ownerId);
+    if (access === null || access.event.status !== "scheduled") return null;
+    if (access.participation.editTier !== "edit") return null;
+    const current = access.event;
+    const base =
+      at.copy.baseRevision === null
+        ? current
+        : await fieldsAtRevision(storage, current, at.copy.baseRevision);
+    const merge = mergeInbound({
+      base: inbound(base),
+      current: inbound(current),
+      incoming: fromCopy(at.incoming.fields),
+      visibility: access.participation.visibility,
+    });
+    if (merge.applied.length === 0) return "skipped_unchanged";
+    const parsed = eventFieldsSchema.safeParse({ ...current, ...merge.fields });
+    // Google allows nothing the form refuses that we know of; if it ever does, the event is
+    // left as it is and the next push puts the copy back.
+    if (!parsed.success) return "error";
+    const change = diff(flatten(current), flatten(parsed.data));
+    if (Object.keys(change).length === 0) return "skipped_unchanged";
+    try {
+      await storage.batch(
+        fieldEditStatements({
+          eventId: current.id,
+          expected: current.revision,
+          fields: parsed.data,
+          change,
+          actorId: at.ownerId,
+          now: at.now,
+          source: "inbound_sync",
+        }),
+      );
+    } catch {
+      continue; // UNIQUE(event, revision): someone else's edit landed first; merge again
+    }
+    const [written] = await storage.query(
+      stmt(
+        "SELECT actor, source FROM change_log WHERE canonical_event_id = ? AND revision = ?",
+        current.id,
+        current.revision + 1,
+      ),
+    );
+    if (written?.actor === at.ownerId && written.source === "inbound_sync")
+      return "inbound_applied";
+  }
+  return "error";
 }
 
 /** How many of WhenDoWe's copies a connection has in Google now (rc40: "Also remove the 23"). */
