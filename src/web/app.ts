@@ -21,6 +21,7 @@ import {
 } from "./routes/events.js";
 import { registerFeedRoutes } from "./routes/feeds.js";
 import { GROUPS_PATH, registerGroupRoutes } from "./routes/groups.js";
+import { registerHookRoutes } from "./routes/hooks.js";
 import {
   BUSY_PATH,
   CONNECT_PATH,
@@ -47,6 +48,11 @@ export interface AppOptions {
   readonly auth?: AuthDeps;
   /** Google connect flow; absent on an instance with no Google credentials. */
   readonly oauth?: OAuthRouteDeps;
+  /**
+   * rc53: Google's push notifications ask for a connection to be read. Each deployment says how
+   * (the connection's Durable Object, or the Node loop); absent, there is no endpoint.
+   */
+  readonly poke?: (connectionId: string) => Promise<void>;
 }
 
 /** Someone with no handle shows as "Guest …" to everyone: ask them, once, on home (§10 rc21). */
@@ -214,6 +220,8 @@ ${connect}`,
     registerOperatorRoutes(app, auth);
   }
   if (oauth !== undefined) registerOAuthRoutes(app, oauth, auth);
+  if (oauth !== undefined && options.poke !== undefined)
+    registerHookRoutes(app, { storage: oauth.storage, poke: options.poke });
 
   return app;
 }

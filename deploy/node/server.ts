@@ -86,7 +86,22 @@ const auth: AuthDeps = {
   // Capabilities (rc43): who may use what, and the operators who decide.
   capabilities: capabilityConfigOf(config),
 };
-const app = createApp({ auth, oauth });
+// rc53: Google's push notifications (routes/hooks.ts) ask for a connection to be read; the
+// minute's loop below reads them, so this process stays the only writer. A set: any number of
+// pokes before the next minute are one read.
+const poked = new Set<string>();
+const app = createApp({
+  auth,
+  oauth,
+  ...(config.GOOGLE_PUSH_CHANNELS === "on"
+    ? {
+        poke: (connectionId: string) => {
+          poked.add(connectionId);
+          return Promise.resolve();
+        },
+      }
+    : {}),
+});
 
 // The pass (§10 rc21/rc22, rc46), each minute like the Worker's cron: held actions, then purge;
 // retention hourly; then each connection's push tick, one after another (§11) — this one
@@ -107,7 +122,14 @@ const tickPorts =
 /** Every connection due this minute, in turn; one failing doesn't stop the rest. */
 async function pushTicks(at: string): Promise<void> {
   if (tickPorts === undefined) return;
-  for (const { connectionId: id, pull } of await ticksDue(storage, at, Number.POSITIVE_INFINITY)) {
+  const due = await ticksDue(storage, at, Number.POSITIVE_INFINITY);
+  // Poked since the last minute: read now, whether or not it is their turn (rc53).
+  const asked = new Set(poked);
+  poked.clear();
+  for (const id of asked)
+    if (!due.some((d) => d.connectionId === id)) due.push({ connectionId: id, pull: true });
+  for (const { connectionId: id, pull: turn } of due) {
+    const pull = turn || asked.has(id);
     try {
       const line = tickLog(id, await runTick(tickPorts, id, { pull }));
       if (line !== null) console.log(JSON.stringify(line));

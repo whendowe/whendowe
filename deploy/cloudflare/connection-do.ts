@@ -4,6 +4,7 @@ import { z } from "zod";
 import { anyGoogleOAuthConfigured, capabilityConfigOf, loadConfig } from "../../src/config.js";
 import { d1StoragePort } from "../../src/db/d1.js";
 import { runTick, type TickPorts, tickFailureLog, tickLog } from "../../src/reconcile/tick.js";
+import { PokeGate } from "../../src/reconcile/watch.js";
 import { buildOAuthDeps, pushTickPorts } from "../../src/web/routes/oauth-deps.js";
 
 // Durable Object per calendar_connection (DESIGN.md §11): the structural single writer. The
@@ -31,6 +32,8 @@ export const tickRequestSchema = z.object({
   connectionId: z.string().min(1).max(64),
   /** rc53: read what changed in Google first. */
   pull: z.boolean().default(false),
+  /** rc53: Google's push notification asked (routes/hooks.ts): read after a running tick. */
+  poke: z.boolean().default(false),
 });
 
 /** The path the cron posts to; any host — a Durable Object stub routes by its id, not its URL. */
@@ -38,7 +41,8 @@ export const TICK_URL = "https://connection.do/tick";
 
 export class ConnectionDO extends DurableObject<ConnectionEnv> {
   private ports: Promise<TickPorts | null> | undefined;
-  private running = false;
+  /** Coalesces Google's pokes (rc53); in this object's memory only, so it writes nothing. */
+  private readonly gate = new PokeGate();
 
   /** Built once per instance; null where Google isn't configured, so nothing can be pushed. */
   private tickPorts(): Promise<TickPorts | null> {
@@ -69,21 +73,30 @@ export class ConnectionDO extends DurableObject<ConnectionEnv> {
     const asked = tickRequestSchema.safeParse(await request.json().catch(() => null));
     if (request.method !== "POST" || !asked.success) return new Response(null, { status: 400 });
     const id = asked.data.connectionId;
-    // Set before the first await: a second request can only arrive at an await, and finds it.
-    if (this.running) return Response.json({ outcome: "busy" }, { status: 409 });
-    this.running = true;
+    // Decided before the first await: a second request can only arrive at an await (rc53
+    // coalescing, reconcile/watch.ts).
+    const go = this.gate.arrive(asked.data.poke);
+    if (go === "busy") return Response.json({ outcome: "busy" }, { status: 409 });
+    if (go !== "run") return Response.json({ outcome: go }, { status: 202 });
     try {
       const ports = await this.tickPorts();
       if (ports === null) return Response.json({ outcome: "unconfigured" }, { status: 503 });
-      const result = await runTick(ports, id, { pull: asked.data.pull });
-      const line = tickLog(id, result);
-      if (line !== null) console.log(JSON.stringify(line));
+      let result = await this.tick(ports, id, asked.data.pull);
+      // Pokes that came while it ran — a change may have landed after its read began.
+      while (this.gate.ended()) result = await this.tick(ports, id, true);
       return Response.json({ outcome: result.outcome });
     } catch (error) {
       console.error(JSON.stringify(tickFailureLog(id, error)));
       return new Response(null, { status: 500 });
     } finally {
-      this.running = false;
+      this.gate.release();
     }
+  }
+
+  private async tick(ports: TickPorts, id: string, pull: boolean) {
+    const result = await runTick(ports, id, { pull });
+    const line = tickLog(id, result);
+    if (line !== null) console.log(JSON.stringify(line));
+    return result;
   }
 }
