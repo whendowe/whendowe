@@ -71,7 +71,11 @@ function counting(port: StoragePort): Counted {
     },
     batch: async (s: readonly SqlStatement[]) => {
       const rival = counted.beforeEdit;
-      if (rival !== null && /^\s*UPDATE canonical_event/.test(s[0]?.sql ?? "")) {
+      // An edit's batch, or a proposal's (T2): either is where a rival edit can land first.
+      if (
+        rival !== null &&
+        /^\s*(UPDATE canonical_event|INSERT INTO event_change_proposal)/.test(s[0]?.sql ?? "")
+      ) {
         counted.beforeEdit = null;
         await rival();
       }
@@ -1144,6 +1148,44 @@ export function runPushTickContract(makePort: () => Promise<StoragePort>): void 
             due_at: at(1000),
           },
         ]);
+      });
+
+      it("a rival edit landing while a change becomes a proposal: proposed again, against it", async () => {
+        const t = await setUp(makePort, "t2-rival");
+        const bens = await bensEvent(t, "propose");
+        t.google().fake.editByPerson(await t.copyId(bens), { location: "Park" });
+        const ben = await findOrCreatePerson(
+          t.inner,
+          `tick-ben-propose-${t.connectionId}@example.org`,
+          {
+            now: T0,
+          },
+        );
+        t.port.beforeEdit = async () => {
+          const access = await findEventForParticipant(t.inner, bens, ben.id);
+          if (access === null) throw new Error("ben");
+          const rival = await editEvent(t.inner, access, {
+            fields: { ...DINNER, title: "Ben's big dinner" },
+            actorId: ben.id,
+            now: at(10),
+          });
+          expect(rival.kind).toBe("updated");
+        };
+        expect((await t.read()).decisions).toContainEqual({
+          eventId: bens,
+          reason: "inbound_proposed",
+        });
+        const [proposal] = await t.inner.query(
+          stmt(
+            "SELECT base_revision, fields FROM event_change_proposal WHERE canonical_event_id = ? AND status = 'pending'",
+            bens,
+          ),
+        );
+        expect(proposal?.base_revision).toBe(2);
+        expect(JSON.parse(String(proposal?.fields))).toMatchObject({
+          title: "Ben's big dinner",
+          location: "Park",
+        });
       });
 
       it("a viewer's change is put back each time, and told once a day", async () => {

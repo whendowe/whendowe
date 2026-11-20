@@ -62,7 +62,11 @@ it("a proposal: what they did, who it waits for, and the link", async () => {
     group: null,
     fields: FIELDS,
     now: T0,
-    people: [{ personId: t.ann.id, editTier: "propose", visibility: "FULL" }],
+    people: [
+      { personId: t.ann.id, editTier: "propose", visibility: "FULL" },
+      // Someone who may only view isn't who a proposal waits for.
+      { personId: t.cy.id, editTier: "view", visibility: "FULL" },
+    ],
   });
   const args = { eventId: event.id, outcome: "proposed", moved: true };
   expect(await t.run({ id: "h1", actorId: t.ann.id, threadId: null, args, now: T0 })).toBe(
@@ -128,14 +132,10 @@ it("put back: it wasn't kept, and how to suggest something; a BUSY copy never na
     now: T0,
   });
   const [mail] = t.sent;
-  expect(mail?.subject).toBe(
-    "Your change to an event on 2101-11-21 18:00 – 19:00 · Europe/Prague wasn't kept",
-  );
-  expect(mail?.text).toContain(
-    "You moved an event on 2101-11-21 18:00 – 19:00 · Europe/Prague in Google, but only the people who can edit it change it",
-  );
-  expect(mail?.text).toContain(
-    `To suggest something, leave a note on it: ${BASE}/events/${busy.id}`,
+  const when = "an event on 2101-11-21 18:00 – 19:00 · Europe/Prague";
+  expect(mail?.subject).toBe(`Your change to ${when} wasn't kept`);
+  expect(mail?.text).toBe(
+    `You moved ${when} in Google, but only the people who can edit it change it, so your calendar shows it as it was again.\n\nTo suggest something, leave a note on it: ${BASE}/events/${busy.id}`,
   );
   expect(`${mail?.subject} ${mail?.text}`).not.toContain("Handover");
 });
@@ -148,15 +148,13 @@ it("sends nothing for an event gone, or someone no longer on it, or arguments it
     fields: FIELDS,
     now: T0,
   });
-  for (const args of [
-    { eventId: "gone", outcome: "proposed" },
-    { eventId: event.id, outcome: "proposed" }, // Ann isn't on it
-    { eventId: event.id, outcome: "something else" },
-    null,
-  ]) {
-    expect(await t.run({ id: "h", actorId: t.ann.id, threadId: null, args, now: T0 })).not.toBe(
-      "Emailed you about your change in Google.",
-    );
+  for (const [args, said] of [
+    [{ eventId: "gone", outcome: "proposed" }, "The event is gone, so nobody was emailed."],
+    [{ eventId: event.id, outcome: "proposed" }, "The event is gone, so nobody was emailed."], // Ann isn't on it
+    [{ eventId: event.id, outcome: "something else" }, "Nothing to tell."],
+    [null, "Nothing to tell."],
+  ] as const) {
+    expect(await t.run({ id: "h", actorId: t.ann.id, threadId: null, args, now: T0 })).toBe(said);
   }
   expect(t.sent).toEqual([]);
 });
