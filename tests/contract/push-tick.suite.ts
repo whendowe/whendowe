@@ -1041,11 +1041,31 @@ export function runPushTickContract(makePort: () => Promise<StoragePort>): void 
       expect(down.port.writes).toBe(writes);
     });
 
+    it("Google refusing the calendar during a read marks the connection; any other failure is the tick's", async () => {
+      const t = await setUp(makePort, "pull-401");
+      await t.event();
+      t.google().fail = new HttpError(401, "events.list", "unauthorized");
+      expect(await t.read()).toEqual({ outcome: "auth_error", decisions: [] });
+      const [conn] = await t.inner.query(
+        stmt("SELECT status, sync_token FROM calendar_connection WHERE id = ?", t.connectionId),
+      );
+      expect(conn).toEqual({ status: "auth_error", sync_token: null });
+
+      const u = await setUp(makePort, "pull-500");
+      await u.event();
+      u.google().fail = new HttpError(500, "events.list", "backend");
+      await expect(u.read()).rejects.toThrow(HttpError);
+      const [kept] = await u.inner.query(
+        stmt("SELECT status, sync_token FROM calendar_connection WHERE id = ?", u.connectionId),
+      );
+      expect(kept).toEqual({ status: "active", sync_token: null });
+    });
+
     it("turns are spread over the six hours, and the same id always has the same one", () => {
       const turns = new Set(Array.from({ length: 200 }, (_, i) => pullTurn(`conn-${i}`)));
       expect(turns.size).toBeGreaterThan(150);
       for (const turn of turns) expect(turn >= 0 && turn < PULL_EVERY_MINUTES).toBe(true);
-      expect(pullTurn("conn-7")).toBe(pullTurn("conn-7"));
+      expect(pullTurn("conn-7")).toBe(67); // FNV-1a of the id, mod 360: worked out by hand
       expect(pullTurn("a")).not.toBe(pullTurn("b"));
     });
   });
