@@ -12,6 +12,7 @@ import {
   setCancelled,
 } from "../../src/events/event.js";
 import { setInCalendar } from "../../src/events/participation.js";
+import { PROPOSAL_CEILING } from "../../src/events/proposal.js";
 import { HttpError } from "../../src/oauth/http.js";
 import { type CapabilityConfig, EVERYTHING, grantCapability } from "../../src/people/capability.js";
 import { findOrCreatePerson } from "../../src/people/person.js";
@@ -1070,6 +1071,147 @@ export function runPushTickContract(makePort: () => Promise<StoragePort>): void 
       for (const turn of turns) expect(turn >= 0 && turn < PULL_EVERY_MINUTES).toBe(true);
       expect(pullTurn("conn-7")).toBe(67); // FNV-1a of the id, mod 360: worked out by hand
       expect(pullTurn("a")).not.toBe(pullTurn("b"));
+    });
+
+    describe("people who can't edit (rc53/rc54, T2)", () => {
+      const notices = async (t: Awaited<ReturnType<typeof setUp>>) =>
+        (
+          await t.inner.query(
+            stmt(
+              `SELECT actor_id, kind, args, due_at FROM held_action
+                WHERE kind = 'google_notice' AND actor_id = ? ORDER BY created_at`,
+              t.ann,
+            ),
+          )
+        ).map((r) => ({ ...r, args: JSON.parse(String(r.args)) }));
+
+      async function bensEvent(t: Awaited<ReturnType<typeof setUp>>, tier: "propose" | "view") {
+        const ben = await findOrCreatePerson(
+          t.inner,
+          `tick-ben-${tier}-${t.connectionId}@example.org`,
+          {
+            now: T0,
+          },
+        );
+        const id = (
+          await createEvent(t.inner, {
+            creatorId: ben.id,
+            group: null,
+            fields: { ...DINNER, title: "Ben's dinner" },
+            now: T0,
+            people: [{ personId: t.ann, editTier: tier, visibility: "FULL" }],
+          })
+        ).id;
+        await t.tick();
+        await t.read();
+        return id;
+      }
+
+      it("a proposer moving it in Google makes their proposal, puts their copy back, and holds one email", async () => {
+        const t = await setUp(makePort, "t2-propose");
+        const bens = await bensEvent(t, "propose");
+        const copy = await t.copyId(bens);
+        t.google().fake.editByPerson(copy, {
+          startLocal: "2101-11-21T19:00:00",
+          endLocal: "2101-11-21T21:00:00",
+        });
+        t.setClock(at(1000));
+        expect((await t.read()).decisions).toEqual([
+          { eventId: bens, reason: "inbound_proposed" },
+          { eventId: bens, reason: "pushed" },
+        ]);
+        expect((await t.access(bens)).event).toMatchObject({
+          startLocal: "2101-11-21T18:00:00",
+          revision: 1,
+        });
+        const [proposal] = await t.inner.query(
+          stmt(
+            "SELECT proposed_by, base_revision, status, fields FROM event_change_proposal WHERE canonical_event_id = ?",
+            bens,
+          ),
+        );
+        expect(proposal).toMatchObject({ proposed_by: t.ann, base_revision: 1, status: "pending" });
+        expect(JSON.parse(String(proposal?.fields))).toMatchObject({
+          startLocal: "2101-11-21T19:00:00",
+          title: "Ben's dinner",
+        });
+        expect(t.google().fake.holds(copy)?.fields.startLocal).toBe("2101-11-21T18:00:00");
+        expect(await notices(t)).toEqual([
+          {
+            actor_id: t.ann,
+            kind: "google_notice",
+            args: { outcome: "proposed", moved: true, eventId: bens },
+            due_at: at(1000),
+          },
+        ]);
+      });
+
+      it("a viewer's change is put back each time, and told once a day", async () => {
+        const t = await setUp(makePort, "t2-view");
+        const bens = await bensEvent(t, "view");
+        const copy = await t.copyId(bens);
+        for (const [i, title] of ["Ann's idea", "Ann's other idea"].entries()) {
+          t.google().fake.editByPerson(copy, { title });
+          t.setClock(at(1000 * (i + 1)));
+          expect((await t.read()).decisions).toContainEqual({
+            eventId: bens,
+            reason: "inbound_put_back",
+          });
+          expect(t.google().fake.holds(copy)?.fields.title).toBe("Ben's dinner");
+          await t.read(); // our put-back, read back
+        }
+        expect(await notices(t)).toEqual([
+          expect.objectContaining({ args: { outcome: "put_back", moved: false, eventId: bens } }),
+        ]);
+        // A day later, told again.
+        t.google().fake.editByPerson(copy, { title: "A day on" });
+        t.setClock(at(25 * 60 * 60 * 1000));
+        await t.read();
+        expect(await notices(t)).toHaveLength(2);
+      });
+
+      it("a change only to what never comes back is left alone, and nobody is told", async () => {
+        const t = await setUp(makePort, "t2-link");
+        const bens = await bensEvent(t, "view");
+        t.google().fake.editByPerson(await t.copyId(bens), { sourceUrl: null });
+        expect((await t.read()).decisions).toEqual([
+          { eventId: bens, reason: "skipped_unchanged" },
+        ]);
+        expect(await notices(t)).toEqual([]);
+      });
+
+      it("a proposer past the most proposals one person may make is put back, and told so", async () => {
+        const t = await setUp(makePort, "t2-limit");
+        const bens = await bensEvent(t, "propose");
+        await t.inner.batch(
+          Array.from({ length: PROPOSAL_CEILING }, (_, i) =>
+            stmt(
+              `INSERT INTO event_change_proposal
+                 (id, canonical_event_id, proposed_by, base_revision, fields, status, created_at)
+               VALUES (?, ?, ?, 1, '{}', 'withdrawn', ?)`,
+              `old-${i}`,
+              bens,
+              t.ann,
+              T0,
+            ),
+          ),
+        );
+        t.google().fake.editByPerson(await t.copyId(bens), { location: "Park" });
+        expect((await t.read()).decisions).toContainEqual({
+          eventId: bens,
+          reason: "inbound_put_back",
+        });
+        const pending = await t.inner.query(
+          stmt(
+            "SELECT id FROM event_change_proposal WHERE canonical_event_id = ? AND status = 'pending'",
+            bens,
+          ),
+        );
+        expect(pending).toEqual([]);
+        expect(await notices(t)).toEqual([
+          expect.objectContaining({ args: { outcome: "put_back", moved: false, eventId: bens } }),
+        ]);
+      });
     });
   });
 }
