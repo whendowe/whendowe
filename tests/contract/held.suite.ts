@@ -62,6 +62,10 @@ async function setUp(makePort: () => Promise<StoragePort>, tag: string) {
       ran.push(a.id);
       return Promise.resolve(`chose ${a.id}`);
     },
+    google_notice: (a) => {
+      ran.push(a.id);
+      return Promise.resolve(`told ${a.id}`);
+    },
   };
   const hold = (actorId = ann.id) =>
     holdAction(port, { actorId, threadId: thread.id, kind: "vote_links", now: T0 });
@@ -151,6 +155,7 @@ export function runHeldContract(makePort: () => Promise<StoragePort>): void {
       const failing: HeldRunners = {
         vote_links: () => Promise.reject(new Error("Dinner at Ann's, token abc")),
         choose: () => Promise.reject(new Error("never")),
+        google_notice: () => Promise.reject(new Error("never")),
       };
       expect(await runDueHeld(t.port, failing, at(HOLD_MS))).toBe(1);
       const [shown] = await heldOn(t.port, {

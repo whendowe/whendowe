@@ -853,7 +853,7 @@ export function runPushTickContract(makePort: () => Promise<StoragePort>): void 
       expect(await t.google().fake.findByMetadata(dinner)).toBeNull();
     });
 
-    it("one occurrence changed in Google, or a change by someone who may not edit, changes nothing here (yet)", async () => {
+    it("one occurrence changed in Google changes nothing here; a viewer's change is put back (rc54)", async () => {
       const t = await setUp(makePort, "pull-skip");
       const dinner = await t.event();
       const ben = await findOrCreatePerson(t.inner, "tick-ben-pull-skip@example.org", { now: T0 });
@@ -872,9 +872,12 @@ export function runPushTickContract(makePort: () => Promise<StoragePort>): void 
       t.google().fake.editByPerson(await t.copyId(bens), { title: "Ann's idea" });
       expect((await t.read()).decisions).toEqual([
         { eventId: dinner, reason: "skipped_instance_edit" },
+        { eventId: bens, reason: "inbound_put_back" },
+        { eventId: bens, reason: "pushed" },
       ]);
       expect((await t.access(dinner)).event.title).toBe("Dinner");
       expect((await t.access(bens)).event.title).toBe("Ben's dinner");
+      expect(t.google().fake.holds(await t.copyId(bens))?.fields.title).toBe("Ben's dinner");
     });
 
     it("an expired cursor reads everything, and finds the change all the same", async () => {
