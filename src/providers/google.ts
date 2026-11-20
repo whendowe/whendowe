@@ -4,6 +4,7 @@ import { defaultFetch, type FetchLike, HttpError, requestJson } from "../oauth/h
 import {
   type CalendarProvider,
   type ChangeBatch,
+  type Channel,
   type EventFields,
   type ProviderEvent,
   ProviderEventGoneError,
@@ -20,6 +21,13 @@ import { googleEventSchema, toGoogleEvent, toProviderEvent } from "./google-even
 // copy's own fields are sent, and nothing Google answers is logged (§13, §14).
 
 const CALENDAR_API_BASE = "https://www.googleapis.com/calendar/v3/calendars";
+const CHANNELS_STOP_URL = "https://www.googleapis.com/calendar/v3/channels/stop";
+
+/** What events.watch answers (rc53): Google's id for the channel, and its expiry in ms. */
+const channelSchema = z.object({
+  resourceId: z.string().min(1),
+  expiration: z.string().regex(/^\d+$/),
+});
 
 /** Google's cap is 2500; 250 keeps any single response small and predictable. */
 const DEFAULT_PAGE_SIZE = 250;
@@ -202,6 +210,50 @@ export class GoogleCalendarProvider implements CalendarProvider {
     );
     const first = found.items?.[0];
     return first === undefined ? null : toProviderEvent(first);
+  }
+
+  /**
+   * events.watch (rc53): a web_hook channel on this calendar. Google echoes the token on every
+   * notification; it is the only proof a notification is ours, since Google signs nothing.
+   */
+  async watch(input: {
+    readonly id: string;
+    readonly token: string;
+    readonly address: string;
+    readonly ttlSeconds: number;
+  }): Promise<Channel> {
+    const made = await requestJson(
+      this.fetchImpl(),
+      `${this.eventsUrl()}/watch`,
+      {
+        method: "POST",
+        headers: await this.headers({ "content-type": "application/json" }),
+        body: JSON.stringify({
+          id: input.id,
+          type: "web_hook",
+          address: input.address,
+          token: input.token,
+          params: { ttl: String(input.ttlSeconds) },
+        }),
+      },
+      channelSchema,
+      "calendar watch",
+    );
+    return {
+      resourceId: made.resourceId,
+      expiresAt: new Date(Number(made.expiration)).toISOString(),
+    };
+  }
+
+  /** channels.stop (rc53). Already gone is success. */
+  async stopWatch(input: { readonly id: string; readonly resourceId: string }): Promise<void> {
+    const response = await this.fetchImpl()(CHANNELS_STOP_URL, {
+      method: "POST",
+      headers: await this.headers({ "content-type": "application/json" }),
+      body: JSON.stringify({ id: input.id, resourceId: input.resourceId }),
+    });
+    if (response.ok || isGone(response.status)) return;
+    throw new HttpError(response.status, "calendar watch stop", "not stopped");
   }
 
   private eventsUrl(eventId?: string): string {

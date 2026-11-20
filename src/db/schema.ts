@@ -32,7 +32,13 @@ export const calendarConnection = sqliteTable(
     refreshTokenEnc: text("refresh_token_enc").notNull(),
     tokenExpiry: text("token_expiry"),
     syncToken: text("sync_token"),
+    // rc53 (T3): the push channel on this calendar — its id, the hash of its secret, Google's
+    // id for it (to stop it), and when it expires. With no channel, watch_expires_at is when to
+    // try making one again, after a failure.
     watchChannel: text("watch_channel"),
+    watchTokenHash: text("watch_token_hash"),
+    watchResourceId: text("watch_resource_id"),
+    watchExpiresAt: text("watch_expires_at"),
     // rc40: 1 when WhenDoWe made the calendar, so disconnecting may offer to delete it.
     madeByUs: integer("made_by_us").notNull().default(0),
     // auth_error: revoked/expired grant (§12); worker skips its projections until reconnected.

@@ -91,6 +91,11 @@ export const configSchema = z.object({
   CAPABILITIES_DEFAULT: z.enum(["all", "granted"]).default("all"),
   OPERATOR_EMAILS: z.string().default(""),
 
+  // rc53: Google's push notifications for connected calendars. Off by default: an instance
+  // turns them on once Google accepts its PUBLIC_BASE_URL as a push address. Off, changes
+  // made in Google are read every 6 hours.
+  GOOGLE_PUSH_CHANNELS: z.enum(["off", "on"]).default("off"),
+
   GOOGLE_CLIENT_ID: googleOAuthFields.GOOGLE_CLIENT_ID.optional(),
   GOOGLE_CLIENT_SECRET: googleOAuthFields.GOOGLE_CLIENT_SECRET.optional(),
   GOOGLE_REDIRECT_URI: googleOAuthFields.GOOGLE_REDIRECT_URI.optional(),

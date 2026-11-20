@@ -2,6 +2,7 @@
 import type {
   CalendarProvider,
   ChangeBatch,
+  Channel,
   EventFields,
   ProviderEvent,
   ProviderMetadata,
@@ -115,6 +116,41 @@ export class FakeCalendarProvider implements CalendarProvider {
   holds(providerEventId: string): ProviderEvent | null {
     return this.events.get(providerEventId)?.event ?? null;
   }
+
+  /** Test hook: the channels made and not stopped, by id (rc53 push). */
+  readonly channels = new Map<string, { token: string; address: string; resourceId: string }>();
+  /** Test hook: the next watch fails. */
+  failWatch: Error | null = null;
+  private resourceCounter = 0;
+
+  watch(input: {
+    readonly id: string;
+    readonly token: string;
+    readonly address: string;
+    readonly ttlSeconds: number;
+  }): Promise<Channel> {
+    if (this.failWatch !== null) {
+      const error = this.failWatch;
+      this.failWatch = null;
+      return Promise.reject(error);
+    }
+    const resourceId = `resource-${++this.resourceCounter}`;
+    this.channels.set(input.id, { token: input.token, address: input.address, resourceId });
+    // The fake's clock is the caller's: expiry is reported relative to now by the test.
+    return Promise.resolve({
+      resourceId,
+      expiresAt: new Date(this.now() + input.ttlSeconds * 1000).toISOString(),
+    });
+  }
+
+  stopWatch(input: { readonly id: string; readonly resourceId: string }): Promise<void> {
+    if (this.channels.get(input.id)?.resourceId === input.resourceId)
+      this.channels.delete(input.id);
+    return Promise.resolve();
+  }
+
+  /** The clock channel expiries are counted from; a test sets it to its own. */
+  now: () => number = () => Date.now();
 
   /** Test hook: number of undelivered change notifications. */
   pendingNotifications(): number {

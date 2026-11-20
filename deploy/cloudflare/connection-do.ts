@@ -23,6 +23,7 @@ export interface ConnectionEnv {
   PUBLIC_BASE_URL?: string;
   CAPABILITIES_DEFAULT?: string;
   OPERATOR_EMAILS?: string;
+  GOOGLE_PUSH_CHANNELS?: string;
 }
 
 /** The one request the cron sends: tick this connection. */
@@ -51,12 +52,14 @@ export class ConnectionDO extends DurableObject<ConnectionEnv> {
         PUBLIC_BASE_URL: env.PUBLIC_BASE_URL,
         CAPABILITIES_DEFAULT: env.CAPABILITIES_DEFAULT,
         OPERATOR_EMAILS: env.OPERATOR_EMAILS,
+        GOOGLE_PUSH_CHANNELS: env.GOOGLE_PUSH_CHANNELS,
       });
       if (!anyGoogleOAuthConfigured(config)) return null;
       const oauth = await buildOAuthDeps(config, d1StoragePort(env.DB));
       return pushTickPorts(oauth, {
         publicBaseUrl: config.PUBLIC_BASE_URL,
         capabilities: capabilityConfigOf(config),
+        pushChannels: config.GOOGLE_PUSH_CHANNELS === "on",
       });
     })();
     return this.ports;
