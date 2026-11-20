@@ -7,6 +7,7 @@ import {
   type EventAccess,
   type EventFieldsInput,
   editEvent,
+  fieldsAtRevision,
   findEventForParticipant,
   setCancelled,
 } from "../../src/events/event.js";
@@ -22,7 +23,14 @@ import type {
 } from "../../src/providers/base.js";
 import { FakeCalendarProvider } from "../../src/providers/fake.js";
 import { RETRY_FIRST_MS } from "../../src/reconcile/decide.js";
-import { connectionsToTick, runTick, type TickPorts } from "../../src/reconcile/tick.js";
+import {
+  connectionsToTick,
+  PULL_EVERY_MINUTES,
+  pullTurn,
+  runTick,
+  type TickPorts,
+  ticksDue,
+} from "../../src/reconcile/tick.js";
 
 // The push tick (DESIGN §11, §10 rc40/rc43/rc45) on BOTH drivers, against the fake provider:
 // a calendar converges to what its person's feed holds, a quiet tick writes nothing and calls
@@ -46,14 +54,26 @@ const DINNER: EventFieldsInput = {
 };
 
 /** Counts writes, so the zero-write steady state is checked, not assumed (§6). */
-function counting(port: StoragePort): StoragePort & { writes: number } {
-  const counted = {
+interface Counted extends StoragePort {
+  writes: number;
+  /** Run once just before the next batch that edits an event: a rival edit landing then. */
+  beforeEdit: (() => Promise<void>) | null;
+}
+
+function counting(port: StoragePort): Counted {
+  const counted: Counted = {
     writes: 0,
+    beforeEdit: null,
     query: (s: SqlStatement) => {
       if (!/^\s*SELECT/i.test(s.sql)) counted.writes += 1;
       return port.query(s);
     },
-    batch: (s: readonly SqlStatement[]) => {
+    batch: async (s: readonly SqlStatement[]) => {
+      const rival = counted.beforeEdit;
+      if (rival !== null && /^\s*UPDATE canonical_event/.test(s[0]?.sql ?? "")) {
+        counted.beforeEdit = null;
+        await rival();
+      }
       counted.writes += s.length;
       return port.batch(s);
     },
@@ -76,7 +96,10 @@ class Recording implements CalendarProvider {
     this.tokens.push(await this.token());
     if (this.fail !== null) throw this.fail;
   }
-  listChanges = (t: string | null) => this.fake.listChanges(t);
+  async listChanges(t: string | null) {
+    await this.call();
+    return this.fake.listChanges(t);
+  }
   async upsert(id: string | null, f: EventFields, m: ProviderMetadata): Promise<UpsertResult> {
     await this.call();
     if (this.failUpsert !== null) throw this.failUpsert;
@@ -182,6 +205,13 @@ async function setUp(
     },
     google: () => google,
     tick: () => runTick(ports, connectionId),
+    /** A tick that reads Google first (rc53). */
+    read: () => runTick(ports, connectionId, { pull: true }),
+    copyId: async (eventId: string) => {
+      const copy = await google.fake.findByMetadata(eventId);
+      if (copy === null) throw new Error("no copy");
+      return copy.id;
+    },
   };
 }
 
@@ -680,6 +710,363 @@ export function runPushTickContract(makePort: () => Promise<StoragePort>): void 
       // Exactly the most is everyone.
       expect(await connectionsToTick(t.port, T0, n)).toEqual(active);
       expect(t.port.writes).toBe(writes);
+    });
+  });
+
+  describe("reading back from Google (rc53, MVP-5 T1b)", () => {
+    const changeLog = async (t: Awaited<ReturnType<typeof setUp>>, eventId: string) =>
+      t.inner.query(
+        stmt(
+          "SELECT revision, actor, source FROM change_log WHERE canonical_event_id = ? ORDER BY revision",
+          eventId,
+        ),
+      );
+
+    it("our own push read back is an echo; a quiet read then writes nothing", async () => {
+      const t = await setUp(makePort, "pull-echo");
+      const dinner = await t.event();
+      await t.tick();
+      const cursor = async () =>
+        (
+          await t.inner.query(
+            stmt("SELECT sync_token FROM calendar_connection WHERE id = ?", t.connectionId),
+          )
+        )[0]?.sync_token;
+      expect(await cursor()).toBeNull();
+      expect((await t.read()).decisions).toEqual([{ eventId: dinner, reason: "echo_suppressed" }]);
+      const kept = await cursor();
+      expect(kept).toEqual(expect.any(String)); // the cursor Google gave is kept
+      const writes = t.port.writes;
+      expect(await t.read()).toEqual({ outcome: "done", decisions: [] });
+      expect(t.port.writes).toBe(writes); // no change: no cursor to keep (§6)
+      expect(await cursor()).toBe(kept);
+    });
+
+    it("an editor moves it in Google: the event follows, from Google, and the copy gets our line back", async () => {
+      const t = await setUp(makePort, "pull-move");
+      const dinner = await t.event();
+      await t.tick();
+      await t.read();
+      const id = await t.copyId(dinner);
+      t.google().fake.editByPerson(id, {
+        startLocal: "2101-11-21T19:00:00",
+        endLocal: "2101-11-21T21:00:00",
+        description: "Bring wine and cheese", // our line deleted along the way
+      });
+      t.setClock(at(1000));
+      expect((await t.read()).decisions).toEqual([
+        { eventId: dinner, reason: "inbound_applied" },
+        { eventId: dinner, reason: "pushed" },
+      ]);
+      const event = (await t.access(dinner)).event;
+      expect(event).toMatchObject({
+        startLocal: "2101-11-21T19:00:00",
+        endLocal: "2101-11-21T21:00:00",
+        description: "Bring wine and cheese",
+        revision: 2,
+      });
+      expect(await changeLog(t, dinner)).toEqual([
+        expect.objectContaining({ revision: 1, source: "ui" }),
+        { revision: 2, actor: t.ann, source: "inbound_sync" },
+      ]);
+      // The push after it puts our line back on the copy, and that push read back is an echo.
+      expect(t.google().fake.holds(id)?.fields.description).toMatch(
+        /^From WhenDoWe — .*\n\nBring wine and cheese$/s,
+      );
+      expect((await t.read()).decisions).toEqual([{ eventId: dinner, reason: "echo_suppressed" }]);
+    });
+
+    it("two changes at once: the place set here and the time moved in Google both stay; the title both changed goes to Google", async () => {
+      const t = await setUp(makePort, "pull-merge");
+      const dinner = await t.event();
+      await t.tick();
+      await t.read();
+      // Two edits here since the copy's base, the place changed in both: the base is undone
+      // newest first, so it is the place the copy holds, not the one in between.
+      const first = await editEvent(t.inner, await t.access(dinner), {
+        fields: { ...DINNER, location: "Cy's", title: "Dinner here" },
+        actorId: t.ann,
+        now: at(400),
+      });
+      expect(first.kind).toBe("updated");
+      const edited = await editEvent(t.inner, await t.access(dinner), {
+        fields: { ...DINNER, location: "Ben's", title: "Dinner here" },
+        actorId: t.ann,
+        now: at(500),
+      });
+      expect(edited.kind).toBe("updated");
+      t.google().fake.editByPerson(await t.copyId(dinner), {
+        title: "Dinner in Google",
+        startLocal: "2101-11-21T19:00:00",
+        endLocal: "2101-11-21T21:00:00",
+      });
+      t.setClock(at(1000));
+      await t.read();
+      expect((await t.access(dinner)).event).toMatchObject({
+        title: "Dinner in Google",
+        location: "Ben's",
+        startLocal: "2101-11-21T19:00:00",
+        revision: 4,
+      });
+    });
+
+    it("a change delivered twice, and one that changes nothing, write nothing more", async () => {
+      const t = await setUp(makePort, "pull-twice");
+      const dinner = await t.event();
+      await t.tick();
+      await t.read();
+      const id = await t.copyId(dinner);
+      t.google().fake.editByPerson(id, { title: "Supper" });
+      const delivered = t.google().fake.holds(id);
+      await t.read();
+      if (delivered === null) throw new Error("held");
+      // Re-delivered as it was, after our push had put the line back: nothing left to merge.
+      t.google().fake.editByPerson(id, { ...delivered.fields });
+      t.setClock(at(2000));
+      // Exactly what we last pushed, so the content hash calls it ours (§11 layer 3).
+      expect((await t.read()).decisions).not.toContainEqual({
+        eventId: dinner,
+        reason: "inbound_applied",
+      });
+      expect((await t.access(dinner)).event.revision).toBe(2);
+      // A change only to what never comes back — the copy's link — merges to nothing.
+      t.google().fake.editByPerson(id, { sourceUrl: null });
+      expect((await t.read()).decisions).toEqual([
+        { eventId: dinner, reason: "skipped_unchanged" },
+      ]);
+      expect((await t.access(dinner)).event.revision).toBe(2);
+    });
+
+    it("deleting the copy in Google is unsubscribing: it isn't made again", async () => {
+      const t = await setUp(makePort, "pull-delete");
+      const dinner = await t.event();
+      await t.tick();
+      await t.read();
+      await t.google().fake.delete(await t.copyId(dinner));
+      expect((await t.read()).decisions).toEqual([
+        { eventId: dinner, reason: "inbound_delete_unsubscribed" },
+      ]);
+      expect(await t.rows()).toEqual([
+        expect.objectContaining({ state: "deleted", provider_event_id: null, unsubscribed_at: T0 }),
+      ]);
+      expect(await t.tick()).toEqual({ outcome: "done", decisions: [] });
+      expect(await t.google().fake.findByMetadata(dinner)).toBeNull();
+    });
+
+    it("one occurrence changed in Google, or a change by someone who may not edit, changes nothing here (yet)", async () => {
+      const t = await setUp(makePort, "pull-skip");
+      const dinner = await t.event();
+      const ben = await findOrCreatePerson(t.inner, "tick-ben-pull-skip@example.org", { now: T0 });
+      const bens = (
+        await createEvent(t.inner, {
+          creatorId: ben.id,
+          group: null,
+          fields: { ...DINNER, title: "Ben's dinner" },
+          now: T0,
+          people: [{ personId: t.ann, editTier: "view", visibility: "FULL" }],
+        })
+      ).id;
+      await t.tick();
+      await t.read();
+      t.google().fake.editByPerson(await t.copyId(dinner), { title: "Just this once" }, "series-1");
+      t.google().fake.editByPerson(await t.copyId(bens), { title: "Ann's idea" });
+      expect((await t.read()).decisions).toEqual([
+        { eventId: dinner, reason: "skipped_instance_edit" },
+      ]);
+      expect((await t.access(dinner)).event.title).toBe("Dinner");
+      expect((await t.access(bens)).event.title).toBe("Ben's dinner");
+    });
+
+    it("an expired cursor reads everything, and finds the change all the same", async () => {
+      const t = await setUp(makePort, "pull-expired");
+      const dinner = await t.event();
+      await t.tick();
+      await t.read();
+      t.google().fake.editByPerson(await t.copyId(dinner), { location: "Park" });
+      t.google().fake.expireNext = true;
+      expect((await t.read()).decisions).toContainEqual({
+        eventId: dinner,
+        reason: "inbound_applied",
+      });
+      expect((await t.access(dinner)).event.location).toBe("Park");
+    });
+
+    it("each active connection is read in its own minute of every six hours, as well as its share", async () => {
+      const t = await setUp(makePort, "pull-turn");
+      const turn = pullTurn(t.connectionId);
+      const minute = (m: number) => new Date(m * 60_000).toISOString();
+      const writes = t.port.writes;
+      expect(await ticksDue(t.port, minute(turn), 0)).toContainEqual({
+        connectionId: t.connectionId,
+        pull: true,
+      });
+      expect(await ticksDue(t.port, minute(turn + PULL_EVERY_MINUTES), 0)).toContainEqual({
+        connectionId: t.connectionId,
+        pull: true,
+      });
+      const other = await ticksDue(t.port, minute(turn + 1));
+      expect(other.find((d) => d.connectionId === t.connectionId)?.pull).toBe(false);
+      expect(t.port.writes).toBe(writes); // scheduling reads only
+    });
+
+    it("an event as a copy made at an earlier revision holds it: every field, undone newest first", async () => {
+      const t = await setUp(makePort, "pull-at");
+      const dinner = await t.event();
+      const original = (await t.access(dinner)).event;
+      for (const [i, fields] of [
+        { ...DINNER, title: "Lunch", location: null, description: null },
+        {
+          ...DINNER,
+          title: "Picnic",
+          allDay: true,
+          startLocal: "2101-11-22",
+          endLocal: "2101-11-23",
+          tzid: null,
+        },
+      ].entries()) {
+        const edited = await editEvent(t.inner, await t.access(dinner), {
+          fields,
+          actorId: t.ann,
+          now: at(100 * (i + 1)),
+        });
+        expect(edited.kind).toBe("updated");
+      }
+      const now = (await t.access(dinner)).event;
+      const pick = ({
+        title,
+        description,
+        location,
+        allDay,
+        startLocal,
+        endLocal,
+        tzid,
+        rrule,
+      }: typeof now) => ({
+        title,
+        description,
+        location,
+        allDay,
+        startLocal,
+        endLocal,
+        tzid,
+        rrule,
+      });
+      expect(await fieldsAtRevision(t.inner, now, 1)).toEqual(pick(original));
+      expect(await fieldsAtRevision(t.inner, now, 2)).toMatchObject({
+        title: "Lunch",
+        location: null,
+        allDay: false,
+        startLocal: original.startLocal,
+        tzid: "Europe/Prague",
+      });
+      expect(await fieldsAtRevision(t.inner, now, 3)).toEqual(pick(now));
+    });
+
+    it("a rival edit landing while a change is merged: merged again, both kept", async () => {
+      const t = await setUp(makePort, "pull-rival");
+      const dinner = await t.event();
+      await t.tick();
+      await t.read();
+      t.google().fake.editByPerson(await t.copyId(dinner), { title: "Supper" });
+      t.port.beforeEdit = async () => {
+        const rival = await editEvent(t.inner, await t.access(dinner), {
+          fields: { ...DINNER, location: "Ben's" },
+          actorId: t.ann,
+          now: at(10),
+        });
+        expect(rival.kind).toBe("updated");
+      };
+      expect((await t.read()).decisions).toContainEqual({
+        eventId: dinner,
+        reason: "inbound_applied",
+      });
+      expect((await t.access(dinner)).event).toMatchObject({
+        title: "Supper",
+        location: "Ben's",
+        revision: 3,
+      });
+    });
+
+    it("a change the form would refuse is left out, and the next push puts the copy back", async () => {
+      const t = await setUp(makePort, "pull-bad");
+      const dinner = await t.event();
+      await t.tick();
+      await t.read();
+      const id = await t.copyId(dinner);
+      t.google().fake.editByPerson(id, { endLocal: "2101-11-21T17:00:00" }); // before it starts
+      expect((await t.read()).decisions).toContainEqual({ eventId: dinner, reason: "error" });
+      expect((await t.access(dinner)).event.revision).toBe(1);
+    });
+
+    it("changes to the person's own events and series in that calendar are none of ours", async () => {
+      const t = await setUp(makePort, "pull-theirs");
+      await t.event();
+      await t.tick();
+      await t.read();
+      // An event of their own (no canonical id), and one occurrence of a series of their own.
+      const dentist: EventFields = {
+        title: "Dentist",
+        description: null,
+        location: null,
+        startLocal: "2101-11-22T09:00:00",
+        endLocal: "2101-11-22T10:00:00",
+        tzid: "Europe/Prague",
+        allDay: false,
+        rrule: null,
+        sourceUrl: null,
+      };
+      const own = await t.google().fake.upsert(null, dentist, { canonicalUid: "" });
+      t.google().fake.editByPerson(own.id, { title: "Dentist, moved" }, "their-series");
+      const writes = t.port.writes;
+      const result = await t.read();
+      expect(result.decisions).toEqual([]);
+      expect(t.port.writes - writes).toBeLessThanOrEqual(1); // the cursor, which moved
+    });
+
+    it("a grant Google refused, or no token, during a read: as during a push", async () => {
+      const refused = await setUp(makePort, "pull-refused", { expiry: at(0) });
+      await refused.event();
+      refused.refuse(new HttpError(400, "token refresh", "invalid_grant"));
+      expect(await refused.read()).toEqual({ outcome: "auth_error", decisions: [] });
+      const [conn] = await refused.inner.query(
+        stmt("SELECT status FROM calendar_connection WHERE id = ?", refused.connectionId),
+      );
+      expect(conn?.status).toBe("auth_error");
+
+      const down = await setUp(makePort, "pull-down", { expiry: at(0) });
+      await down.event();
+      down.refuse(new HttpError(503, "token refresh", "unavailable"));
+      const writes = down.port.writes;
+      expect(await down.read()).toEqual({ outcome: "deferred", decisions: [] });
+      expect(down.port.writes).toBe(writes);
+    });
+
+    it("Google refusing the calendar during a read marks the connection; any other failure is the tick's", async () => {
+      const t = await setUp(makePort, "pull-401");
+      await t.event();
+      t.google().fail = new HttpError(401, "events.list", "unauthorized");
+      expect(await t.read()).toEqual({ outcome: "auth_error", decisions: [] });
+      const [conn] = await t.inner.query(
+        stmt("SELECT status, sync_token FROM calendar_connection WHERE id = ?", t.connectionId),
+      );
+      expect(conn).toEqual({ status: "auth_error", sync_token: null });
+
+      const u = await setUp(makePort, "pull-500");
+      await u.event();
+      u.google().fail = new HttpError(500, "events.list", "backend");
+      await expect(u.read()).rejects.toThrow(HttpError);
+      const [kept] = await u.inner.query(
+        stmt("SELECT status, sync_token FROM calendar_connection WHERE id = ?", u.connectionId),
+      );
+      expect(kept).toEqual({ status: "active", sync_token: null });
+    });
+
+    it("turns are spread over the six hours, and the same id always has the same one", () => {
+      const turns = new Set(Array.from({ length: 200 }, (_, i) => pullTurn(`conn-${i}`)));
+      expect(turns.size).toBeGreaterThan(150);
+      for (const turn of turns) expect(turn >= 0 && turn < PULL_EVERY_MINUTES).toBe(true);
+      expect(pullTurn("conn-7")).toBe(67); // FNV-1a of the id, mod 360: worked out by hand
+      expect(pullTurn("a")).not.toBe(pullTurn("b"));
     });
   });
 }

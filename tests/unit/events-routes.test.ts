@@ -2,6 +2,7 @@
 import { createClient } from "@libsql/client";
 import { expect, it } from "vitest";
 import { sqliteStoragePort } from "../../src/db/sqlite.js";
+import { fieldEditStatements, findEventForParticipant } from "../../src/events/event.js";
 import { MailCapReachedError, SenderShareReachedError } from "../../src/mail/capped.js";
 import type { MailMessage } from "../../src/mail/port.js";
 import { type CapabilityConfig, grantCapability } from "../../src/people/capability.js";
@@ -2566,4 +2567,27 @@ it("mail that stops (rc51): the other of two sees it on the name, and Copy link 
   await undoOptOut(h.storage, "ann@example.org", "group", groupId, new Date().toISOString());
   expect(await text(h, event, dm)).not.toMatch(line);
   expect(await text(h, event, dm)).toContain("Email everyone a link");
+});
+
+it("rc53: a change taken in from Google says so in the history", async () => {
+  const h = await harness();
+  const { dm, group } = await setup(h);
+  const event = await createVia(h, dm, group);
+  const dmId = (await findPersonByEmail(h.storage, "dm@example.org"))?.id ?? "";
+  const access = await findEventForParticipant(h.storage, event.split("/").at(-1) ?? "", dmId);
+  if (access === null) throw new Error("access");
+  await h.storage.batch(
+    fieldEditStatements({
+      eventId: access.event.id,
+      expected: access.event.revision,
+      fields: { ...access.event, location: "The park" },
+      change: { location: { before: access.event.location, after: "The park" } },
+      actorId: dmId,
+      now: new Date().toISOString(),
+      source: "inbound_sync",
+    }),
+  );
+  const page = await text(h, event, dm);
+  expect(page).toContain("dm changed it in Google");
+  expect(page).toContain("The park");
 });

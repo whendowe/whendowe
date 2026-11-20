@@ -26,7 +26,11 @@ export interface ConnectionEnv {
 }
 
 /** The one request the cron sends: tick this connection. */
-export const tickRequestSchema = z.object({ connectionId: z.string().min(1).max(64) });
+export const tickRequestSchema = z.object({
+  connectionId: z.string().min(1).max(64),
+  /** rc53: read what changed in Google first. */
+  pull: z.boolean().default(false),
+});
 
 /** The path the cron posts to; any host — a Durable Object stub routes by its id, not its URL. */
 export const TICK_URL = "https://connection.do/tick";
@@ -68,7 +72,7 @@ export class ConnectionDO extends DurableObject<ConnectionEnv> {
     try {
       const ports = await this.tickPorts();
       if (ports === null) return Response.json({ outcome: "unconfigured" }, { status: 503 });
-      const result = await runTick(ports, id);
+      const result = await runTick(ports, id, { pull: asked.data.pull });
       const line = tickLog(id, result);
       if (line !== null) console.log(JSON.stringify(line));
       return Response.json({ outcome: result.outcome });

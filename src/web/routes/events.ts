@@ -1215,9 +1215,11 @@ function historyEntry(
   return html`<span class="muted">${h.at.slice(0, 16).replace("T", " ")}</span> · ${h.actor === null ? "someone" : who(h.actor)} ${
     h.revision === 1
       ? "created it"
-      : h.proposedBy === null
-        ? "changed"
-        : `accepted ${h.proposedBy.name}'s proposal`
+      : h.proposedBy !== null
+        ? `accepted ${h.proposedBy.name}'s proposal`
+        : h.source === "inbound_sync"
+          ? "changed it in Google" // rc53: taken in from their calendar
+          : "changed"
   }${
     h.revision === 1
       ? ""

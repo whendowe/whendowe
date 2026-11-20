@@ -18,7 +18,7 @@ import { disabledMailPort, type MailPort } from "../../src/mail/port.js";
 import { eraseDue } from "../../src/privacy/erasure.js";
 import { retentionPass } from "../../src/privacy/purge.js";
 import { isRetentionMinute } from "../../src/privacy/retention.js";
-import { connectionsToTick, runTick, tickFailureLog, tickLog } from "../../src/reconcile/tick.js";
+import { runTick, tickFailureLog, tickLog, ticksDue } from "../../src/reconcile/tick.js";
 import { calendarGrants, createApp, heldRunners, reconnectMailer } from "../../src/web/app.js";
 import type { AuthDeps } from "../../src/web/routes/auth.js";
 import type { OAuthRouteDeps } from "../../src/web/routes/oauth.js";
@@ -106,9 +106,9 @@ const tickPorts =
 /** Every connection due this minute, in turn; one failing doesn't stop the rest. */
 async function pushTicks(at: string): Promise<void> {
   if (tickPorts === undefined) return;
-  for (const id of await connectionsToTick(storage, at, Number.POSITIVE_INFINITY)) {
+  for (const { connectionId: id, pull } of await ticksDue(storage, at, Number.POSITIVE_INFINITY)) {
     try {
-      const line = tickLog(id, await runTick(tickPorts, id));
+      const line = tickLog(id, await runTick(tickPorts, id, { pull }));
       if (line !== null) console.log(JSON.stringify(line));
     } catch (error) {
       console.error(JSON.stringify(tickFailureLog(id, error)));
