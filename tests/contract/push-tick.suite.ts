@@ -1163,11 +1163,16 @@ export function runPushTickContract(makePort: () => Promise<StoragePort>): void 
         expect(await notices(t)).toEqual([
           expect.objectContaining({ args: { outcome: "put_back", moved: false, eventId: bens } }),
         ]);
+        // Another event the same day is told of on its own: the limit is per event.
+        const other = await bensEvent(t, "view");
+        t.google().fake.editByPerson(await t.copyId(other), { title: "Mine now" });
+        await t.read();
+        expect((await notices(t)).map((n) => n.args.eventId)).toEqual([bens, other]);
         // A day later, told again.
         t.google().fake.editByPerson(copy, { title: "A day on" });
         t.setClock(at(25 * 60 * 60 * 1000));
         await t.read();
-        expect(await notices(t)).toHaveLength(2);
+        expect(await notices(t)).toHaveLength(3);
       });
 
       it("a change only to what never comes back is left alone, and nobody is told", async () => {
