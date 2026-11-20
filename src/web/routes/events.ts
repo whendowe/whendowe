@@ -75,6 +75,7 @@ import {
   setAttendance,
   setOwnAnswersOnly,
 } from "../../events/response.js";
+import type { HeldRunner } from "../../held.js";
 import { MailCapReachedError } from "../../mail/capped.js";
 import type { MailPort } from "../../mail/port.js";
 import {
@@ -87,7 +88,6 @@ import {
 import { findGroupForMember, type GroupMembership, listMembers } from "../../people/group.js";
 import { knownAddresses, listKnownPeople } from "../../people/known.js";
 import { appearanceIn, findPersonById, normalizeEmail } from "../../people/person.js";
-import type { HeldRunner } from "../../held.js";
 import { createPollThread } from "../../plans/plan.js";
 import {
   findThreadForMember,

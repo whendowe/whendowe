@@ -11,13 +11,13 @@ import {
   findEventForParticipant,
   flatten,
 } from "../events/event.js";
+import { proposeChange } from "../events/proposal.js";
 import { feedEntries } from "../feeds/feed.js";
+import { noticeStatement } from "../held.js";
 import type { MailPort } from "../mail/port.js";
 import { HttpError } from "../oauth/http.js";
 import { type CapabilityConfig, hasCapability } from "../people/capability.js";
 import type { CalendarProvider, ChangeBatch, ProviderEvent } from "../providers/base.js";
-import { proposeChange } from "../events/proposal.js";
-import { noticeStatement } from "../held.js";
 import { ProviderEventGoneError, SyncTokenExpiredError } from "../providers/base.js";
 import { type Action, actionReason, assertNever, type LogReason } from "./actions.js";
 import { fromCopy, type InboundFields, mergeInbound } from "./conflict.js";
