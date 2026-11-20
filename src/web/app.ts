@@ -13,7 +13,12 @@ import { ACCOUNT_PATH, html } from "./layout.js";
 import { registerAccountRoutes } from "./routes/account.js";
 import { askDraftsSection, registerAskRoutes } from "./routes/ask.js";
 import { type AuthDeps, registerAuthRoutes, SIGN_IN_PATH } from "./routes/auth.js";
-import { EVENTS_PATH, registerEventRoutes, yourEvents } from "./routes/events.js";
+import {
+  EVENTS_PATH,
+  googleNoticeRunner,
+  registerEventRoutes,
+  yourEvents,
+} from "./routes/events.js";
 import { registerFeedRoutes } from "./routes/feeds.js";
 import { GROUPS_PATH, registerGroupRoutes } from "./routes/groups.js";
 import {
@@ -87,7 +92,11 @@ function withOptOut(auth: AuthDeps): AuthDeps {
  */
 export function heldRunners(auth: AuthDeps): HeldRunners {
   const deps = withOptOut(auth);
-  return { vote_links: voteLinksRunner(deps), choose: chooseRunner(deps) };
+  return {
+    vote_links: voteLinksRunner(deps),
+    choose: chooseRunner(deps),
+    google_notice: googleNoticeRunner(deps),
+  };
 }
 
 /**

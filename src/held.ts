@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { z } from "zod";
-import { type StoragePort, stmt } from "./db/port.js";
+import { type SqlStatement, type StoragePort, stmt } from "./db/port.js";
 import { uuidv7 } from "./ids.js";
 
 // A minute to take it back (DESIGN §10 *Asking when*, rc46, slice A0). An action that mails
@@ -20,7 +20,8 @@ export const SHOWN_MS = 24 * 60 * 60 * 1000;
 /** At most this many actions per pass; the rest wait for the next minute. */
 export const PASS_LIMIT = 20;
 
-export const heldKindSchema = z.enum(["vote_links", "choose"]);
+/** rc54: `google_notice`, the tick's email about a change from Google (no thread, due at once). */
+export const heldKindSchema = z.enum(["vote_links", "choose", "google_notice"]);
 export type HeldKind = z.infer<typeof heldKindSchema>;
 
 export interface HeldAction {
@@ -139,6 +140,38 @@ export async function holdAction(
   const held = toAction(row);
   if (held === null) throw new Error("a held action just written could not be read back");
   return held;
+}
+
+/** At most one notice a day per person per event (rc54). */
+export const NOTICE_EVERY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * The reconcile tick's email (rc54), held due at once for the minute's pass to send, since the
+ * tick has no mail. A statement, so it is written in the same batch as what it tells of. It
+ * holds nothing when this person was told about this event in the last day.
+ */
+export function noticeStatement(input: {
+  readonly actorId: string;
+  readonly eventId: string;
+  readonly args: Readonly<Record<string, string | boolean>>;
+  readonly now: string;
+  readonly newId: () => string;
+}): SqlStatement {
+  const since = new Date(Date.parse(input.now) - NOTICE_EVERY_MS).toISOString();
+  return stmt(
+    `INSERT INTO held_action (id, actor_id, thread_id, kind, args, due_at, created_at)
+     SELECT ?, ?, NULL, 'google_notice', ?, ?, ?
+     WHERE NOT EXISTS (SELECT 1 FROM held_action WHERE actor_id = ? AND kind = 'google_notice'
+                         AND json_extract(args, '$.eventId') = ? AND created_at > ?)`,
+    input.newId(),
+    input.actorId,
+    JSON.stringify({ ...input.args, eventId: input.eventId }),
+    input.now,
+    input.now,
+    input.actorId,
+    input.eventId,
+    since,
+  );
 }
 
 /**

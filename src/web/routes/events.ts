@@ -2,7 +2,7 @@
 
 import type { Context, Hono } from "hono";
 import { Temporal } from "temporal-polyfill";
-import { ZodError } from "zod";
+import { ZodError, z } from "zod";
 import type { StoragePort } from "../../db/port.js";
 import {
   answerRequest,
@@ -86,7 +86,8 @@ import {
 } from "../../people/capability.js";
 import { findGroupForMember, type GroupMembership, listMembers } from "../../people/group.js";
 import { knownAddresses, listKnownPeople } from "../../people/known.js";
-import { appearanceIn, normalizeEmail } from "../../people/person.js";
+import { appearanceIn, findPersonById, normalizeEmail } from "../../people/person.js";
+import type { HeldRunner } from "../../held.js";
 import { createPollThread } from "../../plans/plan.js";
 import {
   findThreadForMember,
@@ -2536,4 +2537,67 @@ ${pollForm(`/groups/${membership.group.id}/polls`, csrf, values, error, html`${a
   lifecycle("restore", (access, _form, now) =>
     setCancelled(deps.storage, access, { cancelled: false, now }),
   );
+}
+
+// --- Telling someone about their change in Google (DESIGN §10 rc53, rc54) ------------------
+
+const noticeArgsSchema = z.object({
+  eventId: z.string(),
+  outcome: z.enum(["proposed", "put_back"]),
+  /** The time was among what they changed: "moved" rather than "changed". */
+  moved: z.boolean().default(false),
+});
+
+/** "Petr", "Petr and Ann", or past two, the editors as a group (rc54: named as they see them). */
+function waitingFor(names: readonly string[]): string {
+  if (names.length === 1) return names[0] ?? "";
+  if (names.length === 2) return `${names[0] ?? ""} and ${names[1] ?? ""}`;
+  return "the people who can edit it";
+}
+
+/**
+ * The email for a change someone made in Google that isn't theirs to make here (rc54), sent by
+ * the minute's pass from the held action the tick recorded. To their own address, mail they
+ * caused (like the reconnect email), so no opt-out stops it. Where the title isn't theirs to
+ * see, it says "an event" and when. What it says is the held action's outcome, for a day.
+ */
+export function googleNoticeRunner(deps: EventRouteDeps): HeldRunner {
+  return async ({ actorId, args }) => {
+    const parsed = noticeArgsSchema.safeParse(args);
+    if (!parsed.success) return "Nothing to tell.";
+    const { eventId, outcome, moved } = parsed.data;
+    const [access, person] = await Promise.all([
+      findEventForParticipant(deps.storage, eventId, actorId),
+      findPersonById(deps.storage, actorId),
+    ]);
+    if (access === null || person === null) return "The event is gone, so nobody was emailed.";
+    const { event, participation } = access;
+    const what = canSee(participation.visibility, "title")
+      ? `“${event.title}”`
+      : `an event on ${formatWhen(event)}`;
+    const verb = moved ? "moved" : "changed";
+    const url = new URL(`${EVENTS_PATH}/${event.id}`, deps.publicBaseUrl).toString();
+    let subject: string;
+    let text: string;
+    if (outcome === "proposed") {
+      const editors = (await listParticipants(deps.storage, event.id))
+        .filter((p) => p.editTier === "edit" && p.personId !== actorId)
+        .map((p) => p.shown.name);
+      subject = `Your change to ${what} is a proposal`;
+      text = [
+        `You ${verb} ${what} in Google. It's a proposal now, waiting for ${waitingFor(editors)}.`,
+        "",
+        `Until it's accepted, your calendar shows it as it is: ${url}`,
+      ].join("\n");
+    } else {
+      subject = `Your change to ${what} wasn't kept`;
+      text = [
+        `You ${verb} ${what} in Google, but only the people who can edit it change it, so your calendar shows it as it was again.`,
+        "",
+        `To suggest something, leave a note on it: ${url}`,
+      ].join("\n");
+    }
+    await deps.mail.send({ to: person.email, subject, text, cause: { kind: "self" } });
+    return "Emailed you about your change in Google.";
+  };
 }
