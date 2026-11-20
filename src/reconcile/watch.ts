@@ -73,8 +73,11 @@ export async function renewChannel(
     readonly hookUrl: string;
     readonly now: string;
     readonly newId: () => string;
-    /** The grant is gone: rethrown, never swallowed. */
-    readonly isAuthError: (error: unknown) => boolean;
+    /**
+     * Errors that aren't Google refusing the channel — the grant is gone, or no token could be
+     * had — and are the caller's: rethrown, never recorded as a refusal.
+     */
+    readonly isTheCallers: (error: unknown) => boolean;
   },
 ): Promise<"made" | "failed"> {
   const id = input.newId();
@@ -97,7 +100,7 @@ export async function renewChannel(
     ]);
     outcome = "made";
   } catch (error) {
-    if (input.isAuthError(error)) throw error;
+    if (input.isTheCallers(error)) throw error;
     const retry = new Date(Date.parse(input.now) + RETRY_WATCH_MS).toISOString();
     await storage.batch([
       recordChannel(input.connectionId, {

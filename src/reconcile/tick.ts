@@ -403,7 +403,7 @@ export async function runTick(
         hookUrl: ports.hookUrl,
         now,
         newId: ports.newId,
-        isAuthError: lostGrant,
+        isTheCallers: (error) => lostGrant(error) || error instanceof NoToken,
       });
       return { outcome: "done", decisions, channel };
     } catch (error) {
