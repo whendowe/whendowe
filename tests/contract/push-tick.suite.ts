@@ -1344,6 +1344,23 @@ export function runPushTickContract(makePort: () => Promise<StoragePort>): void 
       expect((await t.tick()).channel).toBe("made");
     });
 
+    it("replaced exactly a day before it expires, and not a minute sooner", async () => {
+      const t = await setUp(makePort, "watch-edge", { hookUrl: HOOK });
+      await t.tick();
+      t.setClock(at(6 * DAY - 60_000));
+      expect((await t.tick()).channel).toBeUndefined();
+      t.setClock(at(6 * DAY));
+      expect((await t.tick()).channel).toBe("made");
+    });
+
+    it("no token to be had while making one: the tick waits, writing nothing", async () => {
+      const t = await setUp(makePort, "watch-down", { hookUrl: HOOK, expiry: at(0) });
+      t.refuse(new HttpError(503, "token refresh", "unavailable"));
+      const writes = t.port.writes;
+      expect(await t.tick()).toEqual({ outcome: "deferred", decisions: [] });
+      expect(t.port.writes).toBe(writes);
+    });
+
     it("refused because the grant is gone: the connection is marked, as for any call", async () => {
       const t = await setUp(makePort, "watch-401", { hookUrl: HOOK });
       t.google().fake.failWatch = new HttpError(401, "calendar watch", "unauthorized");

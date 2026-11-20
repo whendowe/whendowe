@@ -447,7 +447,10 @@ it("watches the calendar with a web_hook channel carrying our token, and reads G
     token: "secret-token",
     params: { ttl: "604800" },
   });
-  expect(calls[0]?.init.headers).toMatchObject({ authorization: `Bearer ${ACCESS_TOKEN}` });
+  expect(calls[0]?.init.headers).toMatchObject({
+    authorization: `Bearer ${ACCESS_TOKEN}`,
+    "content-type": "application/json",
+  });
 });
 
 it("refuses an answer without a resource id or a numeric expiry, and passes Google's refusal on", async () => {
@@ -474,6 +477,10 @@ it("stops a channel by its id and resource id; already gone is success, anything
   expect(calls[0]?.url).toBe("https://www.googleapis.com/calendar/v3/channels/stop");
   expect(calls[0]?.init.method).toBe("POST");
   expect(JSON.parse(String(calls[0]?.init.body))).toEqual({ id: "ch-1", resourceId: "res-1" });
+  expect(calls[0]?.init.headers).toMatchObject({
+    authorization: `Bearer ${ACCESS_TOKEN}`,
+    "content-type": "application/json",
+  });
   await p.stopWatch({ id: "ch-1", resourceId: "res-1" });
   await expect(p.stopWatch({ id: "ch-1", resourceId: "res-1" })).rejects.toThrow(HttpError);
 });
