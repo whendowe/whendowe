@@ -2582,7 +2582,9 @@ export function googleNoticeRunner(deps: EventRouteDeps): HeldRunner {
     if (outcome === "proposed") {
       const editors = (await listParticipants(deps.storage, event.id))
         .filter((p) => p.editTier === "edit" && p.personId !== actorId)
-        .map((p) => p.shown.name);
+        .map((p) => p.shown.name)
+        // Alphabetical: people added in the same instant have no order of their own.
+        .sort((a, b) => a.localeCompare(b));
       subject = `Your change to ${what} is a proposal`;
       text = [
         `You ${verb} ${what} in Google. It's a proposal now, waiting for ${waitingFor(editors)}.`,
