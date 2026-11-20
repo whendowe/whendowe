@@ -1,16 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import { z } from "zod";
 import type { ProjectionRow } from "../db/schema.js";
 import type { EventFields, ProviderEvent } from "../providers/base.js";
 import type { Action } from "./actions.js";
-import { isEcho } from "./echo.js";
+import { isEcho, parseRing } from "./echo.js";
 
 // The functional core (DESIGN.md §9): one pure decision per reconcile step.
 // Effects (provider calls, storage writes) live in the thin interpreter in tick.ts.
 // This purity is what lets Hegel exercise decisions cheaply under plain vitest.
 // decidePull() is PULL's, MVP-5 (rc53); decidePush() is PUSH's, MVP-4 G2.
-
-const ringSchema = z.array(z.string());
 
 /**
  * PULL's decision for one change Google reports on a connection's calendar (§11
@@ -34,11 +31,10 @@ export function decidePull(
   if (incoming.isDeleted) {
     return projection.state === "deleted" ? { kind: "noop" } : { kind: "unsubscribe" };
   }
-  const ring = ringSchema.safeParse(JSON.parse(projection.recentWriteNonces));
   const echo = isEcho(
     { nonce: incoming.metadata.writeNonce ?? null, etag: incoming.etag, contentHash },
     {
-      recentWriteNonces: ring.success ? ring.data : [],
+      recentWrites: parseRing(projection.recentWriteNonces),
       providerEtag: projection.providerEtag,
       lastPushedHash: projection.lastPushedHash,
     },

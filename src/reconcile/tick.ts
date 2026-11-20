@@ -11,7 +11,7 @@ import type { CalendarProvider } from "../providers/base.js";
 import { ProviderEventGoneError } from "../providers/base.js";
 import { type Action, actionReason, assertNever, type LogReason } from "./actions.js";
 import { type DesiredCopy, decidePush, nextRetryAt } from "./decide.js";
-import { pushNonce } from "./echo.js";
+import { parseRing, pushWrite } from "./echo.js";
 import { fieldsHash, projectEntry } from "./project.js";
 
 // One reconcile tick for one connection (DESIGN.md §11). MVP-4 is PUSH only (rc40): the
@@ -163,8 +163,6 @@ const projectionSchema = z
       updatedAt: r.updated_at,
     }),
   );
-
-const ringSchema = z.array(z.string());
 
 /** Google refused the grant: revoked, or expired (§12). */
 class AuthLost extends Error {}
@@ -416,13 +414,13 @@ function synced(
   written: { readonly id: string; readonly etag: string },
   nonce: string,
 ): SqlStatement {
-  const ring = ringSchema.parse(JSON.parse(previous?.recentWriteNonces ?? "[]"));
+  const ring = parseRing(previous?.recentWriteNonces ?? "[]");
   return record({
     state: "synced",
     providerEventId: written.id,
     providerEtag: written.etag,
     lastPushedHash: want.hash,
-    recentWriteNonces: JSON.stringify(pushNonce(ring, nonce)),
+    recentWriteNonces: JSON.stringify(pushWrite(ring, [nonce, written.etag])),
     baseRevision: want.revision,
     visibilityProfile: want.visibility,
     lastError: null,
