@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { expect, it } from "vitest";
-import type { FetchLike, HttpRequestInit } from "../../src/oauth/http.js";
+import { type FetchLike, HttpError, type HttpRequestInit } from "../../src/oauth/http.js";
 import { ProviderEventGoneError, SyncTokenExpiredError } from "../../src/providers/base.js";
 import { GoogleCalendarProvider } from "../../src/providers/google.js";
 import { googleEventSchema, toProviderEvent } from "../../src/providers/google-event.js";
@@ -417,3 +417,63 @@ function eventFields() {
     sourceUrl: null,
   };
 }
+
+// --- push channels (rc53, T3a) -------------------------------------------------------
+
+it("watches the calendar with a web_hook channel carrying our token, and reads Google's answer", async () => {
+  const { impl, calls } = fakeFetch([
+    {
+      body: JSON.stringify({
+        kind: "api#channel",
+        id: "ch-1",
+        resourceId: "res-1",
+        expiration: "4102444800000",
+      }),
+    },
+  ]);
+  const made = await provider(impl).watch({
+    id: "ch-1",
+    token: "secret-token",
+    address: "https://whendowe.example/hooks/google",
+    ttlSeconds: 604800,
+  });
+  expect(made).toEqual({ resourceId: "res-1", expiresAt: "2100-01-01T00:00:00.000Z" });
+  expect(calls[0]?.url).toBe(`${EVENTS_URL}/watch`);
+  expect(calls[0]?.init.method).toBe("POST");
+  expect(JSON.parse(String(calls[0]?.init.body))).toEqual({
+    id: "ch-1",
+    type: "web_hook",
+    address: "https://whendowe.example/hooks/google",
+    token: "secret-token",
+    params: { ttl: "604800" },
+  });
+  expect(calls[0]?.init.headers).toMatchObject({ authorization: `Bearer ${ACCESS_TOKEN}` });
+});
+
+it("refuses an answer without a resource id or a numeric expiry, and passes Google's refusal on", async () => {
+  for (const body of [{ expiration: "1" }, { resourceId: "r", expiration: "soon" }]) {
+    const { impl } = fakeFetch([{ body: JSON.stringify(body) }]);
+    await expect(
+      provider(impl).watch({ id: "c", token: "t", address: "https://x.example/h", ttlSeconds: 1 }),
+    ).rejects.toThrow();
+  }
+  const { impl } = fakeFetch([{ status: 400, body: "{}" }]);
+  await expect(
+    provider(impl).watch({ id: "c", token: "t", address: "https://x.example/h", ttlSeconds: 1 }),
+  ).rejects.toThrow(HttpError);
+});
+
+it("stops a channel by its id and resource id; already gone is success, anything else is not", async () => {
+  const { impl, calls } = fakeFetch([
+    { status: 204, body: "" },
+    { status: 404, body: "" },
+    { status: 500, body: "" },
+  ]);
+  const p = provider(impl);
+  await p.stopWatch({ id: "ch-1", resourceId: "res-1" });
+  expect(calls[0]?.url).toBe("https://www.googleapis.com/calendar/v3/channels/stop");
+  expect(calls[0]?.init.method).toBe("POST");
+  expect(JSON.parse(String(calls[0]?.init.body))).toEqual({ id: "ch-1", resourceId: "res-1" });
+  await p.stopWatch({ id: "ch-1", resourceId: "res-1" });
+  await expect(p.stopWatch({ id: "ch-1", resourceId: "res-1" })).rejects.toThrow(HttpError);
+});
