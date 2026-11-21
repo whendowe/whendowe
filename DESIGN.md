@@ -1687,8 +1687,11 @@ push notifications instead of polling.
   …" after it. What a copy last held is read from `change_log` at its base revision, so no second
   copy of the event's fields is kept.
 - **One occurrence of a repeating event.** Changing a single occurrence in Google isn't kept yet
-  (§11: whole series only, rc13): the copy is put back, and its description line says that
-  occurrences are changed here. Changing the whole series in Google comes back as above.
+  (§11: whole series only, rc13): that date is put back to what the series gives it, and the
+  copy's description line says a change to one date isn't kept (rc55). Changing the whole
+  series in Google comes back as above. **Deleting one date in Google is not going that day**
+  (rc56, owner 2026-11-21): it stays deleted, for that person only, and the rest of the series
+  is untouched — what someone deleting it would expect.
 - **Deleting a copy in Google** stays what rc45 made it: you stop getting that event, for you
   only.
 - **Telling our own writes from theirs.** A copy keeps the write-nonce WhenDoWe last stamped on
