@@ -240,7 +240,11 @@ test("an independent parser reads every event back: text, tier and the instant i
             expect(got.toUnixTime() * 1000, `${local} ${e.tzid}`).toBe(want[0]);
           else {
             expect(want, `${local} ${e.tzid}`).toContain(got.toUnixTime() * 1000);
-            expect(got.toString()).toBe(local);
+            // Read back as the same wall time only where the feed wrote one: a repeating event's
+            // TZID form. A one-off is written as a UTC instant (rc34), where a time in a spring
+            // gap reads back as that instant — 02:00 in Prague on a change night as 01:00Z, the
+            // RFC's offset from before the gap (pinned in tests/unit/ics.test.ts).
+            if (e.rrule !== null) expect(got.toString()).toBe(local);
           }
         };
         readsBack(ev.startDate, e.startLocal);
