@@ -200,6 +200,11 @@ whendowe/
       ics.ts                   # pure: events at a tier -> RFC 5545 text; TEXT escaping, folding, VTIMEZONE
       feed.ts                  # feed links (hashed for lookup, encrypted to show again), and which events a feed holds; (rc36) group calendar links, capped by their keeper
       busy.ts                  # (rc41) busy times while you pick: the range asked for, your agreed events as times only, Google's spans as wall clock; nothing stored
+    following/                 # (rc56) calendars you follow: what's on, beside what you're in
+      link.ts                  # pure: a pasted link -> the https: address to fetch (webcal:, a Google embed or share link -> its public iCal address), or why not
+      read.ts                  # pure: RFC 5545 text -> the events in the window kept: unfolding, TEXT unescaping, TZID / UTC / dates; series through recurrence.ts
+      fetch.ts                 # the safe fetch over a port: https: only, each redirect checked, size and time caps, no credentials; the address check is the deployment's
+      follow.ts                # follow and stop, for you or a group; the 6-hour turn; a fetch's events against what's kept, writing only what changed
     oauth/
       pkce.ts                  # RFC 7636 verifier/challenge (S256 only) + state nonce (§13)
       authorize.ts             # Google authorization request URL (§12)
@@ -244,6 +249,7 @@ whendowe/
         ask.ts                 # (rc46) the Ask when page: Days view, lettered options, the sheet, Undo
         share.ts               # the shared-link page: vote signed in, or claim a name; Open Graph tags (rc25)
         account.ts             # your handle, export, delete your account; the opt-out page for email recipients (rc21)
+        following.ts           # (rc56) the calendars you and your groups follow: paste a link, rename, recolour, stop
         operator.ts            # the operator page (rc43): who has which capability; grant and revoke by address
         feeds.ts               # GET /feed/<token>.ics (ETag, 304); POST make / replace a feed link (rc34); (rc36) GET /c/<token> and /c/<token>.ics, a group calendar link's page and feed; (rc41) GET /busy, the picker's busy times
     changelog.ts               # append + diff
@@ -258,8 +264,10 @@ whendowe/
       wrangler.jsonc           # bindings: D1, DO, cron
       worker.ts                # entry: Hono fetch + scheduled handler
       connection-do.ts         # Durable Object per connection: serialization + retry alarms ONLY
+      public-address.ts        # (rc57) a followed link's host is public: asked of DNS over HTTPS, as a Worker has no resolver
     node/
       server.ts                # @hono/node-server + in-process scheduler
+      public-address.ts        # (rc57) a followed link's host is public: checked in the lookup the connection itself uses, so a second answer can't differ
       Dockerfile
       docker-compose.yml       # app + sqlite volume (+ litestream backup)
   tests/
@@ -2569,13 +2577,24 @@ others is an ordinary Ask. Owner decisions, 2026-11-21.
   `https:`), the address resolved and refused if it is private, loopback or link-local, at most
   2 MB and 10 seconds, at most 3 redirects each checked the same way, and nothing sent but a
   plain GET with no cookies or credentials. What comes back is data (§13): escaped everywhere,
-  and parsed by the same RFC 5545 code as everything else; a feed that doesn't parse is shown as
-  "couldn't read this calendar", never half-applied.
+  and its series expanded by the same recurrence code as everything else (`recurrence.ts`); a
+  feed that doesn't parse is shown as "couldn't read this calendar", never half-applied.
+  - *(rc57, as built)* Where the address is checked is the deployment's: on Node, in the DNS
+    lookup the connection itself uses, so the name can't answer differently a moment later; a
+    Worker has no resolver, so it asks DNS over HTTPS and refuses the same ranges.
+  - *(rc57)* A feed's rule is read into the recurrence subset where it means the same: `WKST`
+    is dropped when it can't change a date (one `BYDAY`, or `INTERVAL=1`), and a UTC `UNTIL`
+    becomes the series' own wall clock. One event the code can't read (a rule outside the
+    subset, say) is left out, and the calendar says how many were (`followed_calendar.left_out`);
+    only a feed with nothing readable is "couldn't read". Every rule in the dance school's
+    calendar (1,245 events) is weekly with one `BYDAY`, so all of it fits.
 - **How often.** Each followed link is fetched every 6 hours, in a turn worked out from its id
   as the Google backstop is (rc53), and only while someone follows it; with the `ETag` and
   `Last-Modified` it last gave, so an unchanged calendar costs a request and writes nothing
-  (§6). Following a link fetches it at once. Events more than 60 days ahead or already past are
-  not kept.
+  (§6). *(rc57)* Google's public calendars send neither, and a 600 kB body each time, so what a
+  fetch brings is compared with what is kept and only a difference is written; `fetched_at` is
+  when that last happened. Following a link fetches it at once. Events more than 60 days ahead
+  or already past are not kept.
 - **Retention.** A followed calendar's events are a cache: kept while it is followed, deleted
   when nobody follows it any more, and never in an export as yours. An event you went to is
   yours, under your retention (rc23).
@@ -2594,6 +2613,7 @@ CREATE TABLE followed_calendar (            -- one row per link, however many fo
     last_modified text,
     fetched_at    text,
     status        text NOT NULL DEFAULT 'ok', -- ok | unreadable | refused
+    left_out      integer NOT NULL DEFAULT 0, -- (rc57) events in the last fetch it couldn't read
     created_at    text NOT NULL
 );
 CREATE TABLE calendar_follow (              -- who follows it: a person, or a group
