@@ -257,12 +257,14 @@ export const MAX_SCAN = 2000;
  * The next `limit` occurrences (capped at MAX_OCCURRENCES) that haven't ended by
  * `fromLocal` — a wall-clock time in the series' own zone — for "what's coming up".
  * Walks from the series start; past MAX_SCAN starts it returns what it found (perhaps
- * nothing) rather than spend unbounded work.
+ * nothing) rather than spend unbounded work. With `beforeLocal`, it stops at the first start
+ * that isn't before it — a window's end, so a rule with no end isn't walked for 38 years.
  */
 export function upcomingOccurrences(
   input: ExpandInput,
   fromLocal: string,
   limit: number,
+  beforeLocal?: string,
 ): Occurrence[] {
   if (!Number.isInteger(limit) || limit < 1) {
     throw new Error(`limit must be a positive integer, got ${limit}`);
@@ -276,8 +278,11 @@ export function upcomingOccurrences(
   // Temporal per step costs ~0.15ms, which a Worker's CPU budget can't pay 20k times.
   const lengthMs = toNaive(input.endLocal).getTime() - toNaive(input.startLocal).getTime();
   const fromMs = toNaive(fromLocal).getTime();
+  const beforeMs =
+    beforeLocal === undefined ? Number.POSITIVE_INFINITY : toNaive(beforeLocal).getTime();
   const found: Occurrence[] = [];
   const consider = (d: Date): boolean => {
+    if (d.getTime() >= beforeMs) return false;
     if (d.getTime() + lengthMs > fromMs) {
       const occStart = Temporal.PlainDateTime.from(fromNaive(d));
       if (!exdates.has(occStart.toString())) found.push(localise(occStart, duration, input.tzid));
