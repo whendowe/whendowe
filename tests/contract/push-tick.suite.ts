@@ -971,6 +971,44 @@ export function runPushTickContract(makePort: () => Promise<StoragePort>): void 
       expect(t.port.writes - writes).toBeLessThanOrEqual(1); // the cursor
     });
 
+    it("a date that can't be written back is logged and the read goes on; a single event's copy has no dates", async () => {
+      const t = await setUp(makePort, "pull-date-fail");
+      const weekly = await t.event({ ...DINNER, rrule: "FREQ=WEEKLY;COUNT=4" });
+      const once = await t.event({ ...DINNER, title: "Once" });
+      await t.tick();
+      await t.read();
+      t.google().fake.editOccurrence(await t.copyId(weekly), "2101-11-28T18:00:00", { title: "x" });
+      // Google claims a date of the single event too: it has no series to put it back to.
+      t.google().fake.editOccurrence(await t.copyId(once), "2101-11-28T18:00:00", { title: "y" });
+      t.google().fake.editByPerson(await t.copyId(once), { location: "Park" });
+      t.google().failUpsert = new HttpError(400, "calendar event update", "invalid");
+      const result = await t.read();
+      t.google().failUpsert = null;
+      expect(result.outcome).toBe("done");
+      expect(result.decisions).toEqual(
+        expect.arrayContaining([
+          { eventId: weekly, reason: "error" },
+          { eventId: once, reason: "skipped_instance_edit" },
+          { eventId: once, reason: "inbound_applied" },
+        ]),
+      );
+      expect((await t.access(once)).event.location).toBe("Park");
+    });
+
+    it("a full listing never unsubscribes a copy that was never made in Google", async () => {
+      const t = await setUp(makePort, "pull-unmade");
+      const dinner = await t.event();
+      t.google().failUpsert = new HttpError(500, "calendar event insert", "backend");
+      await t.tick(); // the create fails: a copy recorded with no id, waiting its retry
+      t.google().failUpsert = null;
+      expect((await t.rows())[0]).toMatchObject({ state: "error", provider_event_id: null });
+      expect((await t.read()).decisions).not.toContainEqual({
+        eventId: dinner,
+        reason: "inbound_delete_unsubscribed",
+      });
+      expect((await t.rows())[0]).toMatchObject({ unsubscribed_at: null });
+    });
+
     it("an all-day series' date keeps its length; a date deleted in Google is left deleted", async () => {
       const t = await setUp(makePort, "pull-date-allday");
       const camp = await t.event({
