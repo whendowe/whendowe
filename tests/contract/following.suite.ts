@@ -9,7 +9,11 @@ import {
   follow,
   followingPass,
   followLog,
+  followsFor,
+  MAX_FOLLOW_NAME,
+  recolourFollow,
   refreshCalendar,
+  renameFollow,
   stopFollowing,
 } from "../../src/following/follow.js";
 import { readFeed } from "../../src/following/read.js";
@@ -769,6 +773,155 @@ export function runFollowingContract(makePort: () => Promise<StoragePort>): void
       expect(
         (await refreshCalendar(port, server(answer(200)).get, "no-such-calendar", T0)).outcome,
       ).toBe("missing");
+    });
+
+    it("rename and recolour only a follower's own follow; an empty name is the calendar's own", async () => {
+      const port = await makePort();
+      const { ann, bob, group } = await people(port, "rename");
+      const url = "https://club.example/rename.ics";
+      const mine = { kind: "person", personId: ann } as const;
+      const theirs = { kind: "person", personId: bob } as const;
+      const asGroup = { kind: "group", groupId: group, actorId: ann } as const;
+      const asMember = { kind: "group", groupId: group, actorId: bob } as const;
+      const a = await follow(port, mine, url, T0);
+      const b = await follow(port, theirs, url, T0);
+      const g = await follow(port, asGroup, url, T0);
+      if (!a.ok || !b.ok || !g.ok) throw new Error("followed");
+      await refreshCalendar(port, server(answer(200, CAL(SOCIAL))).get, a.calendarId, T0);
+      const named = async (who: string) =>
+        (await followsFor(port, who)).map(
+          (f) => `${f.group === null ? "own" : "group"} ${f.name} ${f.ownName} ${f.colour}`,
+        );
+
+      expect(await renameFollow(port, mine, a.followId, "  Tuesdays  ")).toBe(true);
+      expect(await recolourFollow(port, mine, a.followId, "f5")).toBe(true);
+      // Nobody else's: not Bob's as Ann, not the group's as Ann's own, not as a member.
+      expect(await renameFollow(port, mine, b.followId, "Ann's")).toBe(false);
+      expect(await recolourFollow(port, mine, b.followId, "f6")).toBe(false);
+      expect(await renameFollow(port, mine, g.followId, "Ann's")).toBe(false);
+      expect(await recolourFollow(port, mine, g.followId, "f6")).toBe(false);
+      expect(await renameFollow(port, asMember, g.followId, "Bob's")).toBe(false);
+      expect(await recolourFollow(port, asMember, g.followId, "f6")).toBe(false);
+      expect(await renameFollow(port, asGroup, b.followId, "Group's")).toBe(false);
+      expect(await recolourFollow(port, asGroup, b.followId, "f6")).toBe(false);
+      expect(await renameFollow(port, mine, "no-such-follow", "x")).toBe(false);
+      expect(await recolourFollow(port, mine, "no-such-follow", "f2")).toBe(false);
+      expect(await renameFollow(port, asGroup, g.followId, "Our school")).toBe(true);
+      expect(await recolourFollow(port, asGroup, g.followId, "f3")).toBe(true);
+
+      expect(await named(ann)).toEqual([
+        "own Tuesdays Tuesdays f5",
+        "group Our school Our school f3",
+      ]);
+      expect(await named(bob)).toEqual([
+        "own Swing school null f1",
+        "group Our school Our school f3",
+      ]);
+      // Empty, or only spaces: back to the calendar's own name. A long one is cut to fit.
+      expect(await renameFollow(port, mine, a.followId, "   ")).toBe(true);
+      expect(await renameFollow(port, asGroup, g.followId, "x".repeat(MAX_FOLLOW_NAME + 5))).toBe(
+        true,
+      );
+      const after = await followsFor(port, ann);
+      expect(after.map((f) => [f.name, f.ownName])).toEqual([
+        ["Swing school", null],
+        ["x".repeat(MAX_FOLLOW_NAME), "x".repeat(MAX_FOLLOW_NAME)],
+      ]);
+    });
+
+    it("what someone sees as followed: their own, then each group's they're in, by name", async () => {
+      const port = await makePort();
+      const { ann, bob, group } = await people(port, "shown");
+      const eve = (await findOrCreatePerson(port, "follow-eve-shown@example.org", { now: T0 })).id;
+      const other = await createGroup(port, { name: "Climbers shown", creatorId: eve, now: T0 });
+      const mine = { kind: "person", personId: ann } as const;
+      const asGroup = { kind: "group", groupId: group, actorId: ann } as const;
+      const z = await follow(port, mine, "https://club.example/shown-z.ics", T0);
+      const unread = await follow(port, mine, "https://club.example/shown-a.ics", T0);
+      const g = await follow(port, asGroup, "https://club.example/shown-g.ics", T0);
+      await follow(port, { kind: "person", personId: bob }, "https://club.example/shown-b.ics", T0);
+      await follow(
+        port,
+        { kind: "group", groupId: other.id, actorId: eve },
+        "https://club.example/shown-c.ics",
+        T0,
+      );
+      if (!z.ok || !unread.ok || !g.ok) throw new Error("followed");
+      await refreshCalendar(port, server(answer(200, CAL(SOCIAL, CLASS))).get, z.calendarId, T0);
+      await refreshCalendar(port, server(answer(200, "nonsense")).get, g.calendarId, T0);
+      // Sorted by the name given it, which is before the unread one's address; its own is after.
+      await renameFollow(port, mine, z.followId, "Aerobics");
+
+      const shown = await followsFor(port, ann);
+      expect(shown).toEqual([
+        {
+          followId: z.followId,
+          calendarId: z.calendarId,
+          url: "https://club.example/shown-z.ics",
+          name: "Aerobics",
+          ownName: "Aerobics",
+          colour: "f1",
+          status: "ok",
+          leftOut: 0,
+          fetchedAt: T0,
+          kept: 2,
+          group: null,
+        },
+        {
+          followId: unread.followId,
+          calendarId: unread.calendarId,
+          url: "https://club.example/shown-a.ics",
+          name: null,
+          ownName: null,
+          colour: "f2",
+          status: "ok",
+          leftOut: 0,
+          fetchedAt: null,
+          kept: 0,
+          group: null,
+        },
+        {
+          followId: g.followId,
+          calendarId: g.calendarId,
+          url: "https://club.example/shown-g.ics",
+          name: null,
+          ownName: null,
+          colour: "f1",
+          status: "unreadable",
+          leftOut: 0,
+          fetchedAt: T0, // the status it changed to is a write
+          kept: 0,
+          group: { id: group, name: "Dancers shown", organizer: true },
+        },
+      ]);
+      // Bob: his own, and his group's as a member, who may not change it; never Eve's group's.
+      expect((await followsFor(port, bob)).map((f) => [f.url, f.group?.organizer ?? null])).toEqual(
+        [
+          ["https://club.example/shown-b.ics", null],
+          ["https://club.example/shown-g.ics", false],
+        ],
+      );
+      expect((await followsFor(port, eve)).map((f) => f.url)).toEqual([
+        "https://club.example/shown-c.ics",
+      ]);
+    });
+
+    it("the events kept are counted per calendar, and what is left out is the calendar's", async () => {
+      const port = await makePort();
+      const { ann } = await people(port, "counted");
+      const mine = { kind: "person", personId: ann } as const;
+      const one = await follow(port, mine, "https://club.example/counted-1.ics", T0);
+      const two = await follow(port, mine, "https://club.example/counted-2.ics", T0);
+      if (!one.ok || !two.ok) throw new Error("followed");
+      const odd = ["UID:odd", "DTSTART:20261127T180000Z", "RDATE:20261128T180000Z", "SUMMARY:Odd"];
+      await refreshCalendar(port, server(answer(200, CAL(SOCIAL, odd))).get, one.calendarId, T0);
+      await refreshCalendar(port, server(answer(200, CAL(SOCIAL, CLASS))).get, two.calendarId, T0);
+      expect(
+        (await followsFor(port, ann)).map((f) => [f.url.slice(-6), f.kept, f.leftOut]),
+      ).toEqual([
+        ["-1.ics", 1, 1],
+        ["-2.ics", 2, 0],
+      ]);
     });
   });
 }

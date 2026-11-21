@@ -4,6 +4,7 @@ import { createClient } from "@libsql/client";
 import type { TokenCipher } from "../../src/crypto/tokens.js";
 import type { SqlStatement, StoragePort } from "../../src/db/port.js";
 import { sqliteStoragePort } from "../../src/db/sqlite.js";
+import type { PublicGet } from "../../src/following/fetch.js";
 import { HOLD_MS, runDueHeld } from "../../src/held.js";
 import type { MailMessage } from "../../src/mail/port.js";
 import type { CapabilityConfig } from "../../src/people/capability.js";
@@ -48,6 +49,8 @@ export async function browser(
     feedCipher?: TokenCipher;
     /** The instance's capabilities (rc43); everything for everyone by default. */
     capabilities?: CapabilityConfig;
+    /** Followed calendars' GET (rc56/rc57); none by default, so a follow waits for the pass. */
+    publicGet?: PublicGet;
   } = {},
 ): Promise<Browser> {
   const client = createClient({ url: ":memory:" });
@@ -82,7 +85,10 @@ export async function browser(
     ...(options.feedCipher === undefined ? {} : { feedCipher: options.feedCipher }),
     ...(options.capabilities === undefined ? {} : { capabilities: options.capabilities }),
   };
-  const app = createApp({ auth });
+  const app = createApp({
+    auth,
+    ...(options.publicGet === undefined ? {} : { publicGet: options.publicGet }),
+  });
   const runners = heldRunners(auth);
   const open = (): Browser => {
     const b: Browser = {
