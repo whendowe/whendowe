@@ -285,6 +285,24 @@ describe("the edges Stryker found", () => {
 });
 
 describe("read back by an independent parser (ical.js)", () => {
+  it("a one-off at a time the spring change skips is the instant the RFC says (Hegel's counterexample)", () => {
+    // 2101-03-27 is the last Sunday of March: in Prague 02:00 doesn't exist. RFC 5545 §3.3.5
+    // reads a time in the gap with the offset from before it (+01:00), so 02:00 is 01:00Z.
+    const body = feed([
+      {
+        ...ENTRY,
+        startLocal: "2101-03-27T02:00:00",
+        endLocal: "2101-03-27T04:00:00",
+      },
+    ]);
+    expect(lines(body)).toContain("DTSTART:21010327T010000Z");
+    const vevent = new ICAL.Component(ICAL.parse(body)).getFirstSubcomponent("vevent");
+    if (vevent === null) throw new Error("no event");
+    const event = new ICAL.Event(vevent);
+    expect(event.startDate.toJSDate().toISOString()).toBe("2101-03-27T01:00:00.000Z");
+    expect(event.endDate.toJSDate().toISOString()).toBe("2101-03-27T02:00:00.000Z");
+  });
+
   it("a weekly event across the March change keeps its wall clock, through the VTIMEZONE we wrote", () => {
     const body = feed([
       {
