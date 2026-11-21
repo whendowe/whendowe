@@ -228,6 +228,29 @@ describe("upcomingOccurrences — what's coming up, however old the series", () 
     expect(upcomingOccurrences({ ...weekly, rrule: null }, "2026-02-01T00:00:00", 5)).toEqual([]);
   });
 
+  it("stops at a window's end: a start at it is not included, one before it is", () => {
+    const next = upcomingOccurrences(weekly, "2026-03-01T12:00:00", 10, "2026-03-16T19:00:00");
+    expect(next.map((o) => o.startLocal)).toEqual(["2026-03-02T19:00:00", "2026-03-09T19:00:00"]);
+    expect(
+      upcomingOccurrences(weekly, "2026-03-01T12:00:00", 10, "2026-03-16T19:00:01"),
+    ).toHaveLength(3);
+    expect(
+      upcomingOccurrences(
+        { ...weekly, rrule: null },
+        "2026-01-01T00:00:00",
+        5,
+        "2026-01-05T19:00:00",
+      ),
+    ).toEqual([]);
+  });
+
+  it("bounds a rule with no end: only the starts before the window's end", () => {
+    const daily = { ...weekly, rrule: "FREQ=DAILY" };
+    expect(
+      upcomingOccurrences(daily, "2026-02-01T00:00:00", 500, "2026-02-04T00:00:00"),
+    ).toHaveLength(3);
+  });
+
   it(`walks at most MAX_SCAN (${MAX_SCAN}) starts: bounded work for any series`, () => {
     const daily = { ...weekly, rrule: "FREQ=DAILY" };
     // 2000 days from 2026-01-05 is 2031-06-28: past it, nothing, rather than unbounded work.
