@@ -88,6 +88,8 @@ const auth: AuthDeps = {
   // Capabilities (rc43): who may use what, and the operators who decide.
   capabilities: capabilityConfigOf(config),
 };
+/** A followed link's GET (rc57): every address the name has checked in the connection's lookup. */
+const publicGet = nodePublicGet();
 // rc53: Google's push notifications (routes/hooks.ts) ask for a connection to be read; the
 // minute's loop below reads them, so this process stays the only writer. A set: any number of
 // pokes before the next minute are one read.
@@ -95,6 +97,7 @@ const poked = new Set<string>();
 const app = createApp({
   auth,
   oauth,
+  publicGet,
   ...(config.GOOGLE_PUSH_CHANNELS === "on"
     ? {
         poke: (connectionId: string) => {
@@ -140,8 +143,6 @@ async function pushTicks(at: string): Promise<void> {
     }
   }
 }
-/** A followed link's GET (rc57): every address the name has checked in the connection's lookup. */
-const publicGet = nodePublicGet();
 
 async function purgePass(): Promise<void> {
   try {

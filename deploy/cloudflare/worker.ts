@@ -109,6 +109,9 @@ function buildMail(c: Config, env: Env, s: StoragePort): MailPort {
   });
 }
 
+/** A followed link's GET (rc57): DNS over HTTPS first, then the calendar, redirects unfollowed. */
+const publicGet = workerPublicGet((url, init) => fetch(url, init));
+
 async function build(env: Env): Promise<Built> {
   const config = loadConfig({
     GOOGLE_CLIENT_ID: env.GOOGLE_CLIENT_ID,
@@ -160,6 +163,7 @@ async function build(env: Env): Promise<Built> {
   const app = createApp({
     auth,
     oauth,
+    publicGet,
     ...(config.GOOGLE_PUSH_CHANNELS === "on" ? { poke } : {}),
   });
   return {
@@ -195,9 +199,6 @@ function getBuilt(env: Env): Promise<Built> {
   cached ??= build(env);
   return cached;
 }
-
-/** A followed link's GET (rc57): DNS over HTTPS first, then the calendar, redirects unfollowed. */
-const publicGet = workerPublicGet((url, init) => fetch(url, init));
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
