@@ -134,7 +134,8 @@ describe("projectEntry() — a copy in a calendar shows what the feed shows (§1
   it("begins the description with where to change it, then the event's own notes", () => {
     expect(projectEntry(entry())).toEqual({
       title: "School pickup",
-      description: `From WhenDoWe — change it there: ${LINK}. Edits made here in Google aren't kept yet.\n\nBring the bike`,
+      // rc53/rc55: changes made in Google come back now; this one repeats, so one date doesn't.
+      description: `From WhenDoWe — change it here or there: ${LINK}. Changes to one date aren't kept: change the whole series.\n\nBring the bike`,
       location: "Main gate",
       ...times,
       sourceUrl: LINK,
@@ -142,7 +143,13 @@ describe("projectEntry() — a copy in a calendar shows what the feed shows (§1
   });
 
   it("is only the line when the event has no notes", () => {
-    expect(projectEntry(entry({ description: null })).description).toBe(fromWhenDoWeLine(LINK));
+    expect(projectEntry(entry({ description: null })).description).toBe(
+      fromWhenDoWeLine(LINK, true),
+    );
+    // One that doesn't repeat says nothing about one date.
+    expect(projectEntry(entry({ description: null, rrule: null })).description).toBe(
+      `From WhenDoWe — change it here or there: ${LINK}.`,
+    );
   });
 
   it("is Busy at BUSY: no place, notes or link, and the same times", () => {

@@ -40,12 +40,14 @@ export function project(event: CanonicalEventRow, profile: VisibilityProfile): E
 }
 
 /**
- * The line a copy's description begins with (§10 rc40): where to change it, and that an
- * edit made in Google is overwritten until MVP-5, since an overwrite nobody was told about
- * looks like a bug.
+ * The line a copy's description begins with (§10 rc40, rc53): where it came from, and that it
+ * can be changed in either place now that changes made in Google come back. A repeating event
+ * adds that a change to one date isn't kept (rc55): WhenDoWe edits whole series only (rc13).
+ * fromCopy (conflict.ts) takes the line off whatever its wording, so changing it is safe.
  */
-export function fromWhenDoWeLine(url: string): string {
-  return `From WhenDoWe — change it there: ${url}. Edits made here in Google aren't kept yet.`;
+export function fromWhenDoWeLine(url: string, repeating = false): string {
+  const line = `From WhenDoWe — change it here or there: ${url}.`;
+  return repeating ? `${line} Changes to one date aren't kept: change the whole series.` : line;
 }
 
 /**
@@ -64,7 +66,7 @@ export function projectEntry(entry: FeedEntry): EventFields {
   if (entry.visibility === "BUSY" || entry.url === null) {
     return { title: BUSY_SUMMARY, description: null, location: null, ...times, sourceUrl: null };
   }
-  const line = fromWhenDoWeLine(entry.url);
+  const line = fromWhenDoWeLine(entry.url, entry.rrule !== null);
   return {
     title: entry.title,
     description: entry.description === null ? line : `${line}\n\n${entry.description}`,

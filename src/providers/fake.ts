@@ -112,6 +112,14 @@ export class FakeCalendarProvider implements CalendarProvider {
     this.outbox.push(event);
   }
 
+  /**
+   * Test hook: an event deleted long enough ago that the provider keeps no tombstone (§12): no
+   * change is reported, and a full listing doesn't hold it.
+   */
+  vanish(providerEventId: string): void {
+    this.events.delete(providerEventId);
+  }
+
   /** Test hook: what the provider holds for an event now. */
   holds(providerEventId: string): ProviderEvent | null {
     return this.events.get(providerEventId)?.event ?? null;
