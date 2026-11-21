@@ -344,16 +344,13 @@ async function pastPlans(storage: StoragePort, now: string): Promise<string[]> {
  * anything to delete; only those statements run.
  */
 /**
- * Delete a calendar nobody follows any more — `calendarId`'s, or every one (null): a person's
- * or group's deletion takes their follows by cascade, and the retention pass sweeps after it (rc56).
+ * Delete every followed calendar nobody follows any more (rc56), with its events: after a stop,
+ * and in the retention pass, since a person's or group's deletion takes their follows by cascade.
  */
-export function unfollowedSweep(calendarId: string | null): SqlStatement {
+export function unfollowedSweep(): SqlStatement {
   return stmt(
     `DELETE FROM followed_calendar
-     WHERE (? IS NULL OR id = ?)
-       AND NOT EXISTS (SELECT 1 FROM calendar_follow f WHERE f.calendar_id = followed_calendar.id)`,
-    calendarId,
-    calendarId,
+     WHERE NOT EXISTS (SELECT 1 FROM calendar_follow f WHERE f.calendar_id = followed_calendar.id)`,
   );
 }
 
@@ -418,7 +415,7 @@ async function expired(storage: StoragePort, now: string): Promise<number> {
     },
     // rc56: a followed calendar nobody follows any more — its last follower's account or group
     // went by cascade — goes, with its events (a cache).
-    { flag: "followed", stmt: unfollowedSweep(null) },
+    { flag: "followed", stmt: unfollowedSweep() },
   ];
   const [flags] = await storage.query({
     sql: `SELECT

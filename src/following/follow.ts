@@ -130,17 +130,16 @@ export async function stopFollowing(
   const [personId, groupId] = owner(follower);
   const [row] = await storage.query(
     stmt(
-      "SELECT calendar_id FROM calendar_follow WHERE id = ? AND person_id IS ? AND group_id IS ?",
+      "SELECT 1 FROM calendar_follow WHERE id = ? AND person_id IS ? AND group_id IS ?",
       followId,
       personId,
       groupId,
     ),
   );
   if (row === undefined) return false;
-  const calendarId = z.object({ calendar_id: z.string() }).parse(row).calendar_id;
   await storage.batch([
     stmt("DELETE FROM calendar_follow WHERE id = ?", followId),
-    unfollowedSweep(calendarId),
+    unfollowedSweep(),
   ]);
   return true;
 }

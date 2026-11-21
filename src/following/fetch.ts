@@ -208,10 +208,9 @@ function v6IsPublic(g: readonly number[]): boolean {
   const [a = 0, b = 0, , , , f = 0, x = 0, y = 0] = g;
   const v4 = x * 65536 + y;
   const zeroTo = (n: number) => g.slice(0, n).every((v) => v === 0);
-  if (zeroTo(8)) return false; // ::
-  if (zeroTo(7) && y === 1) return false; // ::1
   if (zeroTo(5) && f === 0xffff) return v4IsPublic(v4); // ::ffff:a.b.c.d
-  if (zeroTo(6)) return v4IsPublic(v4); // ::a.b.c.d (deprecated, read as IPv4)
+  // ::a.b.c.d (deprecated, read as IPv4) — which also refuses :: and ::1, as 0.0.0.0/8.
+  if (zeroTo(6)) return v4IsPublic(v4);
   if (a === 0x64 && b === 0xff9b && g.slice(2, 6).every((v) => v === 0)) return v4IsPublic(v4); // NAT64
   if ((a & 0xfe00) === 0xfc00) return false; // unique local
   if ((a & 0xffc0) === 0xfe80) return false; // link-local
