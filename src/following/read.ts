@@ -75,7 +75,6 @@ function parseLine(raw: string): Line | null {
   let i = 0;
   while (i < raw.length && raw[i] !== ";" && raw[i] !== ":") i++;
   const name = raw.slice(0, i).toUpperCase();
-  if (name === "" || i === raw.length) return null;
   const params = new Map<string, string>();
   while (raw[i] === ";") {
     const eq = raw.indexOf("=", i);
@@ -113,7 +112,7 @@ function capped(value: string | undefined, max: number): string | null {
 function webUrl(value: string | undefined): string | null {
   if (value === undefined || value.length > MAX_URL) return null;
   try {
-    const url = new URL(value.trim());
+    const url = new URL(value); // the parser trims spaces itself
     return url.protocol === "https:" || url.protocol === "http:" ? url.toString() : null;
   } catch {
     return null;
@@ -124,7 +123,7 @@ function webUrl(value: string | undefined): string | null {
 // Times
 // ---------------------------------------------------------------------------
 
-/** Why an event is left out; thrown inside one event's reading, caught per event. */
+/** Why an event is left out, said where it is refused; any error in one event leaves it out. */
 class Unreadable extends Error {}
 
 type Moment =
@@ -136,39 +135,34 @@ const DATE = /^(\d{4})(\d{2})(\d{2})$/;
 const DATE_TIME = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})(Z?)$/;
 
 function moment(value: string, params: ReadonlyMap<string, string>): Moment {
-  try {
-    const d = DATE.exec(value);
-    if (d !== null || params.get("VALUE") === "DATE") {
-      if (d === null) throw new Unreadable("a date that isn't one");
-      return {
-        kind: "date",
-        date: Temporal.PlainDate.from(
-          { year: Number(d[1]), month: Number(d[2]), day: Number(d[3]) },
-          { overflow: "reject" },
-        ),
-      };
-    }
-    const t = DATE_TIME.exec(value);
-    if (t === null) throw new Unreadable("not a date-time");
-    const at = Temporal.PlainDateTime.from(
-      {
-        year: Number(t[1]),
-        month: Number(t[2]),
-        day: Number(t[3]),
-        hour: Number(t[4]),
-        minute: Number(t[5]),
-        second: Math.min(Number(t[6]), 59), // a leap second is the second before it
-      },
-      { overflow: "reject" },
-    );
-    if (t[7] === "Z") return { kind: "utc", at: at.toZonedDateTime("UTC").toInstant() };
-    const tzid = params.get("TZID") ?? null;
-    if (tzid !== null && !isTimeZone(tzid)) throw new Unreadable("a zone we don't know");
-    return { kind: "local", at, tzid };
-  } catch (e) {
-    if (e instanceof Unreadable) throw e;
-    throw new Unreadable("not a time");
+  const d = DATE.exec(value);
+  if (d !== null || params.get("VALUE") === "DATE") {
+    if (d === null) throw new Unreadable("a date that isn't one");
+    return {
+      kind: "date",
+      date: Temporal.PlainDate.from(
+        { year: Number(d[1]), month: Number(d[2]), day: Number(d[3]) },
+        { overflow: "reject" },
+      ),
+    };
   }
+  const t = DATE_TIME.exec(value);
+  if (t === null) throw new Unreadable("not a date-time");
+  const at = Temporal.PlainDateTime.from(
+    {
+      year: Number(t[1]),
+      month: Number(t[2]),
+      day: Number(t[3]),
+      hour: Number(t[4]),
+      minute: Number(t[5]),
+      second: Math.min(Number(t[6]), 59), // a leap second is the second before it
+    },
+    { overflow: "reject" },
+  );
+  if (t[7] === "Z") return { kind: "utc", at: at.toZonedDateTime("UTC").toInstant() };
+  const tzid = params.get("TZID") ?? null;
+  if (tzid !== null && !isTimeZone(tzid)) throw new Unreadable("a zone we don't know");
+  return { kind: "local", at, tzid };
 }
 
 /** The zone an event's times are kept in: its own, or the feed's for a UTC time. */
@@ -245,11 +239,7 @@ export function feedRule(raw: string, zone: string | null): string {
     kept.push(part);
   }
   const rule = kept.join(";");
-  try {
-    parseRRule(rule);
-  } catch {
-    throw new Unreadable("a rule outside the subset");
-  }
+  parseRRule(rule); // throws for a rule outside the subset
   return rule;
 }
 
@@ -304,17 +294,7 @@ function readEvent(props: Props, feedZone: string): Read {
       throw new Unreadable("start and end differ in kind");
     ruleEnd = wallClock(endMoment, ruleZone);
   } else if (duration !== undefined) {
-    let d: Temporal.Duration;
-    try {
-      d = Temporal.Duration.from(duration.value.replace(/^\+/, ""));
-    } catch {
-      throw new Unreadable("not a duration");
-    }
-    try {
-      ruleEnd = ruleStart.add(d);
-    } catch {
-      throw new Unreadable("a duration we can't add");
-    }
+    ruleEnd = ruleStart.add(Temporal.Duration.from(duration.value.replace(/^\+/, "")));
   } else {
     ruleEnd = allDay ? ruleStart.add({ days: 1 }) : ruleStart;
   }
@@ -393,6 +373,7 @@ function row(
 /** A series' occurrences in the window, less its EXDATEs and the dates overridden. */
 function occurrences(
   master: Read,
+  rrule: string,
   overridden: ReadonlySet<string>,
   feedZone: string,
   w: Window,
@@ -400,21 +381,18 @@ function occurrences(
   const zone = master.ruleZone ?? feedZone;
   const local = (i: Temporal.Instant) => i.toZonedDateTimeISO(zone).toPlainDateTime().toString();
   const exdates = master.exdates.map((m) => wallClock(m, master.ruleZone).toString());
-  const found =
-    master.rrule === null
-      ? []
-      : upcomingOccurrences(
-          {
-            startLocal: master.ruleStart.toString(),
-            endLocal: master.ruleEnd.toString(),
-            tzid: master.ruleZone,
-            rrule: master.rrule,
-            exdates,
-          },
-          local(w.from),
-          MAX_OCCURRENCES,
-          local(w.before),
-        );
+  const found = upcomingOccurrences(
+    {
+      startLocal: master.ruleStart.toString(),
+      endLocal: master.ruleEnd.toString(),
+      tzid: master.ruleZone,
+      rrule,
+      exdates,
+    },
+    local(w.from),
+    MAX_OCCURRENCES,
+    local(w.before),
+  );
   return found
     .filter((o) => !overridden.has(o.startLocal))
     .map((o) =>
@@ -450,7 +428,7 @@ function hasDate(master: Read, at: Temporal.PlainDateTime): boolean {
 /** The feed's own zone, for its UTC times: X-WR-TIMEZONE when it is one we know, else UTC. */
 function feedZoneOf(value: string | undefined): string {
   const zone = value?.trim();
-  return zone !== undefined && zone !== "" && isTimeZone(zone) ? zone : "UTC";
+  return zone !== undefined && isTimeZone(zone) ? zone : "UTC";
 }
 
 /** RFC 5545 text -> the events kept, now to KEEP_DAYS ahead (`now` an ISO instant). */
@@ -487,14 +465,15 @@ export function readFeed(text: string, now: string): ReadFeed {
 
   let leftOut = 0;
   const masters = new Map<string, Read>();
-  const overrides: Read[] = [];
+  const overrides: { readonly e: Read; readonly recurrenceId: Moment }[] = [];
   for (const props of events) {
+    // Whatever one event of untrusted text does wrong — a refusal here, or a value Temporal or
+    // the rule reader won't take — it is that event that is left out, never the feed.
     try {
       const e = readEvent(props, feedZone);
-      if (e.recurrenceId !== null) overrides.push(e);
+      if (e.recurrenceId !== null) overrides.push({ e, recurrenceId: e.recurrenceId });
       else if (!masters.has(e.uid)) masters.set(e.uid, e);
-    } catch (err) {
-      if (!(err instanceof Unreadable)) throw err;
+    } catch {
       leftOut++;
     }
   }
@@ -502,11 +481,10 @@ export function readFeed(text: string, now: string): ReadFeed {
 
   const kept: FollowedEventRow[] = [];
   const overriddenBy = new Map<string, Set<string>>();
-  for (const o of overrides) {
+  for (const { e: o, recurrenceId } of overrides) {
     const master = masters.get(o.uid);
     // The date it replaces, in its series' zone: that is the key its own occurrence had.
-    const original =
-      o.recurrenceId === null ? o.start : wallClock(o.recurrenceId, master?.ruleZone ?? o.ruleZone);
+    const original = wallClock(recurrenceId, master?.ruleZone ?? o.ruleZone);
     const key = original.toString();
     // An override counts only for a date its series has: one it doesn't (or has deleted) names
     // nothing, as Thunderbird's reader has it. With no series in the feed at all, it stands alone.
@@ -522,7 +500,8 @@ export function readFeed(text: string, now: string): ReadFeed {
         kept.push(row(master, master.uid, master.start, master.end, master.fields.status));
       }
     } else {
-      kept.push(...occurrences(master, overriddenBy.get(master.uid) ?? new Set(), feedZone, w));
+      const overridden = overriddenBy.get(master.uid) ?? new Set();
+      kept.push(...occurrences(master, master.rrule, overridden, feedZone, w));
     }
   }
 

@@ -24,12 +24,14 @@ const GOOGLE_HOST = "calendar.google.com";
 /** A Google calendar id, as `src` or a decoded `cid` names it: something@something. */
 const GOOGLE_ID = /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+$/;
 
-/** `cid` in a share link is the id itself, or the id in base64 (url-safe, unpadded). */
+/**
+ * `cid` in a share link is the id itself, or the id in base64, perhaps unpadded. atob refuses
+ * anything that isn't base64; what it decodes must still be an id.
+ */
 function googleCid(cid: string): string | null {
   if (GOOGLE_ID.test(cid)) return cid;
-  if (!/^[A-Za-z0-9_-]+={0,2}$/.test(cid)) return null;
   try {
-    const decoded = atob(cid.replaceAll("-", "+").replaceAll("_", "/"));
+    const decoded = atob(cid);
     return GOOGLE_ID.test(decoded) ? decoded : null;
   } catch {
     return null;
@@ -44,19 +46,18 @@ function googleIcal(id: string): string {
 function googleCalendarId(url: URL): string | null {
   if (url.hostname !== GOOGLE_HOST) return null;
   if (url.pathname.startsWith("/calendar/ical/")) return null; // already its iCal address
-  const src = url.searchParams.get("src");
-  if (src !== null && GOOGLE_ID.test(src)) return src;
-  const cid = url.searchParams.get("cid");
-  return cid === null ? null : googleCid(cid);
+  const src = url.searchParams.get("src") ?? "";
+  if (GOOGLE_ID.test(src)) return src;
+  return googleCid(url.searchParams.get("cid") ?? "");
 }
 
 /** A pasted link -> the https: address to fetch. The fragment is dropped; the query kept. */
 export function followableLink(pasted: string): FollowableLink {
   const text = pasted.trim();
-  if (text === "" || text.length > MAX_LINK_LENGTH) return { ok: false, reason: "not-a-link" };
+  if (text.length > MAX_LINK_LENGTH) return { ok: false, reason: "not-a-link" };
   let url: URL;
   try {
-    url = new URL(/^webcals?:/i.test(text) ? text.replace(/^webcals?:/i, "https:") : text);
+    url = new URL(text.replace(/^webcals?:/i, "https:"));
   } catch {
     return { ok: false, reason: "not-a-link" };
   }
