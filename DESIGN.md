@@ -2586,8 +2586,8 @@ others is an ordinary Ask. Owner decisions, 2026-11-21.
     is dropped when it can't change a date (one `BYDAY`, or `INTERVAL=1`), and a UTC `UNTIL`
     becomes the series' own wall clock. One event the code can't read (a rule outside the
     subset, say) is left out, and the calendar says how many were (`followed_calendar.left_out`);
-    only a feed with nothing readable is "couldn't read". Every rule in the dance school's calendar (1,245 events)
-    is weekly with one `BYDAY`, so all of it fits.
+    only a feed with nothing readable is "couldn't read". Every rule in the dance school's
+    calendar (1,245 events) is weekly with one `BYDAY`, so all of it fits.
 - **How often.** Each followed link is fetched every 6 hours, in a turn worked out from its id
   as the Google backstop is (rc53), and only while someone follows it; with the `ETag` and
   `Last-Modified` it last gave, so an unchanged calendar costs a request and writes nothing
