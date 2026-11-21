@@ -1118,3 +1118,79 @@ export const askDraft = sqliteTable(
   },
   (t) => [index("ask_draft_author").on(t.authorId, t.updatedAt)],
 );
+
+// rc56 (DESIGN §10 *Following calendars*), slice F1: a calendar someone follows by its iCal
+// link. One row per link however many follow it; what it holds is a cache (followed_event),
+// and the row goes when nobody follows it any more. etag/last_modified are what the last
+// fetch gave, for a conditional request; fetched_at is when what's kept last changed (rc57).
+export const followedCalendar = sqliteTable(
+  "followed_calendar",
+  {
+    id: text("id").primaryKey(),
+    url: text("url").notNull().unique(),
+    name: text("name"),
+    etag: text("etag"),
+    lastModified: text("last_modified"),
+    fetchedAt: text("fetched_at"),
+    status: text("status").notNull().default("ok"),
+    leftOut: integer("left_out").notNull().default(0),
+    createdAt: text("created_at").notNull(),
+  },
+  (t) => [
+    check("followed_calendar_status_chk", sql`${t.status} IN ('ok', 'unreadable', 'refused')`),
+  ],
+);
+
+// Who follows a calendar: a person for themselves, or a group (exactly one of the two), with
+// the name and colour this follower gave it.
+export const calendarFollow = sqliteTable(
+  "calendar_follow",
+  {
+    id: text("id").primaryKey(),
+    calendarId: text("calendar_id")
+      .notNull()
+      .references(() => followedCalendar.id, { onDelete: "cascade" }),
+    personId: text("person_id").references(() => person.id, { onDelete: "cascade" }),
+    groupId: text("group_id").references(() => personGroup.id, { onDelete: "cascade" }),
+    name: text("name"),
+    colour: text("colour").notNull(),
+    createdAt: text("created_at").notNull(),
+  },
+  (t) => [
+    check("calendar_follow_one_chk", sql`(${t.personId} IS NULL) <> (${t.groupId} IS NULL)`),
+    uniqueIndex("calendar_follow_person_uq")
+      .on(t.personId, t.calendarId)
+      .where(sql`${t.personId} IS NOT NULL`),
+    uniqueIndex("calendar_follow_group_uq")
+      .on(t.groupId, t.calendarId)
+      .where(sql`${t.groupId} IS NOT NULL`),
+    index("calendar_follow_calendar_idx").on(t.calendarId),
+  ],
+);
+
+// A followed calendar's events in the window kept (today to 60 days ahead), one row per
+// occurrence: uid is the feed's UID, and for a date of a series its original start too.
+// Wall-clock times as everywhere (§10); a UTC time in the feed is kept in the feed's zone.
+export const followedEvent = sqliteTable(
+  "followed_event",
+  {
+    calendarId: text("calendar_id")
+      .notNull()
+      .references(() => followedCalendar.id, { onDelete: "cascade" }),
+    uid: text("uid").notNull(),
+    title: text("title").notNull(),
+    location: text("location"),
+    description: text("description"),
+    url: text("url"),
+    startLocal: text("start_local").notNull(),
+    endLocal: text("end_local").notNull(),
+    tzid: text("tzid"),
+    allDay: integer("all_day").notNull(),
+    status: text("status").notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.calendarId, t.uid] }),
+    index("followed_event_start_idx").on(t.calendarId, t.startLocal),
+    check("followed_event_status_chk", sql`${t.status} IN ('confirmed', 'cancelled')`),
+  ],
+);
