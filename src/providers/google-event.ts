@@ -46,6 +46,8 @@ export const googleEventSchema = z.object({
   recurrence: z.array(z.string()).nullish(),
   /** Set on an INSTANCE of a series, pointing at the master event. */
   recurringEventId: z.string().nullish(),
+  /** On an instance: where its series would have put it (rc53 T4). */
+  originalStartTime: eventDateTimeSchema.optional(),
   /** Where the event came from, shown by Google as a link. */
   source: z.object({ url: z.string(), title: z.string().optional() }).nullish(),
   extendedProperties: z
@@ -167,6 +169,7 @@ export function toProviderEvent(event: GoogleEvent): ProviderEvent {
       },
       isDeleted: true,
       recurringEventId: event.recurringEventId ?? null,
+      originalStart: originalStartOf(event),
     };
   }
 
@@ -202,7 +205,15 @@ export function toProviderEvent(event: GoogleEvent): ProviderEvent {
     },
     isDeleted: false,
     recurringEventId: event.recurringEventId ?? null,
+    originalStart: originalStartOf(event),
   };
+}
+
+/** An instance's date in its series, or null for an event that isn't one. */
+function originalStartOf(event: GoogleEvent): ProviderEvent["originalStart"] {
+  return event.originalStartTime === undefined
+    ? null
+    : parseLocalTime(event.originalStartTime, "originalStartTime");
 }
 
 /** What Google shows as the name of a copy's source link. */

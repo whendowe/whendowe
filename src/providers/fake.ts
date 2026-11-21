@@ -56,13 +56,16 @@ export class FakeCalendarProvider implements CalendarProvider {
     }
     const id = providerEventId ?? `fake-${++this.idCounter}`;
     const etag = `etag-${++this.etagCounter}`;
+    const held = providerEventId === null ? undefined : this.events.get(providerEventId)?.event;
     const event: ProviderEvent = {
       id,
       etag,
       fields,
       metadata,
       isDeleted: false,
-      recurringEventId: null,
+      // Writing an instance keeps it one: it stays that date of its series.
+      recurringEventId: held?.recurringEventId ?? null,
+      originalStart: held?.originalStart ?? null,
     };
     this.events.set(id, { event, deleted: false });
     this.outbox.push(event);
@@ -118,6 +121,44 @@ export class FakeCalendarProvider implements CalendarProvider {
    */
   vanish(providerEventId: string): void {
     this.events.delete(providerEventId);
+  }
+
+  /**
+   * Test hook: a person changes one date of a series in the provider's own app (rc53 T4). As in
+   * Google, it becomes an instance of its own — its own id, the series' hidden metadata, and the
+   * date the series would have given it — and the series is untouched. Changing the same date
+   * again changes that instance. Returns its id.
+   */
+  editOccurrence(
+    seriesId: string,
+    originalStartLocal: string,
+    fields: Partial<EventFields>,
+  ): string {
+    const series = this.events.get(seriesId);
+    if (series === undefined || series.deleted) throw new Error("no such series to edit");
+    const id = `${seriesId}_${originalStartLocal.replace(/[-:]/g, "")}`;
+    const before = this.events.get(id)?.event.fields ?? {
+      ...series.event.fields,
+      rrule: null,
+      startLocal: originalStartLocal,
+      endLocal: originalStartLocal,
+    };
+    const event: ProviderEvent = {
+      id,
+      etag: `etag-${++this.etagCounter}`,
+      fields: { ...before, ...fields },
+      metadata: series.event.metadata,
+      isDeleted: false,
+      recurringEventId: seriesId,
+      originalStart: {
+        local: originalStartLocal,
+        tzid: series.event.fields.tzid,
+        allDay: series.event.fields.allDay,
+      },
+    };
+    this.events.set(id, { event, deleted: false });
+    this.outbox.push(event);
+    return id;
   }
 
   /** Test hook: what the provider holds for an event now. */
