@@ -940,6 +940,71 @@ export function runPushTickContract(makePort: () => Promise<StoragePort>): void 
       ]);
     });
 
+    it("one date of a series changed in Google is put back to what the series gives it (T4b)", async () => {
+      const t = await setUp(makePort, "pull-date");
+      const weekly = await t.event({ ...DINNER, rrule: "FREQ=WEEKLY;COUNT=4" });
+      await t.tick();
+      await t.read();
+      const series = await t.copyId(weekly);
+      const date = t.google().fake.editOccurrence(series, "2101-11-28T18:00:00", {
+        title: "Just this once",
+        startLocal: "2101-11-28T19:30:00",
+        endLocal: "2101-11-28T21:00:00",
+      });
+      expect((await t.read()).decisions).toEqual([{ eventId: weekly, reason: "inbound_put_back" }]);
+      const held = t.google().fake.holds(date)?.fields;
+      expect(held).toMatchObject({
+        title: "Dinner",
+        startLocal: "2101-11-28T18:00:00",
+        endLocal: "2101-11-28T20:00:00",
+        rrule: null,
+      });
+      expect(held?.description).toMatch(
+        /^From WhenDoWe — change it here or there: .*Changes to one date aren't kept/s,
+      );
+      // The event itself, and the series in Google, are untouched.
+      expect((await t.access(weekly)).event).toMatchObject({ title: "Dinner", revision: 1 });
+      expect(t.google().fake.holds(series)?.fields.rrule).toBe("FREQ=WEEKLY;COUNT=4");
+      // Our put-back, read back, is what the series gives that date: nothing more to do.
+      const writes = t.port.writes;
+      expect((await t.read()).decisions).toEqual([]);
+      expect(t.port.writes - writes).toBeLessThanOrEqual(1); // the cursor
+    });
+
+    it("an all-day series' date keeps its length; a date deleted in Google is left deleted", async () => {
+      const t = await setUp(makePort, "pull-date-allday");
+      const camp = await t.event({
+        ...DINNER,
+        title: "Camp",
+        allDay: true,
+        startLocal: "2101-11-21",
+        endLocal: "2101-11-23",
+        tzid: null,
+        rrule: "FREQ=WEEKLY;COUNT=3",
+      });
+      await t.tick();
+      await t.read();
+      const series = await t.copyId(camp);
+      const date = t.google().fake.editOccurrence(series, "2101-11-28", {
+        startLocal: "2101-11-29",
+        endLocal: "2101-11-30",
+      });
+      expect((await t.read()).decisions).toEqual([{ eventId: camp, reason: "inbound_put_back" }]);
+      expect(t.google().fake.holds(date)?.fields).toMatchObject({
+        startLocal: "2101-11-28",
+        endLocal: "2101-11-30",
+        allDay: true,
+      });
+      await t.read();
+      await t.google().fake.delete(date);
+      expect((await t.read()).decisions).toEqual([
+        { eventId: camp, reason: "skipped_instance_edit" },
+      ]);
+      expect(t.google().fake.holds(date)?.isDeleted).toBe(true);
+      // The series' own copy is still there, not unsubscribed.
+      expect((await t.rows())[0]).toMatchObject({ state: "synced", unsubscribed_at: null });
+    });
+
     it("an expired cursor reads everything, and finds the change all the same", async () => {
       const t = await setUp(makePort, "pull-expired");
       const dinner = await t.event();

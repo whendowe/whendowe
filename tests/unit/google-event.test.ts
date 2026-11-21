@@ -238,3 +238,36 @@ it("requires an id and etag", () => {
   expect(() => googleEventSchema.parse({ etag: '"e"' })).toThrow();
   expect(() => googleEventSchema.parse({ id: "e" })).toThrow();
 });
+
+// --- one date of a series (rc53 T4) ---
+
+it("reads an instance's date in its series, timed or all-day, and none for an event that isn't one", () => {
+  expect(
+    mapped({
+      ...TIMED,
+      id: "evt-1_20260920T070000Z",
+      recurringEventId: "evt-1",
+      originalStartTime: { dateTime: "2026-09-20T09:00:00+02:00", timeZone: "Europe/Prague" },
+    }).originalStart,
+  ).toEqual({ local: "2026-09-20T09:00:00", tzid: "Europe/Prague", allDay: false });
+  expect(
+    mapped({
+      ...TIMED,
+      start: { date: "2026-09-21" },
+      end: { date: "2026-09-22" },
+      recurringEventId: "evt-1",
+      originalStartTime: { date: "2026-09-20" },
+    }).originalStart,
+  ).toEqual({ local: "2026-09-20", tzid: null, allDay: true });
+  // A deleted date still says which one it was.
+  expect(
+    mapped({
+      id: "evt-1_x",
+      etag: '"e"',
+      status: "cancelled",
+      recurringEventId: "evt-1",
+      originalStartTime: { date: "2026-09-27" },
+    }).originalStart,
+  ).toEqual({ local: "2026-09-27", tzid: null, allDay: true });
+  expect(mapped(TIMED).originalStart).toBeNull();
+});
