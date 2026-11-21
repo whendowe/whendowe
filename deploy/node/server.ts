@@ -10,6 +10,7 @@ import {
 } from "../../src/config.js";
 import type { StoragePort } from "../../src/db/port.js";
 import { sqliteStoragePort } from "../../src/db/sqlite.js";
+import { followingPass, followLog } from "../../src/following/follow.js";
 import { runDueHeld } from "../../src/held.js";
 import { cappedMailPort } from "../../src/mail/capped.js";
 import { cloudflareRestMailPort } from "../../src/mail/cloudflare.js";
@@ -23,6 +24,7 @@ import { calendarGrants, createApp, heldRunners, reconnectMailer } from "../../s
 import type { AuthDeps } from "../../src/web/routes/auth.js";
 import type { OAuthRouteDeps } from "../../src/web/routes/oauth.js";
 import { buildOAuthDeps, pushTickPorts, tokenCipherFor } from "../../src/web/routes/oauth-deps.js";
+import { nodePublicGet } from "./public-address.js";
 
 // Node entry (DESIGN.md §8): the same Hono app object as the Cloudflare worker,
 // served by @hono/node-server, with an in-process scheduler as the Node twin of the
@@ -138,6 +140,9 @@ async function pushTicks(at: string): Promise<void> {
     }
   }
 }
+/** A followed link's GET (rc57): every address the name has checked in the connection's lookup. */
+const publicGet = nodePublicGet();
+
 async function purgePass(): Promise<void> {
   try {
     const at = now();
@@ -152,6 +157,11 @@ async function purgePass(): Promise<void> {
         console.log(JSON.stringify({ reason: "retention_purged", ...r }));
     }
     await pushTicks(at);
+    // rc56: the followed calendars whose turn it is, each in its own minute of six hours.
+    for (const { calendarId, refreshed } of await followingPass(storage, publicGet, at)) {
+      const line = followLog(calendarId, refreshed);
+      if (line !== null) console.log(JSON.stringify(line));
+    }
     // rc40: one email to each account Google stopped answering for, the tick above included.
     const mailed = await mailReconnects(at);
     if (mailed.sent + mailed.failed > 0)

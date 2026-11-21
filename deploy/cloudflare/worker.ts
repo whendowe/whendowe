@@ -9,6 +9,7 @@ import {
 } from "../../src/config.js";
 import { d1StoragePort } from "../../src/db/d1.js";
 import type { StoragePort } from "../../src/db/port.js";
+import { followingPass, followLog } from "../../src/following/follow.js";
 import { type HeldRunners, runDueHeld } from "../../src/held.js";
 import { cappedMailPort } from "../../src/mail/capped.js";
 import { cloudflareBindingMailPort, type EmailBindingLike } from "../../src/mail/cloudflare.js";
@@ -24,6 +25,7 @@ import { buildOAuthDeps, tokenCipherFor } from "../../src/web/routes/oauth-deps.
 import type { AppEnv } from "../../src/web/session.js";
 
 import { TICK_URL } from "./connection-do.js";
+import { workerPublicGet } from "./public-address.js";
 
 export { ConnectionDO } from "./connection-do.js";
 
@@ -194,6 +196,9 @@ function getBuilt(env: Env): Promise<Built> {
   return cached;
 }
 
+/** A followed link's GET (rc57): DNS over HTTPS first, then the calendar, redirects unfollowed. */
+const publicGet = workerPublicGet((url, init) => fetch(url, init));
+
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const { app } = await getBuilt(env);
@@ -224,5 +229,11 @@ export default {
     // alarms (§16). Choosing whom to tick reads only; a quiet tick writes nothing (§6).
     // rc53: with each connection's turn to be read in Google, every 6 hours.
     if (pushing) await fanOut(env, await ticksDue(storage, at));
+    // rc56: the followed calendars whose turn it is, each in its own minute of six hours.
+    const followed = await followingPass(storage, publicGet, at);
+    for (const { calendarId, refreshed } of followed) {
+      const line = followLog(calendarId, refreshed);
+      if (line !== null) console.log(JSON.stringify(line));
+    }
   },
 };
