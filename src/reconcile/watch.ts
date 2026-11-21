@@ -125,3 +125,43 @@ export async function stopChannel(provider: CalendarProvider, state: ChannelStat
     // It pokes until it expires, and each poke is refused.
   }
 }
+
+/**
+ * What one connection's single writer (its Durable Object) does with Google's pokes (rc53):
+ * every poke gets a read that starts after it arrived, since the change it tells of may have
+ * landed after a read already running began. Pokes that arrive while a tick runs are one read,
+ * done when it ends — so however many come, a connection is read at most once more per tick.
+ * Only pokes that proved their channel's secret reach here (routes/hooks.ts). In memory only:
+ * it writes nothing.
+ */
+export class PokeGate {
+  private running = false;
+  private queued = false;
+
+  /** A request has arrived: run it now, or not (queued for after the tick running, or busy). */
+  arrive(poke: boolean): "run" | "queued" | "busy" {
+    if (this.running) {
+      if (!poke) return "busy";
+      this.queued = true;
+      return "queued";
+    }
+    this.running = true;
+    return "run";
+  }
+
+  /** The tick ended: whether to read once more, for pokes that came while it ran. */
+  ended(): boolean {
+    if (!this.queued) {
+      this.running = false;
+      return false;
+    }
+    this.queued = false;
+    return true;
+  }
+
+  /** The writer stopped, whatever happened: nothing is left running. */
+  release(): void {
+    this.running = false;
+    this.queued = false;
+  }
+}

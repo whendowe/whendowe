@@ -46,6 +46,7 @@ export interface Env {
   // rc43: capabilities, and the operators who grant them (§10 Capabilities).
   CAPABILITIES_DEFAULT?: string;
   OPERATOR_EMAILS?: string;
+  GOOGLE_PUSH_CHANNELS?: string;
   MAIL_PROVIDER?: string;
   MAIL_FROM_ADDRESS?: string;
   MAIL_FROM_NAME?: string;
@@ -125,6 +126,7 @@ async function build(env: Env): Promise<Built> {
     MAIL_NEW_SENDER_DAYS: env.MAIL_NEW_SENDER_DAYS,
     CAPABILITIES_DEFAULT: env.CAPABILITIES_DEFAULT,
     OPERATOR_EMAILS: env.OPERATOR_EMAILS,
+    GOOGLE_PUSH_CHANNELS: env.GOOGLE_PUSH_CHANNELS,
   });
   const storage = d1StoragePort(env.DB);
   const oauth = anyGoogleOAuthConfigured(config)
@@ -145,7 +147,19 @@ async function build(env: Env): Promise<Built> {
     // Capabilities (rc43): who may use what, and the operators who decide.
     capabilities: capabilityConfigOf(config),
   };
-  const app = createApp({ auth, oauth });
+  // rc53: a push notification asks the connection's Durable Object to read, which coalesces
+  // pokes (connection-do.ts); the request is answered without waiting for the read.
+  const poke = async (connectionId: string) => {
+    await env.CONNECTION_DO.get(env.CONNECTION_DO.idFromName(connectionId)).fetch(TICK_URL, {
+      method: "POST",
+      body: JSON.stringify({ connectionId, pull: true, poke: true }),
+    });
+  };
+  const app = createApp({
+    auth,
+    oauth,
+    ...(config.GOOGLE_PUSH_CHANNELS === "on" ? { poke } : {}),
+  });
   return {
     app,
     storage,

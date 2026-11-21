@@ -28,3 +28,12 @@ it("without a Google client configured, a tick pushes nothing", async () => {
   expect(res.status).toBe(503);
   expect(await res.json()).toEqual({ outcome: "unconfigured" });
 });
+
+it("rc53: a poke is a tick that reads, and is refused nothing a tick isn't", async () => {
+  const res = await stub("c-poke").fetch(TICK_URL, {
+    method: "POST",
+    body: JSON.stringify({ connectionId: "c-poke", pull: true, poke: true }),
+  });
+  expect(res.status).toBe(503); // unconfigured here, as any tick
+  expect(await res.json()).toEqual({ outcome: "unconfigured" });
+});
