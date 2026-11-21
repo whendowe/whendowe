@@ -32,6 +32,15 @@ export interface ProviderEvent {
   readonly isDeleted: boolean;
   /** Non-null when this is an INSTANCE of a recurring series (§11: skipped in MVP). */
   readonly recurringEventId: string | null;
+  /**
+   * For an instance: the date it would have had in its series (Google's originalStartTime),
+   * which is how its put-back is found (rc53 T4). Absent for anything else.
+   */
+  readonly originalStart?: {
+    readonly local: string;
+    readonly tzid: string | null;
+    readonly allDay: boolean;
+  } | null;
 }
 
 export interface ChangeBatch {

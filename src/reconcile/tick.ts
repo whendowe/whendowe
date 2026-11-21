@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+import { Temporal } from "temporal-polyfill";
 import { z } from "zod";
 import { diff } from "../changelog.js";
 import type { TokenCipher } from "../crypto/tokens.js";
@@ -17,7 +18,12 @@ import { noticeStatement } from "../held.js";
 import type { MailPort } from "../mail/port.js";
 import { HttpError } from "../oauth/http.js";
 import { type CapabilityConfig, hasCapability } from "../people/capability.js";
-import type { CalendarProvider, ChangeBatch, ProviderEvent } from "../providers/base.js";
+import type {
+  CalendarProvider,
+  ChangeBatch,
+  EventFields,
+  ProviderEvent,
+} from "../providers/base.js";
 import { ProviderEventGoneError, SyncTokenExpiredError } from "../providers/base.js";
 import { type Action, actionReason, assertNever, type LogReason } from "./actions.js";
 import { fromCopy, type InboundFields, mergeInbound } from "./conflict.js";
@@ -473,6 +479,8 @@ async function pull(
     copies.set(p.canonicalEventId, p);
   }
   const decisions: { eventId: string; reason: LogReason }[] = [];
+  // What each copy should hold, worked out only if a date of one of our series was changed.
+  let seriesFields: Promise<Map<string, EventFields>> | null = null;
   for (const change of batch.changes) {
     const uid = change.metadata.canonicalUid ?? null;
     const copy = uid === null ? null : (copies.get(uid) ?? null);
@@ -480,11 +488,17 @@ async function pull(
     switch (action.kind) {
       case "noop":
         break;
-      case "skip_instance":
-        // Only one of ours is worth a line: the person's own series are their business.
-        if (copy !== null)
-          decisions.push({ eventId: copy.canonicalEventId, reason: "skipped_instance_edit" });
+      case "skip_instance": {
+        // Only one of ours is worth anything: the person's own series are their business.
+        if (copy === null) break;
+        const reason = await putBackDate(ports, provider, {
+          copy,
+          incoming: change,
+          series: () => (seriesFields ??= copiesWanted(ports, conn.owner_id, now)),
+        });
+        if (reason !== null) decisions.push({ eventId: copy.canonicalEventId, reason });
         break;
+      }
       case "suppress_echo":
         if (copy !== null)
           decisions.push({ eventId: copy.canonicalEventId, reason: "echo_suppressed" });
@@ -536,6 +550,95 @@ async function pull(
     ]);
   }
   return decisions;
+}
+
+/** What each of a person's copies should hold now, by event id: their feed, projected (rc40). */
+async function copiesWanted(
+  ports: TickPorts,
+  personId: string,
+  now: string,
+): Promise<Map<string, EventFields>> {
+  const wanted = new Map<string, EventFields>();
+  for (const entry of await feedEntries(
+    ports.storage,
+    { personId, groupId: null, ownCalendar: true },
+    { now, eventUrl: ports.eventUrl },
+  )) {
+    if (entry.status === "scheduled") wanted.set(entry.id, projectEntry(entry));
+  }
+  return wanted;
+}
+
+/** The fields compared to tell a date we put back from one a person changed. */
+const DATE_FIELDS = [
+  "title",
+  "description",
+  "location",
+  "startLocal",
+  "endLocal",
+  "tzid",
+  "allDay",
+] as const;
+
+/**
+ * One date of a series of ours, changed in Google (rc53 T4): not kept, since WhenDoWe edits
+ * whole series only (rc13), so it is put back to what the series gives that date — its fields,
+ * at the date it would have had, for as long as the series' events last. The copy's line says
+ * so (rc55). A date that already is what the series gives — our own put-back read back — is
+ * left alone, so this never loops. A date deleted in Google is left deleted: restoring a
+ * cancelled date is a different operation, and the person chose not to go that day. Nothing is
+ * recorded here: dates have no projection of their own.
+ */
+async function putBackDate(
+  ports: TickPorts,
+  provider: CalendarProvider,
+  at: {
+    readonly copy: ProjectionRow;
+    readonly incoming: ProviderEvent;
+    readonly series: () => Promise<Map<string, EventFields>>;
+  },
+): Promise<LogReason | null> {
+  const { copy, incoming } = at;
+  const date = incoming.originalStart ?? null;
+  if (incoming.isDeleted || date === null || incoming.recurringEventId !== copy.providerEventId)
+    return "skipped_instance_edit";
+  const series = (await at.series()).get(copy.canonicalEventId);
+  if (series === undefined || series.rrule === null) return "skipped_instance_edit";
+  const want: EventFields = { ...series, rrule: null, ...occurrenceAt(series, date.local) };
+  if (DATE_FIELDS.every((f) => want[f] === incoming.fields[f])) return null;
+  try {
+    await provider.upsert(incoming.id, want, {
+      canonicalUid: copy.canonicalEventId,
+      writeNonce: ports.newNonce(),
+    });
+  } catch (error) {
+    // The grant gone, or no token, is the tick's; one date that can't be written isn't a reason
+    // to stop reading the rest, and is tried again when it is next changed or listed.
+    if (lostGrant(error) || error instanceof NoToken) throw error;
+    return error instanceof ProviderEventGoneError ? "skipped_instance_edit" : "error";
+  }
+  return "inbound_put_back";
+}
+
+/** A series' start and end moved to one of its dates, the length kept (wall clock, §10). */
+function occurrenceAt(
+  series: Pick<EventFields, "startLocal" | "endLocal" | "allDay">,
+  startLocal: string,
+): Pick<EventFields, "startLocal" | "endLocal"> {
+  if (series.allDay) {
+    const days = Temporal.PlainDate.from(series.startLocal).until(series.endLocal).days;
+    return {
+      startLocal,
+      endLocal: Temporal.PlainDate.from(startLocal).add({ days }).toString(),
+    };
+  }
+  const length = Temporal.PlainDateTime.from(series.startLocal).until(series.endLocal);
+  return {
+    startLocal,
+    endLocal: Temporal.PlainDateTime.from(startLocal)
+      .add(length)
+      .toString({ smallestUnit: "second" }),
+  };
 }
 
 /** A copy deleted in Google: for its person, never put back (rc45). */
