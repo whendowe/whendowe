@@ -77,7 +77,10 @@ describe("fetchFeed", () => {
     expect(calls).toHaveLength(1);
     expect(calls[0]?.url).toBe(URL1);
     // A plain GET: no cookies, no credentials, nothing conditional when there's nothing prior.
-    expect(Object.keys(calls[0]?.headers ?? {}).sort()).toEqual(["accept", "user-agent"]);
+    expect(calls[0]?.headers).toEqual({
+      accept: "text/calendar, text/plain;q=0.5, */*;q=0.1",
+      "user-agent": "WhenDoWe calendar follower (+https://github.com/whendowe/whendowe)",
+    });
   });
 
   it("asks conditionally with what the last fetch gave, and a 304 is unchanged", async () => {
@@ -151,6 +154,59 @@ describe("fetchFeed", () => {
   });
 });
 
+describe("fetchFeed — answers with no body, and odd ones", () => {
+  const bare = (status: number, headers: Record<string, string> = {}): PublicResponse => ({
+    status,
+    header: (name) => headers[name.toLowerCase()] ?? null,
+    body: null,
+  });
+
+  it("reads no body as an empty one, and skips a read that brings nothing", async () => {
+    expect(await fetchFeed(fake(bare(200)).get, URL1, NONE)).toMatchObject({
+      kind: "fetched",
+      text: "",
+    });
+    let n = 0;
+    const gappy: PublicResponse = {
+      status: 200,
+      header: () => null,
+      body: {
+        getReader: () => ({
+          read: async () => {
+            n++;
+            if (n === 1) return { done: false };
+            if (n === 2) return { done: false, value: enc.encode("ok") };
+            return { done: true };
+          },
+          cancel: async () => {},
+        }),
+      },
+    };
+    expect(await fetchFeed(fake(gappy).get, URL1, NONE)).toMatchObject({
+      kind: "fetched",
+      text: "ok",
+    });
+  });
+
+  it("a redirect, a 304 or a refusal with no body is still read as one", async () => {
+    const moved = fake(bare(302, { location: "/b" }), bare(200));
+    expect(await fetchFeed(moved.get, URL1, NONE)).toMatchObject({ kind: "fetched" });
+    expect(await fetchFeed(fake(bare(304)).get, URL1, NONE)).toEqual({ kind: "unchanged" });
+    expect(await fetchFeed(fake(bare(404)).get, URL1, NONE)).toEqual({ kind: "gone" });
+  });
+
+  it("follows a 300 with a location, and refuses a location that isn't a URL", async () => {
+    const multiple = fake(response(300, { location: "/chosen.ics" }), response(200));
+    expect(await fetchFeed(multiple.get, URL1, NONE)).toMatchObject({ kind: "fetched" });
+    expect(multiple.calls[1]?.url).toBe("https://club.example/chosen.ics");
+    expect(await fetchFeed(fake(response(302, { location: "https://[" })).get, URL1, NONE)).toEqual(
+      {
+        kind: "refused",
+      },
+    );
+  });
+});
+
 describe("isPublicAddress", () => {
   it.each([
     "0.0.0.0",
@@ -190,6 +246,13 @@ describe("isPublicAddress", () => {
     "1::2::3",
     "1:2:3:4:5:6:7:8:9",
     "12345::1",
+    "a8.8.8.8",
+    "8.8.8.8a",
+    "[2606:4700::1111",
+    "2606:4700::1111]",
+    "zz",
+    "::ffff:1.2.3.999",
+    "1:2:3:4::5:6:7:8",
   ])("%s is not public", (address) => {
     expect(isPublicAddress(address)).toBe(false);
   });
@@ -210,6 +273,19 @@ describe("isPublicAddress", () => {
     "64:ff9b::8.8.8.8",
     "2002:0808:0808::1",
     "1:2:3:4:5:6:7:8",
+    "1:2:3:4:5:6::7",
+    "2606:4700::1111%eth0",
+    "::ffff:18.8.8.8",
+    "::ffff:8.8.8.18",
+    "2606:4700::ffff:a00:1",
+    "64:ff9c::a00:1",
+    "65:ff9b::a00:1",
+    "64:ff9b:0:0:0:1:a00:1",
+    "2001:4860:4860::8888",
+    "2606:db8::1",
+    "100:0:0:1::1",
+    "2606::1",
+    "2002:c000:0101::1",
   ])("%s is public", (address) => {
     expect(isPublicAddress(address)).toBe(true);
   });
@@ -221,5 +297,6 @@ describe("literalAddress", () => {
     expect(literalAddress("[::1]")).toBe("::1");
     expect(literalAddress("club.example")).toBeNull();
     expect(literalAddress("::1")).toBeNull(); // a URL host writes IPv6 in brackets
+    expect(literalAddress("[zz]")).toBeNull();
   });
 });

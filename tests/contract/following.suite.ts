@@ -12,6 +12,7 @@ import {
   refreshCalendar,
   stopFollowing,
 } from "../../src/following/follow.js";
+import { readFeed } from "../../src/following/read.js";
 import { createGroup, findGroupForMember } from "../../src/people/group.js";
 import { acceptInvite, createInvite } from "../../src/people/invite.js";
 import { findOrCreatePerson } from "../../src/people/person.js";
@@ -83,17 +84,20 @@ function server(first: PublicResponse) {
 /** Writes, counted: every batch that isn't empty. A steady state makes none (§6). */
 function counting(port: StoragePort) {
   let writes = 0;
+  let empty = 0;
   const counted: StoragePort = {
     query: (s) => {
       if (!/^\s*SELECT/i.test(s.sql)) writes++;
       return port.query(s);
     },
     batch: async (stmts) => {
-      if (stmts.length > 0) writes++;
+      // D1 refuses an empty batch: a refresh must never send one.
+      if (stmts.length === 0) empty++;
+      else writes++;
       await port.batch(stmts);
     },
   };
-  return { port: counted, writes: () => writes };
+  return { port: counted, writes: () => writes, empty: () => empty };
 }
 
 async function people(port: StoragePort, tag: string) {
@@ -145,6 +149,23 @@ export function runFollowingContract(makePort: () => Promise<StoragePort>): void
       expect(new Set([a.calendarId, b.calendarId, g.calendarId]).size).toBe(1);
       expect(new Set([a.followId, b.followId, g.followId]).size).toBe(3);
       expect(a.fetchNow).toBe(true); // never fetched: following fetches it at once
+      await refreshCalendar(port, server(answer(200, CAL())).get, a.calendarId, T0);
+      const late = await follow(port, { kind: "person", personId: bob }, url, T1);
+      expect(late.ok && late.fetchNow).toBe(false); // already fetched for the others
+    });
+
+    it("someone outside a group can't follow for it", async () => {
+      const port = await makePort();
+      const { group } = await people(port, "outsider");
+      const eve = await findOrCreatePerson(port, "follow-eve-outsider@example.org", { now: T0 });
+      expect(
+        await follow(
+          port,
+          { kind: "group", groupId: group, actorId: eve.id },
+          "https://club.example/o.ics",
+          T0,
+        ),
+      ).toEqual({ ok: false, reason: "not-organizer" });
     });
 
     it("only a group's organizer follows for it, and stops it", async () => {
@@ -165,6 +186,15 @@ export function runFollowingContract(makePort: () => Promise<StoragePort>): void
       expect(
         await stopFollowing(port, { kind: "group", groupId: group, actorId: ann }, g.followId),
       ).toBe(true);
+      // Nor anyone's follow but their own.
+      const bobs = await follow(port, { kind: "person", personId: bob }, url, T0);
+      if (!bobs.ok) throw new Error("followed");
+      expect(await stopFollowing(port, { kind: "person", personId: ann }, bobs.followId)).toBe(
+        false,
+      );
+      expect(
+        await stopFollowing(port, { kind: "group", groupId: group, actorId: ann }, bobs.followId),
+      ).toBe(false);
     });
 
     it("a follower's calendars get colours of their own, the first free one each time", async () => {
@@ -182,7 +212,49 @@ export function runFollowingContract(makePort: () => Promise<StoragePort>): void
         colours.push(String(row?.colour));
       }
       expect(colours.slice(0, FOLLOW_COLOURS.length)).toEqual([...FOLLOW_COLOURS]);
-      expect(FOLLOW_COLOURS).toContain(colours.at(-1));
+      expect(colours.at(-1)).toBe("f1"); // all in use: round again
+    });
+
+    it("your colours and a group's are counted apart", async () => {
+      const port = await makePort();
+      const { ann, bob, group } = await people(port, "apart");
+      for (const i of [1, 2]) {
+        const theirs = { kind: "person", personId: bob } as const;
+        await follow(port, theirs, `https://club.example/apart-b${i}.ics`, T0);
+        const g = { kind: "group", groupId: group, actorId: ann } as const;
+        await follow(port, g, `https://club.example/apart-g${i}.ics`, T0);
+      }
+      const me = { kind: "person", personId: ann } as const;
+      const mine = await follow(port, me, "https://club.example/apart-me.ics", T0);
+      if (!mine.ok) throw new Error("followed");
+      const [row] = await port.query({
+        sql: "SELECT colour FROM calendar_follow WHERE id = ?",
+        params: [mine.followId],
+      });
+      expect(row?.colour).toBe("f1");
+    });
+
+    it("a colour freed by stopping is the next one given; past them all, they go round", async () => {
+      const port = await makePort();
+      const { ann } = await people(port, "freed");
+      const me = { kind: "person", personId: ann } as const;
+      const colourOf = async (i: number) => {
+        const f = await follow(port, me, `https://club.example/freed-${i}.ics`, T0);
+        if (!f.ok) throw new Error("followed");
+        const [row] = await port.query({
+          sql: "SELECT colour FROM calendar_follow WHERE id = ?",
+          params: [f.followId],
+        });
+        return { id: f.followId, colour: String(row?.colour) };
+      };
+      await colourOf(0);
+      const second = await colourOf(1);
+      await colourOf(2);
+      await stopFollowing(port, me, second.id);
+      expect((await colourOf(3)).colour).toBe("f2");
+      for (let i = 4; i < FOLLOW_COLOURS.length + 2; i++) await colourOf(i); // 4..7: f4-f6, then f1
+      // Seven in use, all six taken: the eighth is the second colour round again.
+      expect((await colourOf(99)).colour).toBe("f2");
     });
 
     it("the calendar goes, with its events, when its last follower stops", async () => {
@@ -223,7 +295,7 @@ export function runFollowingContract(makePort: () => Promise<StoragePort>): void
       await port.batch([
         { sql: "DELETE FROM calendar_follow WHERE id = ?", params: [gone.followId] },
       ]);
-      await port.batch([unfollowedSweep(null)]);
+      await port.batch([unfollowedSweep()]);
       expect(await calendar(port, gone.calendarId)).toBeUndefined();
       expect(await calendar(port, kept.calendarId)).toBeDefined();
     });
@@ -283,6 +355,208 @@ export function runFollowingContract(makePort: () => Promise<StoragePort>): void
       });
       expect(await events(raw, f.calendarId)).toEqual(["class Class 2026-12-02T19:00:00"]);
       expect((await calendar(raw, f.calendarId))?.fetched_at).toBe(T1);
+    });
+
+    it("notices a change to any one field, and an unchanged all-day event as unchanged", async () => {
+      const raw = await makePort();
+      const { ann } = await people(raw, "fields");
+      const f = await follow(
+        raw,
+        { kind: "person", personId: ann },
+        "https://club.example/fields.ics",
+        T0,
+      );
+      if (!f.ok) throw new Error("followed");
+      const base = [
+        "UID:e",
+        "DTSTART;TZID=Europe/Prague:20261201T190000",
+        "DTEND;TZID=Europe/Prague:20261201T210000",
+        "SUMMARY:Social",
+        "LOCATION:Studio",
+        "DESCRIPTION:Bring shoes",
+        "URL:https://club.example/e",
+      ];
+      const day = ["UID:d", "DTSTART;VALUE=DATE:20261205", "SUMMARY:Festival"];
+      const club = server(answer(200, CAL(base, day)));
+      await refreshCalendar(raw, club.get, f.calendarId, T0);
+      const swap = (from: string, to: string) => base.map((l) => (l === from ? to : l));
+      const variants = [
+        swap("SUMMARY:Social", "SUMMARY:Social!"),
+        swap("LOCATION:Studio", "LOCATION:Hall"),
+        swap("DESCRIPTION:Bring shoes", "DESCRIPTION:Bring water"),
+        swap("URL:https://club.example/e", "URL:https://club.example/f"),
+        swap(
+          "DTSTART;TZID=Europe/Prague:20261201T190000",
+          "DTSTART;TZID=Europe/Prague:20261201T183000",
+        ),
+        swap(
+          "DTEND;TZID=Europe/Prague:20261201T210000",
+          "DTEND;TZID=Europe/Prague:20261201T220000",
+        ),
+        base.map((l) => l.replace("Europe/Prague", "Europe/Vienna")),
+        [...base, "STATUS:CANCELLED"],
+        ["UID:e", "DTSTART;VALUE=DATE:20261201", ...base.slice(3)],
+        base,
+      ];
+      const stored = async () =>
+        (
+          await raw.query({
+            sql: `SELECT title, location, description, url, start_local, end_local, tzid, all_day, status
+                  FROM followed_event WHERE calendar_id = ? AND uid = 'e'`,
+            params: [f.calendarId],
+          })
+        )[0];
+      for (const v of variants) {
+        club.answers(answer(200, CAL(v, day)));
+        expect(await refreshCalendar(raw, club.get, f.calendarId, T0), v.join("|")).toEqual({
+          outcome: "fetched",
+          added: 0,
+          changed: 1,
+          removed: 0,
+        });
+        // What is kept is what the feed now says, every field of it.
+        const r = readFeed(CAL(v, day), T0);
+        const want = r.ok ? r.events.find((e) => e.uid === "e") : undefined;
+        expect(await stored(), v.join("|")).toEqual({
+          title: want?.title,
+          location: want?.location,
+          description: want?.description,
+          url: want?.url,
+          start_local: want?.startLocal,
+          end_local: want?.endLocal,
+          tzid: want?.tzid,
+          all_day: want?.allDay ? 1 : 0,
+          status: want?.status,
+        });
+      }
+    });
+
+    it("keeps the calendar's own changes — its name, validators, events left out — and a first empty fetch", async () => {
+      const raw = await makePort();
+      const { port, writes, empty } = counting(raw);
+      const { ann } = await people(raw, "own");
+      const f = await follow(
+        raw,
+        { kind: "person", personId: ann },
+        "https://club.example/own.ics",
+        T0,
+      );
+      if (!f.ok) throw new Error("followed");
+      const club = server(answer(200, CAL()));
+      await refreshCalendar(port, club.get, f.calendarId, T0);
+      expect(await calendar(raw, f.calendarId)).toMatchObject({
+        name: "Swing school",
+        fetched_at: T0,
+      });
+
+      const renamed = CAL().replace("Swing school", "Swing school Brno");
+      club.answers(answer(200, renamed));
+      await refreshCalendar(port, club.get, f.calendarId, T1);
+      expect(await calendar(raw, f.calendarId)).toMatchObject({
+        name: "Swing school Brno",
+        fetched_at: T1,
+      });
+
+      club.answers(answer(200, renamed, { etag: '"v2"' }));
+      await refreshCalendar(port, club.get, f.calendarId, T1);
+      expect((await calendar(raw, f.calendarId))?.etag).toBe('"v2"');
+
+      club.answers(answer(200, renamed, { etag: '"v2"', "last-modified": "Sun" }));
+      await refreshCalendar(port, club.get, f.calendarId, T1);
+      const [lm] = await raw.query({
+        sql: "SELECT last_modified FROM followed_calendar WHERE id = ?",
+        params: [f.calendarId],
+      });
+      expect(lm?.last_modified).toBe("Sun");
+
+      // One event it can't read (no start): counted as left out.
+      club.answers(
+        answer(200, CAL(SOCIAL, ["UID:bad"]).replace("Swing school", "Swing school Brno"), {
+          etag: '"v2"',
+          "last-modified": "Sun",
+        }),
+      );
+      await refreshCalendar(port, club.get, f.calendarId, T1);
+      expect(await calendar(raw, f.calendarId)).toMatchObject({ left_out: 1 });
+
+      const before = writes();
+      await refreshCalendar(port, club.get, f.calendarId, T1);
+      expect(writes()).toBe(before);
+      expect(empty()).toBe(0);
+    });
+
+    it("never sends an empty batch: a refused or unreadable calendar marked once stays quiet", async () => {
+      const raw = await makePort();
+      const { port, empty } = counting(raw);
+      const { ann } = await people(raw, "empty");
+      const f = await follow(
+        raw,
+        { kind: "person", personId: ann },
+        "https://club.example/empty.ics",
+        T0,
+      );
+      if (!f.ok) throw new Error("followed");
+      const club = server(answer(404));
+      await refreshCalendar(port, club.get, f.calendarId, T0);
+      await refreshCalendar(port, club.get, f.calendarId, T0);
+      club.answers(answer(200, "not a calendar"));
+      await refreshCalendar(port, club.get, f.calendarId, T0);
+      club.answers(answer(302, "", { location: "http://x.example/" }));
+      await refreshCalendar(port, club.get, f.calendarId, T0);
+      await refreshCalendar(port, club.get, f.calendarId, T0);
+      expect(empty()).toBe(0);
+      club.answers(answer(304));
+      expect(await refreshCalendar(port, club.get, f.calendarId, T0)).toEqual({
+        outcome: "unchanged",
+        added: 0,
+        changed: 0,
+        removed: 0,
+      });
+      club.answers(answer(500));
+      expect(await refreshCalendar(port, club.get, f.calendarId, T0)).toEqual({
+        outcome: "failed",
+        added: 0,
+        changed: 0,
+        removed: 0,
+      });
+    });
+
+    it("a fetch touches only its own calendar: the other's events and row stay as they were", async () => {
+      const port = await makePort();
+      const { ann } = await people(port, "two");
+      const me = { kind: "person", personId: ann } as const;
+      const a = await follow(port, me, "https://club.example/two-a.ics", T0);
+      const b = await follow(port, me, "https://club.example/two-b.ics", T0);
+      if (!a.ok || !b.ok) throw new Error("followed");
+      await refreshCalendar(port, server(answer(200, CAL(SOCIAL))).get, b.calendarId, T0);
+      const of = async (id: string) => ({
+        row: await calendar(port, id),
+        events: await events(port, id),
+      });
+      const bBefore = await of(b.calendarId);
+      const other = CAL(CLASS).replace("Swing school", "Other");
+      const club = server(answer(200, other, { etag: '"a"' }));
+      expect(await refreshCalendar(port, club.get, a.calendarId, T1)).toEqual({
+        outcome: "fetched",
+        added: 1,
+        changed: 0,
+        removed: 0,
+      });
+      club.answers(answer(404));
+      await refreshCalendar(port, club.get, a.calendarId, T1);
+      expect(await of(b.calendarId)).toEqual(bBefore);
+      expect(await events(port, a.calendarId)).toEqual(["class Class 2026-12-01T19:00:00"]);
+    });
+
+    it("a calendar whose follows went by cascade isn't due, before any sweep", async () => {
+      const port = await makePort();
+      const { ann } = await people(port, "orphan");
+      const me = { kind: "person", personId: ann } as const;
+      const f = await follow(port, me, "https://club.example/orphan.ics", T0);
+      if (!f.ok) throw new Error("followed");
+      await port.batch([{ sql: "DELETE FROM calendar_follow WHERE id = ?", params: [f.followId] }]);
+      const at = new Date(pullTurn(f.calendarId) * 60_000).toISOString();
+      expect(await calendarsDue(port, at)).not.toContain(f.calendarId);
     });
 
     it("asks with the validators it was given, and a 304 writes nothing", async () => {
@@ -408,6 +682,13 @@ export function runFollowingContract(makePort: () => Promise<StoragePort>): void
         ),
       ).toBeNull();
       expect(followLog("c", { outcome: "unchanged", added: 0, changed: 0, removed: 0 })).toBeNull();
+      for (const counts of [
+        { added: 0, changed: 1, removed: 1 },
+        { added: 1, changed: 1, removed: 0 },
+      ]) {
+        expect(followLog("c", { outcome: "fetched", ...counts })).not.toBeNull();
+      }
+      expect(first.every((d) => typeof d.calendarId === "string")).toBe(true);
       expect(followLog("c", { outcome: "failed", added: 0, changed: 0, removed: 0 })).toMatchObject(
         { outcome: "failed" },
       );
