@@ -235,6 +235,24 @@ describe("readFeed — series as RFC 5545 has them", () => {
     ]);
   });
 
+  it("a date at a time the clocks skip keeps its wall clock, at the offset before the change", () => {
+    // 02:00 on 28 March 2027 doesn't exist in Prague; RFC 5545 §3.3.5 reads it at +01:00.
+    const r = readFeed(
+      feed([
+        "UID:gap",
+        "DTSTART;TZID=Europe/Prague:20270321T020000",
+        "DTEND;TZID=Europe/Prague:20270321T030000",
+        "RRULE:FREQ=WEEKLY;COUNT=2",
+      ]),
+      "2027-03-20T00:00:00Z",
+    );
+    if (!r.ok) throw new Error("unreadable");
+    expect(r.events.map((e) => [e.startLocal, e.tzid])).toEqual([
+      ["2027-03-21T02:00:00", "Europe/Prague"],
+      ["2027-03-28T02:00:00", "Europe/Prague"],
+    ]);
+  });
+
   it("an override with no series in the feed stands alone", () => {
     const lone = [
       "UID:lone",

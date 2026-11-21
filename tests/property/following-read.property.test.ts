@@ -127,12 +127,26 @@ function oracle(text: string): string[] {
   const before = from.add({ hours: 24 * KEEP_DAYS });
   // ical.js reads a date as midnight floating; readFeed keeps it floating too, and the window
   // places floating times in the feed's zone. Everything else is an instant already.
-  const instant = (t: ICAL.Time) =>
-    t.isDate || t.zone === ICAL.Timezone.localTimezone
-      ? Temporal.PlainDateTime.from(t.toString().replace("Z", ""))
-          .toZonedDateTime(FEED_ZONE)
-          .toInstant()
-      : Temporal.Instant.fromEpochMilliseconds(t.toUnixTime() * 1000);
+  const instant = (t: ICAL.Time) => {
+    if (t.isDate || t.zone === ICAL.Timezone.localTimezone) {
+      return Temporal.PlainDateTime.from(t.toString().replace("Z", ""))
+        .toZonedDateTime(FEED_ZONE)
+        .toInstant();
+    }
+    // A wall-clock time the clocks skip (02:30 the night summer time starts) is read, by
+    // RFC 5545 §3.3.5, with the offset from before the change; ical.js reads it with the one
+    // after, an hour early (found at soak budget). Only there is the RFC's reading used.
+    const tzid = t.zone?.tzid;
+    if (tzid !== undefined && tzid !== "UTC" && tzid !== "Z") {
+      const local = Temporal.PlainDateTime.from(t.toString());
+      try {
+        local.toZonedDateTime(tzid, { disambiguation: "reject" });
+      } catch {
+        return local.toZonedDateTime(tzid, { disambiguation: "compatible" }).toInstant();
+      }
+    }
+    return Temporal.Instant.fromEpochMilliseconds(t.toUnixTime() * 1000);
+  };
   const key = (s: ICAL.Time, title: string, status: string) =>
     `${s.isDate ? s.toString() : instant(s).toString()} | ${title} | ${status}`;
   const on = (s: ICAL.Time, e: ICAL.Time) => {
@@ -147,12 +161,13 @@ function oracle(text: string): string[] {
   const vevents = calendar.getAllSubcomponents("vevent");
   for (const v of vevents) {
     if (v.hasProperty("recurrence-id")) continue;
-    const ev = new ICAL.Event(v);
-    for (const x of vevents) {
-      if (x !== v && x.hasProperty("recurrence-id") && x.getFirstPropertyValue("uid") === ev.uid) {
-        ev.relateException(x);
-      }
-    }
+    // Its own overrides only: left to itself, ical.js's Event takes every RECURRENCE-ID in
+    // the calendar, whatever its UID (found at soak budget).
+    const uid = v.getFirstPropertyValue("uid");
+    const exceptions = vevents.filter(
+      (x) => x.hasProperty("recurrence-id") && x.getFirstPropertyValue("uid") === uid,
+    );
+    const ev = new ICAL.Event(v, { exceptions, strictExceptions: true });
     const status = (c: ICAL.Component) =>
       String(c.getFirstPropertyValue("status") ?? "").toUpperCase() === "CANCELLED"
         ? "cancelled"
