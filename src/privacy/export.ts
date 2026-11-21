@@ -248,6 +248,16 @@ export async function exportPerson(storage: StoragePort, personId: string, now: 
       for: k.label,
       shows: k.tier === "BUSY" ? "busy only" : "details",
     })),
+    // The calendars you follow yourself (rc56): their links and what you call them. What they
+    // hold is a cache of someone else's calendar, never in an export as yours.
+    calendars_you_follow: await all(
+      storage,
+      { link: z.string(), name: nullable, colour: z.string(), since: z.string() },
+      `SELECT c.url AS link, coalesce(f.name, c.name) AS name, f.colour, f.created_at AS since
+       FROM calendar_follow f JOIN followed_calendar c ON c.id = f.calendar_id
+       WHERE f.person_id = ? ORDER BY f.created_at, f.id`,
+      [personId],
+    ),
     // How many emails you caused to other addresses this month (rc37): all the mail cap
     // keeps about you, and only until the month is over.
     emails_you_caused_this_month: await sentThisMonth(storage, personId, now),
