@@ -7,13 +7,17 @@ import {
   FETCH_EVERY_MINUTES,
   FOLLOW_COLOURS,
   follow,
+  followingPass,
+  followLog,
   refreshCalendar,
   stopFollowing,
-  unfollowedSweep,
 } from "../../src/following/follow.js";
 import { createGroup, findGroupForMember } from "../../src/people/group.js";
 import { acceptInvite, createInvite } from "../../src/people/invite.js";
 import { findOrCreatePerson } from "../../src/people/person.js";
+import { eraseAccount } from "../../src/privacy/erasure.js";
+import { exportPerson } from "../../src/privacy/export.js";
+import { retentionPass, unfollowedSweep } from "../../src/privacy/purge.js";
 import { pullTurn } from "../../src/reconcile/tick.js";
 
 // Following calendars (DESIGN §10 rc56/rc57) on BOTH drivers: following for yourself and for a
@@ -363,6 +367,96 @@ export function runFollowingContract(makePort: () => Promise<StoragePort>): void
       expect(await calendarsDue(port, at(turn + 1))).not.toContain(f.calendarId);
       await stopFollowing(port, { kind: "person", personId: ann }, f.followId);
       expect(await calendarsDue(port, at(turn))).not.toContain(f.calendarId);
+    });
+
+    it("a minute's pass fetches the calendars due then, and logs only a change, never the link", async () => {
+      const port = await makePort();
+      const { ann } = await people(port, "pass");
+      const url = "https://club.example/pass.ics?key=secret";
+      const f = await follow(port, { kind: "person", personId: ann }, url, T0);
+      if (!f.ok) throw new Error("followed");
+      const club = server(answer(200, CAL(SOCIAL)));
+      // The calendar's own minute, in the six hours from midnight on T0's day.
+      const base = Date.parse("2026-11-21T00:00:00Z") / 60_000;
+      const offset =
+        (pullTurn(f.calendarId) - (base % FETCH_EVERY_MINUTES) + FETCH_EVERY_MINUTES) %
+        FETCH_EVERY_MINUTES;
+      const at = new Date((base + offset) * 60_000).toISOString();
+      const first = await followingPass(port, club.get, at);
+      const mine = first.find((d) => d.calendarId === f.calendarId);
+      expect(mine?.refreshed).toMatchObject({ outcome: "fetched", added: 1 });
+      const line = followLog(
+        f.calendarId,
+        mine?.refreshed ?? { outcome: "missing", added: 0, changed: 0, removed: 0 },
+      );
+      expect(line).toEqual({
+        reason: "followed_fetch",
+        calendar: f.calendarId,
+        outcome: "fetched",
+        added: 1,
+        changed: 0,
+        removed: 0,
+      });
+      expect(JSON.stringify(line)).not.toContain("secret");
+      const again = (await followingPass(port, club.get, at)).find(
+        (d) => d.calendarId === f.calendarId,
+      );
+      expect(
+        followLog(
+          f.calendarId,
+          again?.refreshed ?? { outcome: "missing", added: 0, changed: 0, removed: 0 },
+        ),
+      ).toBeNull();
+      expect(followLog("c", { outcome: "unchanged", added: 0, changed: 0, removed: 0 })).toBeNull();
+      expect(followLog("c", { outcome: "failed", added: 0, changed: 0, removed: 0 })).toMatchObject(
+        { outcome: "failed" },
+      );
+    });
+
+    it("the retention pass sweeps a calendar nobody follows any more", async () => {
+      const port = await makePort();
+      const { ann } = await people(port, "retain");
+      const f = await follow(
+        port,
+        { kind: "person", personId: ann },
+        "https://club.example/retain.ics",
+        T0,
+      );
+      if (!f.ok) throw new Error("followed");
+      await retentionPass(port, T1);
+      expect(await calendar(port, f.calendarId)).toBeDefined();
+      await port.batch([{ sql: "DELETE FROM calendar_follow WHERE id = ?", params: [f.followId] }]);
+      await retentionPass(port, T1);
+      expect(await calendar(port, f.calendarId)).toBeUndefined();
+    });
+
+    it("your export holds the calendars you follow, not what they hold; erasing you stops them", async () => {
+      const port = await makePort();
+      const { ann, group } = await people(port, "export");
+      const url = "https://club.example/export.ics";
+      const mine = await follow(port, { kind: "person", personId: ann }, url, T0);
+      await follow(
+        port,
+        { kind: "group", groupId: group, actorId: ann },
+        "https://club.example/g.ics",
+        T0,
+      );
+      if (!mine.ok) throw new Error("followed");
+      await refreshCalendar(port, server(answer(200, CAL(SOCIAL))).get, mine.calendarId, T0);
+      const doc = await exportPerson(port, ann, T1);
+      expect(doc.calendars_you_follow).toEqual([
+        { link: url, name: "Swing school", colour: "f1", since: T0 },
+      ]);
+      expect(JSON.stringify(doc)).not.toContain("Social");
+      await eraseAccount(port, ann, { now: T1 });
+      const left = await port.query({
+        sql: "SELECT count(*) AS n FROM calendar_follow WHERE person_id = ?",
+        params: [ann],
+      });
+      expect(left[0]?.n).toBe(0);
+      // Nobody follows it now: the retention pass takes it, with what it held.
+      await retentionPass(port, T1);
+      expect(await calendar(port, mine.calendarId)).toBeUndefined();
     });
 
     it("a refresh of a calendar that's gone is a no-op", async () => {
