@@ -102,6 +102,7 @@ const tickPorts =
     : pushTickPorts(oauth, {
         publicBaseUrl: config.PUBLIC_BASE_URL,
         capabilities: capabilityConfigOf(config),
+        pushChannels: config.GOOGLE_PUSH_CHANNELS === "on",
       });
 /** Every connection due this minute, in turn; one failing doesn't stop the rest. */
 async function pushTicks(at: string): Promise<void> {

@@ -63,6 +63,12 @@ export class ProviderEventGoneError extends Error {
   }
 }
 
+/** A push channel the provider made (rc53): what stopping it needs, and when it expires. */
+export interface Channel {
+  readonly resourceId: string;
+  readonly expiresAt: string;
+}
+
 export interface CalendarProvider {
   /** Incremental changes since syncToken; null cursor means full sync. */
   listChanges(syncToken: string | null): Promise<ChangeBatch>;
@@ -79,4 +85,16 @@ export interface CalendarProvider {
   delete(providerEventId: string): Promise<void>;
   /** Lookup by explicit identity metadata — the duplicate-create recovery path (§11). */
   findByMetadata(canonicalUid: string): Promise<ProviderEvent | null>;
+  /**
+   * Ask to be told when the calendar changes (rc53 push): notifications go to `address`,
+   * naming channel `id` and carrying `token`, until the channel expires.
+   */
+  watch(input: {
+    readonly id: string;
+    readonly token: string;
+    readonly address: string;
+    readonly ttlSeconds: number;
+  }): Promise<Channel>;
+  /** Stop a channel. Already gone (404) counts as success. */
+  stopWatch(input: { readonly id: string; readonly resourceId: string }): Promise<void>;
 }

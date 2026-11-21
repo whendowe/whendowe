@@ -87,7 +87,7 @@ it("waits for two editors by name, and past two for the people who can edit it",
   const dan = await findOrCreatePerson(t.storage, "dan@example.org", { now: T0 });
   const editors = [t.cy.id, dan.id];
   for (const [n, phrase] of [
-    [1, "waiting for Petr and Cy."],
+    [1, "waiting for Cy and Petr."],
     [2, "waiting for the people who can edit it."],
   ] as const) {
     const event = await createEvent(t.storage, {

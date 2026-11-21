@@ -7,6 +7,7 @@ import { refreshAccessToken, revokeGoogleGrant } from "../../oauth/token-exchang
 import type { CapabilityConfig } from "../../people/capability.js";
 import { GoogleCalendarProvider } from "../../providers/google.js";
 import type { TickPorts } from "../../reconcile/tick.js";
+import { GOOGLE_HOOK_PATH } from "../../reconcile/watch.js";
 import { EVENTS_PATH } from "../layout.js";
 import type { OAuthRouteDeps } from "./oauth.js";
 
@@ -59,7 +60,12 @@ export async function buildOAuthDeps(
  */
 export function pushTickPorts(
   oauth: OAuthRouteDeps,
-  input: { readonly publicBaseUrl: string; readonly capabilities: CapabilityConfig },
+  input: {
+    readonly publicBaseUrl: string;
+    readonly capabilities: CapabilityConfig;
+    /** rc53: GOOGLE_PUSH_CHANNELS is on. */
+    readonly pushChannels: boolean;
+  },
 ): TickPorts {
   return {
     storage: oauth.storage,
@@ -84,5 +90,6 @@ export function pushTickPorts(
     now: oauth.now,
     newNonce: () => uuidv7(),
     newId: oauth.newId ?? (() => uuidv7()),
+    hookUrl: input.pushChannels ? `${input.publicBaseUrl}${GOOGLE_HOOK_PATH}` : null,
   };
 }

@@ -24,6 +24,7 @@ import { fromCopy, type InboundFields, mergeInbound } from "./conflict.js";
 import { type DesiredCopy, decidePull, decidePush, nextRetryAt } from "./decide.js";
 import { parseRing, pushWrite } from "./echo.js";
 import { fieldsHash, projectEntry } from "./project.js";
+import { channelDue, renewChannel, stopChannel } from "./watch.js";
 
 // One reconcile tick for one connection (DESIGN.md §11). PUSH (rc40): the calendar holds what
 // the person's feed holds, at their tier. PULL (rc53), when the tick is asked to read: changes
@@ -51,6 +52,11 @@ export interface TickPorts {
   readonly now: () => string; // injected clock (ISO-8601 UTC) — simulator-friendly (§9)
   readonly newNonce: () => string; // injected nonce generator
   readonly newId: () => string;
+  /**
+   * Where Google's push notifications go (rc53, routes/hooks.ts), or null where push channels
+   * are off — the instance hasn't turned them on — and the 6-hour backstop is all there is.
+   */
+  readonly hookUrl: string | null;
 }
 
 /** What a tick did, by event id and §14 reason — ids only, never content (§14). */
@@ -64,6 +70,8 @@ export interface TickResult {
    */
   readonly outcome: "done" | "skipped" | "auth_error" | "deferred" | "disconnected";
   readonly decisions: readonly { readonly eventId: string; readonly reason: LogReason }[];
+  /** rc53: a push channel made or replaced this tick, or Google refusing one. */
+  readonly channel?: "made" | "failed";
 }
 
 /**
@@ -181,6 +189,9 @@ const connectionSchema = z.object({
   refresh_token_enc: z.string(),
   token_expiry: z.string().nullable(),
   sync_token: z.string().nullable(),
+  watch_channel: z.string().nullable(),
+  watch_resource_id: z.string().nullable(),
+  watch_expires_at: z.string().nullable(),
 });
 
 const projectionSchema = z
@@ -252,7 +263,7 @@ export async function runTick(
   const [row] = await storage.query(
     stmt(
       `SELECT owner_id, status, calendar_id, access_token_enc, refresh_token_enc, token_expiry,
-              sync_token
+              sync_token, watch_channel, watch_resource_id, watch_expires_at
          FROM calendar_connection WHERE id = ? AND status IN ('active', 'disconnected')`,
       connectionId,
     ),
@@ -371,12 +382,45 @@ export async function runTick(
       decisions.push({ eventId, reason: "retry_scheduled" });
     }
   }
+  const state = {
+    channel: conn.watch_channel,
+    resourceId: conn.watch_resource_id,
+    expiresAt: conn.watch_expires_at,
+  };
   if (leaving && (await copiesOn(storage, connectionId)) === 0) {
+    await stopChannel(provider, state);
     await ports.revoke(await ports.cipher.decrypt(conn.refresh_token_enc));
     await storage.batch(forgetConnection(connectionId));
     return { outcome: "disconnected", decisions };
   }
+  // rc53: the push channel, made or replaced within a day of its expiry. A quiet tick with a
+  // channel that has days left writes nothing and calls nothing (§6).
+  if (!leaving && ports.hookUrl !== null && channelDue(state, now)) {
+    try {
+      const channel = await renewChannel(provider, storage, {
+        connectionId,
+        state,
+        hookUrl: ports.hookUrl,
+        now,
+        newId: ports.newId,
+        isTheCallers: (error) => lostGrant(error) || error instanceof NoToken,
+      });
+      return { outcome: "done", decisions, channel };
+    } catch (error) {
+      if (lostGrant(error)) {
+        await storage.batch([authError(connectionId, now)]);
+        return { outcome: "auth_error", decisions };
+      }
+      if (error instanceof NoToken) return { outcome: "deferred", decisions };
+      throw error;
+    }
+  }
   return { outcome: "done", decisions };
+}
+
+/** The grant is gone: the refresh was refused, or the calendar answered 401. */
+function lostGrant(error: unknown): boolean {
+  return error instanceof AuthLost || (error instanceof HttpError && error.status === 401);
 }
 
 /** Google refused the grant (§12): the connection waits for its person to reconnect. */
