@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, expect, it } from "vitest";
-import { feedRule, KEEP_DAYS, readFeed } from "../../src/following/read.js";
+import { feedRule, KEEP_DAYS, MAX_KEPT, readFeed } from "../../src/following/read.js";
 
 // Reading a followed calendar (DESIGN §10 rc56/rc57) on feeds written by hand. The shapes are
 // the ones a real Google public calendar uses: UTC times, TZID times, dates, weekly series
@@ -279,5 +279,317 @@ describe("feedRule — a feed's rule in the recurrence subset, where it means th
   it("keeps WKST where it can move a date — and then the subset refuses it", () => {
     expect(() => feedRule("FREQ=WEEKLY;WKST=SU;INTERVAL=2;BYDAY=TU,SU", null)).toThrow();
     expect(() => feedRule("FREQ=WEEKLY;BYMONTH=3", null)).toThrow();
+  });
+});
+
+// What mutation testing showed the cases above leave open (Stryker, F1).
+describe("readFeed — the edges of reading", () => {
+  const titles = (text: string) => read(text).events.map((e) => e.title);
+  const ev = (...lines: string[]) => ["UID:x", "DTSTART:20261201T180000Z", ...lines];
+
+  it("reads a continued first line, a tab continuation, bare CR line ends and blank lines", () => {
+    const text = [
+      "",
+      "BEGIN:VCAL",
+      " ENDAR",
+      "BEGIN:VEVENT",
+      "UID:x",
+      "DTSTART:20261201T180000Z",
+      "SUMMARY:Tab",
+      "\tbed",
+      "",
+      "END:VEVENT",
+      "END:VCALENDAR",
+    ].join("\r");
+    expect(titles(text)).toEqual(["Tabbed"]);
+  });
+
+  it("skips a line that isn't one: no colon, no name, a parameter with no value, a broken quote", () => {
+    const r = read(
+      feed(
+        ev(
+          "GARBAGE",
+          ":no name",
+          "SUMMARY;X:wrong",
+          'SUMMARY;X="open:wrong',
+          'SUMMARY;X="a"b:wrong',
+          "LOCATION;X=no colon",
+          "SUMMARY:Right",
+        ),
+      ),
+    );
+    expect(r.events.map((e) => [e.title, e.location])).toEqual([["Right", null]]);
+  });
+
+  it("reads a quoted TZID, and a parameter after another", () => {
+    const r = read(
+      feed([
+        "UID:q",
+        'DTSTART;VALUE=DATE-TIME;TZID="Europe/London":20261201T190000',
+        "SUMMARY;LANGUAGE=en:Q",
+      ]),
+    );
+    expect(r.events.map((e) => [e.title, e.tzid, e.startLocal])).toEqual([
+      ["Q", "Europe/London", "2026-12-01T19:00:00"],
+    ]);
+  });
+
+  it("reads \\N as a line break, trims text, keeps blank text as none, and caps it", () => {
+    const r = read(
+      feed(
+        ev(
+          `SUMMARY:  ${"t".repeat(400)}  `,
+          "LOCATION:   ",
+          "DESCRIPTION:one\\Ntwo",
+          "URL: http://club.example/x ",
+        ),
+      ),
+    );
+    expect(r.events[0]).toMatchObject({
+      title: "t".repeat(300),
+      location: null,
+      description: "one\ntwo",
+      url: "http://club.example/x",
+    });
+  });
+
+  it("keeps no link that isn't one", () => {
+    expect(read(feed(ev("URL:not a link"))).events[0]?.url).toBeNull();
+  });
+
+  it("keeps a link up to 2000 characters, and none longer", () => {
+    const long = (n: number) =>
+      `https://club.example/${"x".repeat(n - "https://club.example/".length)}`;
+    expect(read(feed(ev(`URL:${long(2000)}`))).events[0]?.url).toBe(long(2000));
+    expect(read(feed(ev(`URL:${long(2001)}`))).events[0]?.url).toBeNull();
+  });
+
+  it("a bare 8-digit start is a date; VALUE=DATE on a time, or a date that doesn't exist, is left out", () => {
+    const r = read(
+      feed(
+        ["UID:bare", "DTSTART:20261205", "SUMMARY:bare"],
+        ["UID:mixed", "DTSTART;VALUE=DATE:20261205T100000", "SUMMARY:x"],
+        ["UID:feb30", "DTSTART;VALUE=DATE:20270230", "SUMMARY:x"],
+        ["UID:bad", "DTSTART:2026-12-05T10:00", "SUMMARY:x"],
+      ),
+    );
+    expect(r.events.map((e) => [e.uid, e.allDay])).toEqual([["bare", true]]);
+    expect(r.leftOut).toBe(3);
+  });
+
+  it("reads a leap second as the second before it", () => {
+    expect(read(feed(["UID:leap", "DTSTART:20261231T235960Z"])).events[0]?.startLocal).toBe(
+      "2027-01-01T00:59:59",
+    );
+  });
+
+  it("keeps a floating end, or a zoned end of a floating start, as it is written", () => {
+    const r = read(
+      feed(
+        ["UID:a", "DTSTART;TZID=Europe/Prague:20261201T190000", "DTEND:20261201T210000"],
+        ["UID:b", "DTSTART:20261202T190000", "DTEND;TZID=Europe/London:20261202T210000"],
+      ),
+    );
+    expect(r.events.map((e) => [e.uid, e.endLocal])).toEqual([
+      ["a", "2026-12-01T21:00:00"],
+      ["b", "2026-12-02T21:00:00"],
+    ]);
+  });
+
+  it("reads an all-day DTEND, a signed DURATION, and leaves out one that isn't", () => {
+    const r = read(
+      feed(
+        ["UID:days", "DTSTART;VALUE=DATE:20261205", "DTEND;VALUE=DATE:20261207"],
+        ["UID:plus", "DTSTART:20261201T180000Z", "DURATION:+PT2H"],
+        ["UID:junk", "DTSTART:20261201T180000Z", "DURATION:two hours"],
+      ),
+    );
+    expect(r.events.map((e) => [e.uid, e.endLocal])).toEqual([
+      ["plus", "2026-12-01T21:00:00"],
+      ["days", "2026-12-07T00:00:00"],
+    ]);
+    expect(r.leftOut).toBe(1);
+  });
+
+  it("trims a UID and STATUS; a UID of 500 characters is kept, 501 left out", () => {
+    const r = read(
+      feed(
+        ["UID: spaced ", "DTSTART:20261201T180000Z", "STATUS: cancelled "],
+        [`UID:${"u".repeat(500)}`, "DTSTART:20261202T180000Z"],
+        [`UID:${"v".repeat(501)}`, "DTSTART:20261203T180000Z"],
+        ["UID:   ", "DTSTART:20261203T180000Z"],
+      ),
+    );
+    expect(r.events.map((e) => [e.uid.slice(0, 6), e.status])).toEqual([
+      ["spaced", "cancelled"],
+      ["uuuuuu", "confirmed"],
+    ]);
+    expect(r.leftOut).toBe(2);
+  });
+
+  it("an event with no length starting now is kept", () => {
+    expect(read(feed(["UID:now", "DTSTART:20261121T120000Z"])).events).toHaveLength(1);
+  });
+
+  it("a series with no FREQ is left out, not a failure of the whole feed", () => {
+    const r = read(feed(["UID:nofreq", "DTSTART:20261201T180000Z", "RRULE:BYDAY=TU"], ev()));
+    expect(r.leftOut).toBe(1);
+    expect(r.events).toHaveLength(1);
+  });
+
+  it("expands a floating series, with EXDATEs written with spaces", () => {
+    const r = read(
+      feed([
+        "UID:float",
+        "DTSTART:20261201T190000",
+        "RRULE:FREQ=WEEKLY;COUNT=3",
+        "EXDATE:20261208T190000, 20261215T190000",
+      ]),
+    );
+    expect(r.events.map((e) => [e.uid, e.tzid])).toEqual([["float/2026-12-01T19:00:00", null]]);
+  });
+
+  it("an override of a single event names nothing; one moved past the window isn't kept", () => {
+    const r = read(
+      feed(
+        ["UID:single", "DTSTART;TZID=Europe/Prague:20261201T190000", "SUMMARY:single"],
+        [
+          "UID:single",
+          "RECURRENCE-ID;TZID=Europe/Prague:20261201T190000",
+          "DTSTART;TZID=Europe/Prague:20261202T190000",
+          "SUMMARY:override",
+        ],
+        ["UID:s", "DTSTART;TZID=Europe/Prague:20261201T190000", "RRULE:FREQ=WEEKLY;COUNT=2"],
+        [
+          "UID:s",
+          "RECURRENCE-ID;TZID=Europe/Prague:20261208T190000",
+          "DTSTART;TZID=Europe/Prague:20270601T190000",
+        ],
+      ),
+    );
+    expect(r.events.map((e) => [e.uid, e.title])).toEqual([
+      ["s/2026-12-01T19:00:00", ""],
+      ["single", "single"],
+    ]);
+  });
+
+  it("an override given twice keeps the first", () => {
+    const o = (title: string) => [
+      "UID:s",
+      "RECURRENCE-ID;TZID=Europe/Prague:20261201T190000",
+      "DTSTART;TZID=Europe/Prague:20261201T200000",
+      `SUMMARY:${title}`,
+    ];
+    const series = [
+      "UID:s",
+      "DTSTART;TZID=Europe/Prague:20261201T190000",
+      "RRULE:FREQ=WEEKLY;COUNT=1",
+    ];
+    expect(titles(feed(series, o("first"), o("second")))).toEqual(["first"]);
+  });
+
+  it("orders by start, then by UID", () => {
+    const r = read(
+      feed(
+        // In this order the sort has work to do: start first, then UID.
+        ["UID:a", "DTSTART:20261201T180000Z"],
+        ["UID:b", "DTSTART:20261201T180000Z"],
+        ["UID:late", "DTSTART:20261203T180000Z"],
+        ["UID:c", "DTSTART:20261201T180000Z"],
+      ),
+    );
+    expect(r.events.map((e) => e.uid)).toEqual(["a", "b", "c", "late"]);
+  });
+
+  it("takes the feed's zone only when it is one, trimmed; else UTC", () => {
+    const zoned = (zone: string) =>
+      readFeed(
+        [
+          "BEGIN:VCALENDAR",
+          `X-WR-TIMEZONE:${zone}`,
+          "BEGIN:VEVENT",
+          "UID:z",
+          "DTSTART:20261201T180000Z",
+          "END:VEVENT",
+          "END:VCALENDAR",
+        ].join("\r\n"),
+        NOW,
+      );
+    const tz = (zone: string) => {
+      const r = zoned(zone);
+      return r.ok ? r.events[0]?.tzid : "unreadable";
+    };
+    expect(tz(" Europe/Prague ")).toBe("Europe/Prague");
+    expect(tz("Mars/Olympus")).toBe("UTC");
+    expect(tz("")).toBe("UTC");
+  });
+
+  it("takes events only from VEVENTs at the top, and the name only from the calendar", () => {
+    const text = [
+      "BEGIN:VCALENDAR",
+      "X-WR-CALNAME:Club",
+      "BEGIN:VTIMEZONE",
+      "TZID:Europe/Prague",
+      "BEGIN:STANDARD",
+      "DTSTART:19701025T030000",
+      "END:STANDARD",
+      "END:VTIMEZONE",
+      "begin:vevent",
+      "UID:x",
+      "X-WR-CALNAME:Not the name",
+      "BEGIN:VALARM",
+      "SUMMARY:Not the title",
+      "END:VALARM",
+      "SUMMARY:Title",
+      "DTSTART:20261201T180000Z",
+      "END:VEVENT",
+      "BEGIN:VTODO ",
+      "LOCATION:A todo's place",
+      "BEGIN:VEVENT",
+      "UID:nested",
+      "DTSTART:20261201T180000Z",
+      "END:VEVENT",
+      "END:VTODO",
+      "END:VCALENDAR",
+    ].join("\r\n");
+    const r = read(text);
+    expect(r.name).toBe("Club");
+    expect(r.events.map((e) => [e.title, e.location])).toEqual([["Title", null]]);
+    expect(r.leftOut).toBe(0);
+  });
+
+  it(`keeps at most ${MAX_KEPT} events, the earliest, and counts the rest as left out`, () => {
+    const daily = Array.from({ length: 40 }, (_, i) => [
+      `UID:d${i}`,
+      "DTSTART:20261121T180000Z",
+      "RRULE:FREQ=DAILY",
+    ]);
+    const r = read(feed(...daily));
+    expect(r.events).toHaveLength(MAX_KEPT);
+    expect(r.leftOut).toBe(40 * KEEP_DAYS - MAX_KEPT);
+    // Day by day, 40 a day: the 2000th is on the 50th day, 9 January.
+    expect(r.events.at(-1)?.startLocal).toBe("2027-01-09T19:00:00");
+  });
+});
+
+describe("feedRule — the edges", () => {
+  it("drops empty parts and a lowercase WKST, and keeps a local or date UNTIL as it is", () => {
+    expect(feedRule("FREQ=WEEKLY;;wkst=MO;", null)).toBe("FREQ=WEEKLY");
+    expect(feedRule("FREQ=WEEKLY;UNTIL=20261222", "Europe/Prague")).toBe(
+      "FREQ=WEEKLY;UNTIL=20261222",
+    );
+    expect(feedRule("FREQ=WEEKLY;UNTIL=20261222T190000", "Europe/Prague")).toBe(
+      "FREQ=WEEKLY;UNTIL=20261222T190000",
+    );
+  });
+
+  it("drops WKST for a rule that isn't weekly, one with no INTERVAL, and one with one BYDAY", () => {
+    expect(feedRule("FREQ=MONTHLY;INTERVAL=2;BYDAY=1MO,3MO;WKST=SU", null)).toBe(
+      "FREQ=MONTHLY;INTERVAL=2;BYDAY=1MO,3MO",
+    );
+    expect(feedRule("FREQ=WEEKLY;BYDAY=TU,TH;WKST=SU", null)).toBe("FREQ=WEEKLY;BYDAY=TU,TH");
+    expect(feedRule("FREQ=WEEKLY;INTERVAL=2;BYDAY=TU;WKST=SU", null)).toBe(
+      "FREQ=WEEKLY;INTERVAL=2;BYDAY=TU",
+    );
   });
 });

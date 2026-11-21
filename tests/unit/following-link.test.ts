@@ -52,6 +52,37 @@ describe("followableLink", () => {
     });
   });
 
+  it("reads only Google's own host, and a base64 cid only as a whole", () => {
+    const src = `?src=${encodeURIComponent(ID)}`;
+    expect(followableLink(`https://club.example/embed${src}`)).toEqual({
+      ok: true,
+      url: `https://club.example/embed${src}`,
+    });
+    const b64 = btoa(ID);
+    for (const cid of [`!${b64}`, `${b64}!`, "abcde"]) {
+      const link = `https://calendar.google.com/calendar/u/0?cid=${encodeURIComponent(cid)}`;
+      expect(followableLink(link)).toEqual({ ok: true, url: link });
+    }
+    // An iCal address naming another calendar in its query is still the address it is.
+    const odd = `${ICAL}?cid=${encodeURIComponent(ID)}`;
+    expect(followableLink(odd)).toEqual({ ok: true, url: odd });
+  });
+
+  it("reads webcal: only as the scheme, and takes a link of exactly the longest length", () => {
+    expect(followableLink("https://club.example/?next=webcal://a")).toEqual({
+      ok: true,
+      url: "https://club.example/?next=webcal://a",
+    });
+    const longest = `https://a.example/${"x".repeat(MAX_LINK_LENGTH - "https://a.example/".length)}`;
+    expect(followableLink(longest)).toEqual({ ok: true, url: longest });
+  });
+
+  it("refuses a user name alone, or a password alone", () => {
+    for (const link of ["https://me@club.example/cal.ics", "https://:pw@club.example/cal.ics"]) {
+      expect(followableLink(link)).toEqual({ ok: false, reason: "credentials" });
+    }
+  });
+
   it("refuses what isn't an https: link, credentials, another port, and the over-long", () => {
     expect(followableLink("")).toEqual({ ok: false, reason: "not-a-link" });
     expect(followableLink("swing school")).toEqual({ ok: false, reason: "not-a-link" });
