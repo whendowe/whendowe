@@ -901,6 +901,45 @@ export function runPushTickContract(makePort: () => Promise<StoragePort>): void 
       expect(t.google().fake.holds(await t.copyId(bens))?.fields.title).toBe("Ben's dinner");
     });
 
+    it("after a full listing, a copy it doesn't hold was deleted while nobody watched: unsubscribed (T4a)", async () => {
+      const t = await setUp(makePort, "pull-vanish");
+      const kept = await t.event();
+      const gone = await t.event({ ...DINNER, title: "Gone dinner" });
+      await t.tick();
+      await t.read();
+      t.google().fake.vanish(await t.copyId(gone));
+      // An incremental read sees nothing: no change was reported.
+      expect((await t.read()).decisions).toEqual([]);
+      t.google().fake.expireNext = true;
+      // The full listing holds the copy still there too, which is our own write: an echo.
+      expect((await t.read()).decisions).toEqual(
+        expect.arrayContaining([
+          { eventId: gone, reason: "inbound_delete_unsubscribed" },
+          { eventId: kept, reason: "echo_suppressed" },
+        ]),
+      );
+      const rows = await t.rows();
+      expect(rows.find((r) => r.canonical_event_id === gone)).toMatchObject({
+        state: "deleted",
+        unsubscribed_at: T0,
+      });
+      expect(rows.find((r) => r.canonical_event_id === kept)).toMatchObject({ state: "synced" });
+      // It isn't made again, and a second full listing finds nothing more to do.
+      expect((await t.tick()).decisions).toEqual([]);
+      t.google().fake.expireNext = true;
+      expect((await t.read()).decisions).toEqual([{ eventId: kept, reason: "echo_suppressed" }]);
+    });
+
+    it("the first read is a full listing too, so a copy gone before it is found", async () => {
+      const t = await setUp(makePort, "pull-first");
+      const dinner = await t.event();
+      await t.tick();
+      t.google().fake.vanish(await t.copyId(dinner));
+      expect((await t.read()).decisions).toEqual([
+        { eventId: dinner, reason: "inbound_delete_unsubscribed" },
+      ]);
+    });
+
     it("an expired cursor reads everything, and finds the change all the same", async () => {
       const t = await setUp(makePort, "pull-expired");
       const dinner = await t.event();
