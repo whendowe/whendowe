@@ -144,6 +144,140 @@ export async function stopFollowing(
   return true;
 }
 
+/** A follow's own name, given on the page: at most this long (as a calendar's own is). */
+export const MAX_FOLLOW_NAME = 200;
+
+/**
+ * Rename a follow of this follower's; an empty name goes back to the calendar's own. False
+ * when there was no such follow of theirs.
+ */
+export async function renameFollow(
+  storage: StoragePort,
+  follower: Follower,
+  followId: string,
+  name: string,
+): Promise<boolean> {
+  if (!(await mayFollowFor(storage, follower))) return false;
+  const [personId, groupId] = owner(follower);
+  const named = name.trim().slice(0, MAX_FOLLOW_NAME);
+  const rows = await storage.query(
+    stmt(
+      `UPDATE calendar_follow SET name = ? WHERE id = ? AND person_id IS ? AND group_id IS ?
+       RETURNING id`,
+      named === "" ? null : named,
+      followId,
+      personId,
+      groupId,
+    ),
+  );
+  return rows.length > 0;
+}
+
+/** Give a follow of this follower's another colour. False when there was no such follow. */
+export async function recolourFollow(
+  storage: StoragePort,
+  follower: Follower,
+  followId: string,
+  colour: FollowColour,
+): Promise<boolean> {
+  if (!(await mayFollowFor(storage, follower))) return false;
+  const [personId, groupId] = owner(follower);
+  const rows = await storage.query(
+    stmt(
+      `UPDATE calendar_follow SET colour = ? WHERE id = ? AND person_id IS ? AND group_id IS ?
+       RETURNING id`,
+      colour,
+      followId,
+      personId,
+      groupId,
+    ),
+  );
+  return rows.length > 0;
+}
+
+/** A calendar someone sees as followed: their own follow, or one of a group they're in. */
+export interface FollowShown {
+  readonly followId: string;
+  readonly calendarId: string;
+  readonly url: string;
+  /** What it is called here: the follow's own name, else the calendar's, else null. */
+  readonly name: string | null;
+  /** The name the follower gave it, which the rename form starts from. */
+  readonly ownName: string | null;
+  readonly colour: FollowColour;
+  readonly status: "ok" | "unreadable" | "refused";
+  readonly leftOut: number;
+  /** When a fetch last changed what is kept; null before the first one. */
+  readonly fetchedAt: string | null;
+  /** The events kept: today to 60 days ahead, as of the last fetch. */
+  readonly kept: number;
+  /** null for your own; else the group, and whether you may change it (organizers only). */
+  readonly group: {
+    readonly id: string;
+    readonly name: string;
+    readonly organizer: boolean;
+  } | null;
+}
+
+const shownRowSchema = z.object({
+  id: z.string(),
+  calendar_id: z.string(),
+  url: z.string(),
+  own_name: z.string().nullable(),
+  calendar_name: z.string().nullable(),
+  colour: z.enum(FOLLOW_COLOURS),
+  status: z.enum(["ok", "unreadable", "refused"]),
+  left_out: z.number(),
+  fetched_at: z.string().nullable(),
+  kept: z.number(),
+  group_id: z.string().nullable(),
+  group_name: z.string().nullable(),
+  role: z.string().nullable(),
+});
+
+/**
+ * What `personId` follows: their own follows first, then each group's they're a member of, by
+ * group name; within each, by name. A group's follows are listed only to its members.
+ */
+export async function followsFor(storage: StoragePort, personId: string): Promise<FollowShown[]> {
+  const rows = await storage.query(
+    stmt(
+      `SELECT f.id, f.calendar_id, c.url, f.name AS own_name, c.name AS calendar_name, f.colour,
+              c.status, c.left_out, c.fetched_at,
+              (SELECT count(*) FROM followed_event e WHERE e.calendar_id = c.id) AS kept,
+              f.group_id, g.name AS group_name, m.role
+       FROM calendar_follow f
+       JOIN followed_calendar c ON c.id = f.calendar_id
+       LEFT JOIN person_group g ON g.id = f.group_id
+       LEFT JOIN group_member m ON m.group_id = f.group_id AND m.person_id = ?
+       WHERE f.person_id = ? OR m.person_id IS NOT NULL
+       ORDER BY f.group_id IS NOT NULL, g.name COLLATE NOCASE, g.id,
+                coalesce(f.name, c.name, c.url) COLLATE NOCASE, f.id`,
+      personId,
+      personId,
+    ),
+  );
+  return rows.map((row) => {
+    const r = shownRowSchema.parse(row);
+    return {
+      followId: r.id,
+      calendarId: r.calendar_id,
+      url: r.url,
+      name: r.own_name ?? r.calendar_name,
+      ownName: r.own_name,
+      colour: r.colour,
+      status: r.status,
+      leftOut: r.left_out,
+      fetchedAt: r.fetched_at,
+      kept: r.kept,
+      group:
+        r.group_id === null
+          ? null
+          : { id: r.group_id, name: r.group_name ?? "", organizer: r.role === "organizer" },
+    };
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Fetching, and keeping only a difference
 // ---------------------------------------------------------------------------
