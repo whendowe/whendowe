@@ -456,13 +456,14 @@ async function pull(
   const { storage } = ports;
   const { connectionId, conn, now } = at;
   let batch: ChangeBatch;
+  // A full listing — the first read, or a cursor that expired (§12) — has everything there.
+  let full = conn.sync_token === null;
   try {
     batch = await provider.listChanges(conn.sync_token);
   } catch (error) {
-    // The cursor expired (§12): read everything. The reverse diff — copies deleted while the
-    // cursor was dead — is T4's.
     if (!(error instanceof SyncTokenExpiredError)) throw error;
     batch = await provider.listChanges(null);
+    full = true;
   }
   const copies = new Map<string, ProjectionRow>();
   for (const r of await storage.query(
@@ -490,23 +491,7 @@ async function pull(
         break;
       case "unsubscribe":
         if (copy === null) break;
-        await storage.batch([
-          upsertProjection(ports, {
-            connectionId,
-            eventId: copy.canonicalEventId,
-            previous: copy,
-            now,
-            change: {
-              state: "deleted",
-              providerEventId: null,
-              providerEtag: null,
-              lastPushedHash: null,
-              lastError: null,
-              retryAt: null,
-              unsubscribedAt: now,
-            },
-          }),
-        ]);
+        await storage.batch([unsubscribed(ports, connectionId, copy, now)]);
         decisions.push({ eventId: copy.canonicalEventId, reason: "inbound_delete_unsubscribed" });
         break;
       case "apply_inbound": {
@@ -530,6 +515,17 @@ async function pull(
         assertNever(action);
     }
   }
+  // The reverse diff (§12): after a full listing, a copy of ours it doesn't hold was deleted in
+  // Google while no cursor saw it go — the person unsubscribing, as an inbound delete is (rc45).
+  if (full) {
+    const there = new Set(batch.changes.map((c) => c.id));
+    for (const copy of copies.values()) {
+      if (copy.providerEventId === null || there.has(copy.providerEventId)) continue;
+      if (copy.state === "deleted" || copy.unsubscribedAt !== null) continue;
+      await storage.batch([unsubscribed(ports, connectionId, copy, now)]);
+      decisions.push({ eventId: copy.canonicalEventId, reason: "inbound_delete_unsubscribed" });
+    }
+  }
   if (batch.nextSyncToken !== conn.sync_token) {
     await storage.batch([
       stmt(
@@ -540,6 +536,30 @@ async function pull(
     ]);
   }
   return decisions;
+}
+
+/** A copy deleted in Google: for its person, never put back (rc45). */
+function unsubscribed(
+  ports: TickPorts,
+  connectionId: string,
+  copy: ProjectionRow,
+  now: string,
+): SqlStatement {
+  return upsertProjection(ports, {
+    connectionId,
+    eventId: copy.canonicalEventId,
+    previous: copy,
+    now,
+    change: {
+      state: "deleted",
+      providerEventId: null,
+      providerEtag: null,
+      lastPushedHash: null,
+      lastError: null,
+      retryAt: null,
+      unsubscribedAt: now,
+    },
+  });
 }
 
 /** The parts of an event a copy can bring back (rc53). */
