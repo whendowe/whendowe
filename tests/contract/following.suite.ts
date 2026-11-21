@@ -396,7 +396,6 @@ export function runFollowingContract(makePort: () => Promise<StoragePort>): void
         base.map((l) => l.replace("Europe/Prague", "Europe/Vienna")),
         [...base, "STATUS:CANCELLED"],
         ["UID:e", "DTSTART;VALUE=DATE:20261201", ...base.slice(3)],
-        base,
       ];
       const stored = async () =>
         (
@@ -407,6 +406,9 @@ export function runFollowingContract(makePort: () => Promise<StoragePort>): void
           })
         )[0];
       for (const v of variants) {
+        // From the base each time, so each variant differs from what is kept in one field only.
+        club.answers(answer(200, CAL(base, day)));
+        await refreshCalendar(raw, club.get, f.calendarId, T0);
         club.answers(answer(200, CAL(v, day)));
         expect(await refreshCalendar(raw, club.get, f.calendarId, T0), v.join("|")).toEqual({
           outcome: "fetched",
@@ -469,13 +471,12 @@ export function runFollowingContract(makePort: () => Promise<StoragePort>): void
       });
       expect(lm?.last_modified).toBe("Sun");
 
-      // One event it can't read (no start): counted as left out.
-      club.answers(
-        answer(200, CAL(SOCIAL, ["UID:bad"]).replace("Swing school", "Swing school Brno"), {
-          etag: '"v2"',
-          "last-modified": "Sun",
-        }),
-      );
+      // One event it can't read (no start), and nothing else new: only the count changes.
+      const named = (...e: string[][]) => CAL(...e).replace("Swing school", "Swing school Brno");
+      const validators = { etag: '"v2"', "last-modified": "Sun" };
+      club.answers(answer(200, named(SOCIAL), validators));
+      await refreshCalendar(port, club.get, f.calendarId, T1);
+      club.answers(answer(200, named(SOCIAL, ["UID:bad"]), validators));
       await refreshCalendar(port, club.get, f.calendarId, T1);
       expect(await calendar(raw, f.calendarId)).toMatchObject({ left_out: 1 });
 
@@ -483,6 +484,29 @@ export function runFollowingContract(makePort: () => Promise<StoragePort>): void
       await refreshCalendar(port, club.get, f.calendarId, T1);
       expect(writes()).toBe(before);
       expect(empty()).toBe(0);
+    });
+
+    it("a day that becomes midnight to midnight is a change: all-day is a field of its own", async () => {
+      const port = await makePort();
+      const { ann } = await people(port, "allday");
+      const me = { kind: "person", personId: ann } as const;
+      const f = await follow(port, me, "https://club.example/allday.ics", T0);
+      if (!f.ok) throw new Error("followed");
+      const club = server(answer(200, CAL(["UID:d", "DTSTART;VALUE=DATE:20261205"])));
+      await refreshCalendar(port, club.get, f.calendarId, T0);
+      club.answers(answer(200, CAL(["UID:d", "DTSTART:20261205T000000", "DTEND:20261206T000000"])));
+      expect(await refreshCalendar(port, club.get, f.calendarId, T0)).toMatchObject({ changed: 1 });
+    });
+
+    it("a first fetch of an empty, nameless calendar still says when it was fetched", async () => {
+      const port = await makePort();
+      const { ann } = await people(port, "nameless");
+      const me = { kind: "person", personId: ann } as const;
+      const f = await follow(port, me, "https://club.example/nameless.ics", T0);
+      if (!f.ok) throw new Error("followed");
+      const blank = "BEGIN:VCALENDAR\r\nEND:VCALENDAR";
+      await refreshCalendar(port, server(answer(200, blank)).get, f.calendarId, T0);
+      expect(await calendar(port, f.calendarId)).toMatchObject({ name: null, fetched_at: T0 });
     });
 
     it("never sends an empty batch: a refused or unreadable calendar marked once stays quiet", async () => {
