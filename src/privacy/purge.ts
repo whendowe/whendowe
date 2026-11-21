@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { z } from "zod";
-import type { SqlStatement, StoragePort } from "../db/port.js";
+import { type SqlStatement, type StoragePort, stmt } from "../db/port.js";
 import {
   ASK_DRAFT_KEEP_DAYS,
   cutoff,
@@ -343,6 +343,20 @@ async function pastPlans(storage: StoragePort, now: string): Promise<string[]> {
  * backup window. One read says which have
  * anything to delete; only those statements run.
  */
+/**
+ * Delete a calendar nobody follows any more — `calendarId`'s, or every one (null): a person's
+ * or group's deletion takes their follows by cascade, and the retention pass sweeps after it (rc56).
+ */
+export function unfollowedSweep(calendarId: string | null): SqlStatement {
+  return stmt(
+    `DELETE FROM followed_calendar
+     WHERE (? IS NULL OR id = ?)
+       AND NOT EXISTS (SELECT 1 FROM calendar_follow f WHERE f.calendar_id = followed_calendar.id)`,
+    calendarId,
+    calendarId,
+  );
+}
+
 async function expired(storage: StoragePort, now: string): Promise<number> {
   const dayAgo = cutoff(now, 1);
   const month = now.slice(0, 7);
@@ -402,6 +416,9 @@ async function expired(storage: StoragePort, now: string): Promise<number> {
       flag: "ledger",
       stmt: { sql: "DELETE FROM erasure_ledger WHERE erased_at < ?", params: [ledgerBefore] },
     },
+    // rc56: a followed calendar nobody follows any more — its last follower's account or group
+    // went by cascade — goes, with its events (a cache).
+    { flag: "followed", stmt: unfollowedSweep(null) },
   ];
   const [flags] = await storage.query({
     sql: `SELECT
@@ -416,7 +433,10 @@ async function expired(storage: StoragePort, now: string): Promise<number> {
             EXISTS (SELECT 1 FROM plan_note WHERE last_day < date(?, ?)) AS note,
             EXISTS (SELECT 1 FROM ask_draft WHERE updated_at < ?) AS ask,
             EXISTS (SELECT 1 FROM held_action WHERE taken_at < ?) AS held,
-            EXISTS (SELECT 1 FROM erasure_ledger WHERE erased_at < ?) AS ledger`,
+            EXISTS (SELECT 1 FROM erasure_ledger WHERE erased_at < ?) AS ledger,
+            EXISTS (SELECT 1 FROM followed_calendar c
+                    WHERE NOT EXISTS (SELECT 1 FROM calendar_follow f WHERE f.calendar_id = c.id))
+              AS followed`,
     params: [
       dayAgo,
       dayAgo,

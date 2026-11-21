@@ -3,6 +3,7 @@ import { z } from "zod";
 import { type SqlStatement, type StoragePort, stmt } from "../db/port.js";
 import { uuidv7 } from "../ids.js";
 import { findGroupForMember } from "../people/group.js";
+import { unfollowedSweep } from "../privacy/purge.js";
 import { PULL_EVERY_MINUTES, pullTurn } from "../reconcile/tick.js";
 import { type FetchOutcome, fetchFeed, type PublicGet } from "./fetch.js";
 import { type FollowedEventRow, readFeed } from "./read.js";
@@ -142,20 +143,6 @@ export async function stopFollowing(
     unfollowedSweep(calendarId),
   ]);
   return true;
-}
-
-/**
- * Delete a calendar nobody follows any more — `calendarId`'s, or every one (null): a person's
- * or group's deletion takes their follows by cascade, and the retention pass sweeps after it.
- */
-export function unfollowedSweep(calendarId: string | null): SqlStatement {
-  return stmt(
-    `DELETE FROM followed_calendar
-     WHERE (? IS NULL OR id = ?)
-       AND NOT EXISTS (SELECT 1 FROM calendar_follow f WHERE f.calendar_id = followed_calendar.id)`,
-    calendarId,
-    calendarId,
-  );
 }
 
 // ---------------------------------------------------------------------------
@@ -380,4 +367,33 @@ export async function refreshCalendar(
     await storage.batch(writes);
   }
   return { outcome: "fetched", added, changed, removed };
+}
+
+/** One minute's fetching (rc56): each followed calendar whose turn it is, one at a time. */
+export async function followingPass(
+  storage: StoragePort,
+  get: PublicGet,
+  at: string,
+): Promise<{ readonly calendarId: string; readonly refreshed: Refreshed }[]> {
+  const done: { calendarId: string; refreshed: Refreshed }[] = [];
+  for (const calendarId of await calendarsDue(storage, at)) {
+    done.push({ calendarId, refreshed: await refreshCalendar(storage, get, calendarId, at) });
+  }
+  return done;
+}
+
+/**
+ * A refresh's log line (§14): the calendar's id, the outcome and counts — never the link, its
+ * query, or anything it holds. Null when nothing changed, so a steady state logs nothing.
+ */
+export function followLog(
+  calendarId: string,
+  r: Refreshed,
+): Record<string, string | number> | null {
+  if (
+    r.outcome === "unchanged" ||
+    (r.outcome === "fetched" && r.added + r.changed + r.removed === 0)
+  )
+    return null;
+  return { reason: "followed_fetch", calendar: calendarId, ...r };
 }
