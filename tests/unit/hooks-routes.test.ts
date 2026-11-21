@@ -2,11 +2,13 @@
 import { createClient } from "@libsql/client";
 import { Hono } from "hono";
 import { expect, it } from "vitest";
+import { createTokenCipher } from "../../src/crypto/tokens.js";
 import { stmt } from "../../src/db/port.js";
 import { sqliteStoragePort } from "../../src/db/sqlite.js";
 import { findOrCreatePerson } from "../../src/people/person.js";
 import { hashToken } from "../../src/people/tokens.js";
 import { GOOGLE_HOOK_PATH } from "../../src/reconcile/watch.js";
+import { createApp } from "../../src/web/app.js";
 import { registerHookRoutes } from "../../src/web/routes/hooks.js";
 import type { AppEnv } from "../../src/web/session.js";
 import { loadMigrationSql } from "../conftest.js";
@@ -56,7 +58,7 @@ async function setUp() {
   });
   const notify = (headers: Record<string, string>, method = "POST") =>
     app.request(GOOGLE_HOOK_PATH, { method, headers });
-  return { poked, notify };
+  return { poked, notify, storage };
 }
 
 const good = {
@@ -103,4 +105,52 @@ it("GET never reads anything", async () => {
   const t = await setUp();
   expect((await t.notify(good, "GET")).status).toBe(404);
   expect(t.poked).toEqual([]);
+});
+
+it("on Workers the notification is answered without waiting for the read", async () => {
+  const t = await setUp();
+  let release: () => void = () => undefined;
+  const reading = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const waited: Promise<unknown>[] = [];
+  const app = new Hono<AppEnv>();
+  registerHookRoutes(app, { storage: t.storage, poke: () => reading });
+  const ctx = {
+    waitUntil: (p: Promise<unknown>) => {
+      waited.push(p);
+    },
+    passThroughOnException: () => undefined,
+    props: {},
+  };
+  const res = await app.request(GOOGLE_HOOK_PATH, { method: "POST", headers: good }, {}, ctx);
+  expect(res.status).toBe(200);
+  expect(waited).toHaveLength(1);
+  release();
+  await Promise.all(waited);
+});
+
+it("the app has the endpoint only with Google configured and a way to read", async () => {
+  const t = await setUp();
+  const oauth = {
+    storage: t.storage,
+    cipher: await createTokenCipher([{ id: 1, material: `${"A".repeat(43)}=` }], 1),
+    clientId: "c",
+    clientSecret: "s",
+    redirectUri: "http://localhost:8080/oauth/google/callback",
+    now: () => T0,
+    secureCookies: false,
+  };
+  const poked: string[] = [];
+  const poke = (id: string) => {
+    poked.push(id);
+    return Promise.resolve();
+  };
+  const send = (app: ReturnType<typeof createApp>) =>
+    app.request(GOOGLE_HOOK_PATH, { method: "POST", headers: good });
+  expect((await send(createApp({ oauth, poke }))).status).toBe(200);
+  expect(poked).toEqual(["conn-1"]);
+  expect((await send(createApp({ oauth }))).status).toBe(404);
+  expect((await send(createApp({ poke }))).status).toBe(404);
+  expect(poked).toEqual(["conn-1"]);
 });
