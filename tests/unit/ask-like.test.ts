@@ -268,7 +268,7 @@ it("what the week rows leave out, and the levers around them", async () => {
   const untitled = await (await b.request(f.path)).text();
   expect(untitled).toContain('placeholder="As the question"');
   expect(untitled).not.toContain('<input type="hidden" name="s"');
-  // B like A, with one event still being typed and one ending before it starts: only A's
+  // B like A, with one event still being typed and one ending as it starts: only A's
   // dinner, as B has it, is drawn — named Untitled, as nothing names it.
   await f.send({ ...WEEKEND, title: "", o0e0name: "", act: "and:0" });
   await f.send({ ...WEEKEND, title: "", o0e0name: "", act: "like" });
@@ -290,7 +290,8 @@ it("what the week rows leave out, and the levers around them", async () => {
     o1e2from: "10:00",
     o1e3day: "2101-12-20",
     o1e3from: "12:00",
-    o1e3to: "11:00",
+    // rc58: a To earlier than From would be the next day; equal, it has no length.
+    o1e3to: "12:00",
     act: "save",
   });
   const page = await (await b.request(f.path)).text();

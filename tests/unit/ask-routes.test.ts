@@ -329,6 +329,51 @@ it("no time makes a tapped day all day; late evenings run past midnight; stretch
   expect(page.match(/<a class="letter" href="#o0"/g)).toHaveLength(2);
 });
 
+it("a To earlier than From is the next day: an end past midnight survives a save (rc58)", async () => {
+  const b = await browser({ now: () => NOW });
+  const f = await start(b);
+  const stored = async () =>
+    timesOf((await findAskDraft(b.storage, { id: f.id, authorId: f.mara }))?.body.options[0]);
+  await f.send({ ...PIZZA, o0e0from: "23:00", o0e0to: "02:00", act: "save" });
+  expect(await stored()).toEqual([
+    { allDay: false, startLocal: "2101-12-17T23:00", endLocal: "2101-12-18T02:00" },
+  ]);
+  // The sheet says so, and sends it back as it was: saving again keeps it.
+  const page = await (await b.request(f.path)).text();
+  expect(page).toContain(
+    '<label>To <span class="muted small">(next day)</span><br /><input type="time" name="o0e0to" value="02:00" /></label>',
+  );
+  await f.send({ ...PIZZA, o0e0from: "23:00", o0e0to: "02:00", act: "save" });
+  expect((await stored())?.[0]?.endLocal).toBe("2101-12-18T02:00");
+  // A To equal to From is a moment; a later one the same day, as before; neither says next day.
+  await f.send({ ...PIZZA, o0e0from: "19:00", o0e0to: "19:00", act: "save" });
+  expect((await stored())?.[0]?.endLocal).toBe("2101-12-17T19:00");
+  expect(await (await b.request(f.path)).text()).not.toContain("(next day)");
+  await f.send({ ...PIZZA, act: "save" });
+  expect((await stored())?.[0]?.endLocal).toBe("2101-12-17T21:00");
+  expect(await (await b.request(f.path)).text()).toContain(
+    '<label>To<br /><input type="time" name="o0e0to" value="21:00" /></label>',
+  );
+  // No To yet: nothing to call the next day.
+  await f.send({ ...PIZZA, o0e0from: "23:00", o0e0to: "", act: "save" });
+  expect(await (await b.request(f.path)).text()).toContain(
+    '<label>To<br /><input type="time" name="o0e0to" value="" /></label>',
+  );
+  // No day yet: nothing to be the next day of, so no times either.
+  await f.send({ ...PIZZA, o0e0day: "", o0e0from: "23:00", o0e0to: "02:00", act: "save" });
+  expect(await stored()).toEqual([{ allDay: false, startLocal: "", endLocal: "" }]);
+  // An end grip dragged into the next day survives the next save too.
+  await f.send({
+    ...PIZZA,
+    o0e0from: "23:00",
+    o0e0to: "23:30",
+    act: "move:0:0:end:2101-12-18T01:00",
+  });
+  expect((await stored())?.[0]?.endLocal).toBe("2101-12-18T02:00");
+  await f.send({ ...PIZZA, o0e0from: "23:00", o0e0to: "02:00", act: "save" });
+  expect((await stored())?.[0]?.endLocal).toBe("2101-12-18T02:00");
+});
+
 it("the month buttons save first and move; a month asked for is kept by Save; ten options leave no free day", async () => {
   const b = await browser({ now: () => NOW });
   const f = await start(b);
@@ -557,8 +602,9 @@ it("in Hours a timed event has a grip at each end; dragging one moves it by whol
   expect(await (await b.request(`${f.path}?v=hours&d=2101-12-17`)).text()).toContain(
     'data-grip="0:0" data-ends="both"',
   );
-  // An end that isn't a real time yet, or is before or at the start, as typed: no grips.
-  for (const to of ["25:00", "19:00", "20:00"]) {
+  // An end that isn't a real time yet, or is at the start, as typed: no grips. (rc58: one
+  // before the start is the next day.)
+  for (const to of ["25:00", "20:00"]) {
     await f.send({ ...now, o0e0from: "20:00", o0e0to: to, act: "save" });
     expect(await (await b.request(`${f.path}?v=hours&d=2101-12-17`)).text()).not.toContain(
       'class="grip"',

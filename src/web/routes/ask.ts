@@ -84,10 +84,12 @@ function eventOf(r: EventRow): AskBody["options"][number][number] {
   const day = DAY.test(r.day) ? r.day : "";
   if (TIME.test(r.from)) {
     const to = TIME.test(r.to) ? r.to : "";
+    // rc58: a To earlier than From is the next day, as calendar apps read it.
+    const endDay = day !== "" && to < r.from ? addDays(day, 1) : day;
     return {
       allDay: false,
       startLocal: day === "" ? "" : `${day}T${r.from}`,
-      endLocal: day === "" || to === "" ? "" : `${day}T${to}`,
+      endLocal: day === "" || to === "" ? "" : `${endDay}T${to}`,
     };
   }
   const last = DAY.test(r.last) && r.last >= day ? r.last : day;
@@ -574,6 +576,9 @@ function viewSwitch(view: "days" | "hours"): Html {
   return html`<div class="seg viewswitch" role="group" aria-label="View"><button type="submit" name="act" value="view:days" aria-pressed="${String(view === "days")}">Days</button><button type="submit" name="act" value="view:hours" aria-pressed="${String(view === "hours")}">Hours</button></div>`;
 }
 
+/** rc58: a To earlier than From ends on the next day; the sheet says so beside it. */
+const nextDay = (r: EventRow) => TIME.test(r.from) && TIME.test(r.to) && r.to < r.from;
+
 function eventRow(
   i: number,
   j: number,
@@ -586,7 +591,7 @@ function eventRow(
 <label>Name <span class="muted small">(optional)</span><br /><input name="${k}name" maxlength="200" value="${r.name}" placeholder="${title.trim() === "" ? "As the question" : title.trim()}" /></label>
 <label>Day<br /><input type="date" name="${k}day" value="${r.day}" /></label>
 <label>From <span class="muted small">(empty: all day)</span><br /><input type="time" name="${k}from" value="${r.from}" /></label>
-<label>To<br /><input type="time" name="${k}to" value="${r.to}" /></label>
+<label>To${nextDay(r) ? html` <span class="muted small">(next day)</span>` : ""}<br /><input type="time" name="${k}to" value="${r.to}" /></label>
 <label>Last day <span class="muted small">(all day, several days)</span><br /><input type="date" name="${k}last" value="${r.last}" /></label>
 ${many ? html`<button class="link" type="submit" name="act" value="drop:${i}:${j}">Remove</button>` : ""}</div></div>`;
 }

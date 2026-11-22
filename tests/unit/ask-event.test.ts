@@ -195,7 +195,8 @@ it("asked twice at once, it is made once; anyone else's draft makes nothing", as
 it("a time the event form would refuse is refused here too, and the draft is kept", async () => {
   const b = await browser({ now: () => NOW });
   const f = await start(b);
-  const res = await f.send({ ...PIZZA, o0e0to: "18:00", act: "ask" });
+  // rc58: a To earlier than From is the next day; one equal to it ends as it starts.
+  const res = await f.send({ ...PIZZA, o0e0to: "19:00", act: "ask" });
   expect(res.status).toBe(400);
   expect(await listEventsFor(b.storage, f.mara)).toEqual([]);
   expect(await findAskDraft(b.storage, { id: f.id, authorId: f.mara })).not.toBeNull();
