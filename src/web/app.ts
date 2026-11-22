@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import { Hono } from "hono";
+import type { PublicGet } from "../following/fetch.js";
 import type { HeldRunners } from "../held.js";
 import { revokeGoogleGrant } from "../oauth/token-exchange.js";
 import { UNAVAILABLE } from "../people/capability.js";
@@ -20,6 +21,7 @@ import {
   yourEvents,
 } from "./routes/events.js";
 import { registerFeedRoutes } from "./routes/feeds.js";
+import { FOLLOWING_PATH, registerFollowingRoutes } from "./routes/following.js";
 import { GROUPS_PATH, registerGroupRoutes } from "./routes/groups.js";
 import { registerHookRoutes } from "./routes/hooks.js";
 import {
@@ -53,6 +55,11 @@ export interface AppOptions {
    * (the connection's Durable Object, or the Node loop); absent, there is no endpoint.
    */
   readonly poke?: (connectionId: string) => Promise<void>;
+  /**
+   * rc56/rc57: the deployment's safe GET for followed calendars, so following a link fetches it
+   * at once; absent, a new follow is read in the six-hourly pass.
+   */
+  readonly publicGet?: PublicGet;
 }
 
 /** Someone with no handle shows as "Guest …" to everyone: ask them, once, on home (§10 rc21). */
@@ -196,7 +203,7 @@ export function createApp(options: AppOptions = {}): Hono<AppEnv> {
 ${connect}`
           : html`${await nameNudge(auth, signedIn.personId)}${await askDraftsSection(auth, signedIn)}${await yourEvents(auth.storage, signedIn.personId, auth.now())}
 <p class="muted"><a href="${EVENTS_PATH}/new">New repeating event</a></p>
-<p><a href="${PLANS_PATH}">Your plans</a> · <a href="${GROUPS_PATH}">Your groups</a></p>
+<p><a href="${PLANS_PATH}">Your plans</a> · <a href="${GROUPS_PATH}">Your groups</a> · <a href="${FOLLOWING_PATH}">Calendars you follow</a></p>
 ${connect}`,
       ),
     );
@@ -218,6 +225,10 @@ ${connect}`,
       ...(oauth === undefined ? {} : { googleBusy: googleBusySource(oauth, auth.capabilities) }),
     });
     registerOperatorRoutes(app, auth);
+    registerFollowingRoutes(app, {
+      ...auth,
+      ...(options.publicGet === undefined ? {} : { publicGet: options.publicGet }),
+    });
   }
   if (oauth !== undefined) registerOAuthRoutes(app, oauth, auth);
   if (oauth !== undefined && options.poke !== undefined)

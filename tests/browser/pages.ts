@@ -3,10 +3,12 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { createClient } from "@libsql/client";
 import { createTokenCipher } from "../../src/crypto/tokens.js";
 import { sqliteStoragePort } from "../../src/db/sqlite.js";
+import type { PublicResponse } from "../../src/following/fetch.js";
 import type { MailMessage } from "../../src/mail/port.js";
 import { createApp } from "../../src/web/app.js";
 import { ACCOUNT_PATH } from "../../src/web/layout.js";
 import { CONFIRM_PATH, SIGN_IN_PATH, SWITCH_PATH } from "../../src/web/routes/auth.js";
+import { FOLLOWING_PATH } from "../../src/web/routes/following.js";
 import { GROUPS_PATH } from "../../src/web/routes/groups.js";
 import { PLANS_PATH } from "../../src/web/routes/plans.js";
 import { loadMigrationSql } from "../conftest.js";
@@ -37,7 +39,56 @@ const app = createApp({
     // Calendar feed links (rc34). A fixed test key: example data only.
     feedCipher: await createTokenCipher([{ id: 1, material: `${"A".repeat(43)}=` }], 1),
   },
+  // Followed calendars (rc56): an example server, so following one fetches it at once.
+  publicGet: (url) => Promise.resolve(followedAnswer(url)),
 });
+
+/** What the example calendars answer: two calendars, and a page that isn't one. */
+function followedAnswer(url: string): PublicResponse {
+  const event = (uid: string, start: string, end: string, title: string, where: string) => [
+    "BEGIN:VEVENT",
+    `UID:${uid}`,
+    `DTSTART;TZID=Europe/Prague:${start}`,
+    `DTEND;TZID=Europe/Prague:${end}`,
+    `SUMMARY:${title}`,
+    `LOCATION:${where}`,
+    "END:VEVENT",
+  ];
+  const calendar = (name: string, events: string[][]) =>
+    [
+      "BEGIN:VCALENDAR",
+      `X-WR-CALNAME:${name}`,
+      "X-WR-TIMEZONE:Europe/Prague",
+      ...events.flat(),
+      "END:VCALENDAR",
+    ].join("\r\n");
+  const text = url.includes("lindy")
+    ? calendar("Lindy Hop Club", [
+        event("social", "20261030T200000", "20261030T235900", "Friday social", "Old Mill"),
+        event("class", "20261103T190000", "20261103T203000", "Beginners' class", "Studio 2"),
+      ])
+    : url.includes("games")
+      ? calendar("Board game café", [
+          event("night", "20261029T180000", "20261029T230000", "Game night", "The Meeple"),
+        ])
+      : "<!doctype html><title>Not a calendar</title>";
+  return {
+    status: 200,
+    header: () => null,
+    body: {
+      getReader: () => {
+        const chunks = [new TextEncoder().encode(text)];
+        return {
+          read: () => {
+            const value = chunks.shift();
+            return Promise.resolve(value === undefined ? { done: true } : { done: false, value });
+          },
+          cancel: () => Promise.resolve(),
+        };
+      },
+    },
+  };
+}
 
 const post = (fields: Record<string, string>, cookie?: string): RequestInit => ({
   method: "POST",
@@ -324,7 +375,38 @@ const pages: Record<string, string> = {
   "poll-new": `${group}/polls/new`,
   "account-feed": `${ACCOUNT_PATH}#feed`,
   "group-shared": `${group}#shared`,
+  following: FOLLOWING_PATH,
 };
+// Calendars followed (rc56): one of the DM's own, renamed and recoloured; one for the table;
+// and a link that turned out not to be a calendar.
+const lindy = await app.request(
+  FOLLOWING_PATH,
+  post({ csrf, link: "webcal://lindy.example/club.ics", for: "me" }, cookie),
+);
+const lindyId = must(/#f-(.+)$/.exec(lindy.headers.get("location") ?? "")?.[1], "a follow");
+await app.request(
+  `${FOLLOWING_PATH}/${lindyId}/name`,
+  post({ csrf, for: "me", name: "Lindy Hop" }, cookie),
+);
+await app.request(
+  `${FOLLOWING_PATH}/${lindyId}/colour`,
+  post({ csrf, for: "me", colour: "f3" }, cookie),
+);
+await app.request(
+  FOLLOWING_PATH,
+  post({ csrf, link: "https://cinema.example/whats-on", for: "me" }, cookie),
+);
+await app.request(
+  FOLLOWING_PATH,
+  post(
+    {
+      csrf,
+      link: "https://games.example/cafe.ics",
+      for: must(/\/groups\/(.+)$/.exec(group)?.[1], "group id"),
+    },
+    cookie,
+  ),
+);
 // The table's calendar shared with people outside it (rc36): two links, at both tiers.
 await app.request(
   `${group}/shared`,
