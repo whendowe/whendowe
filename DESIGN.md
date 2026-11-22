@@ -236,6 +236,7 @@ whendowe/
       picker.ts                # the date/time picker: a script over the plain form fields (rc15)
       plan-editor.ts           # the week-row editor: tap to pick up / put down, drag; writes the plain fields (rc19)
       ask-drag.ts              # (rc47) the Ask page's drag: turns a finished drag into the form's own POST; no state of its own
+      whats-on-busy.ts         # (rc58) the What's on page's script: asks GET /busy and takes out, or marks, what overlaps Google's busy times; no state of its own
       people-picker.ts         # (rc48) the people picker: chips as plain form fields, read and drawn; one component for Ask, events and groups
       session.ts               # session middleware: cookie -> this browser's accounts, the active one on the request context; CSRF check (rc18)
       routes/                  # OAuth, events UI (HTMX)
@@ -2573,7 +2574,9 @@ others is an ordinary Ask. Owner decisions, 2026-11-21.
     out. **Show what clashes** shows those too, dimmed, each saying "You have something then".
     It is a link, so it works without JavaScript.
   - An overlap is between instants, so it needs no zone. Days and times are drawn in the
-    calendar's own zone, as it lists them.
+    calendar's own zone, as it lists them. An all-day event is days, not instants: it clashes
+    with a whole day of yours and nothing shorter. A timed one clashes with a whole day of yours
+    on its own date. A time a feed gives with no zone at all is read as UTC.
   - Cancelled events aren't shown. A calendar you and a group both follow lists each event once,
     in your own follow's colour.
   - *Google's busy times:* the page never waits for Google (rc41). It is drawn with your
