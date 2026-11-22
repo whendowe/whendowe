@@ -39,6 +39,7 @@ import { registerOperatorRoutes } from "./routes/operator.js";
 import { chooseRunner, PLANS_PATH, registerPlanRoutes, voteLinksRunner } from "./routes/plans.js";
 import { registerRespondRoutes } from "./routes/respond.js";
 import { registerShareRoutes } from "./routes/share.js";
+import { registerWhatsOnRoutes, WHATS_ON_PATH } from "./routes/whats-on.js";
 import { type AppEnv, page, sessionMiddleware } from "./session.js";
 
 // The Hono app is shared verbatim by both deployments (DESIGN.md §6): workerd mounts
@@ -203,7 +204,7 @@ export function createApp(options: AppOptions = {}): Hono<AppEnv> {
 ${connect}`
           : html`${await nameNudge(auth, signedIn.personId)}${await askDraftsSection(auth, signedIn)}${await yourEvents(auth.storage, signedIn.personId, auth.now())}
 <p class="muted"><a href="${EVENTS_PATH}/new">New repeating event</a></p>
-<p><a href="${PLANS_PATH}">Your plans</a> · <a href="${GROUPS_PATH}">Your groups</a> · <a href="${FOLLOWING_PATH}">Calendars you follow</a></p>
+<p><a href="${PLANS_PATH}">Your plans</a> · <a href="${GROUPS_PATH}">Your groups</a> · <a href="${WHATS_ON_PATH}">What's on</a> · <a href="${FOLLOWING_PATH}">Calendars you follow</a></p>
 ${connect}`,
       ),
     );
@@ -225,6 +226,7 @@ ${connect}`,
       ...(oauth === undefined ? {} : { googleBusy: googleBusySource(oauth, auth.capabilities) }),
     });
     registerOperatorRoutes(app, auth);
+    registerWhatsOnRoutes(app, auth);
     registerFollowingRoutes(app, {
       ...auth,
       ...(options.publicGet === undefined ? {} : { publicGet: options.publicGet }),
