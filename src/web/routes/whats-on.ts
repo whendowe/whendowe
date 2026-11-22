@@ -2,10 +2,16 @@
 import type { Context, Hono } from "hono";
 import { Temporal } from "temporal-polyfill";
 import type { StoragePort } from "../../db/port.js";
-import { followedEvent, type OnEvent, WHATS_ON_DAYS, whatsOn } from "../../following/whats-on.js";
+import {
+  busyRange,
+  followedEvent,
+  type OnEvent,
+  WHATS_ON_DAYS,
+  whatsOn,
+} from "../../following/whats-on.js";
 import { uuidv7 } from "../../ids.js";
 import { type AskBody, saveAskDraft, startAskDraft } from "../../plans/ask.js";
-import { type Html, html } from "../layout.js";
+import { BUSY_PATH, type Html, html } from "../layout.js";
 import {
   type AppEnv,
   page,
@@ -14,6 +20,7 @@ import {
   type SignedIn,
   verifyFormCsrf,
 } from "../session.js";
+import { whatsOnBusyAssets } from "../whats-on-busy.js";
 import { ASK_PATH } from "./ask.js";
 import { FOLLOW_STYLE, FOLLOWING_PATH } from "./following.js";
 
@@ -28,6 +35,11 @@ export const WHATS_ON_PATH = "/whats-on";
 export interface WhatsOnDeps {
   readonly storage: StoragePort;
   readonly now: () => string;
+}
+
+export interface WhatsOnOptions {
+  /** This instance has a Google client, so Google's busy times may count (rc41). */
+  readonly google: boolean;
 }
 
 /** A followed event's sheet: its calendar in the path, its UID (which may hold "/") in `e`. */
@@ -98,7 +110,12 @@ function item(e: OnEvent): Html {
   }</li>`;
 }
 
-async function whatsOnPage(deps: WhatsOnDeps, me: SignedIn, showClashes: boolean): Promise<Html> {
+async function whatsOnPage(
+  deps: WhatsOnDeps,
+  me: SignedIn,
+  showClashes: boolean,
+  google: boolean,
+): Promise<Html> {
   const now = deps.now();
   const all = await whatsOn(deps.storage, me.personId, now);
   const shown = showClashes ? all : all.filter((e) => !e.clashes);
@@ -108,26 +125,27 @@ async function whatsOnPage(deps: WhatsOnDeps, me: SignedIn, showClashes: boolean
     const day = e.startLocal.slice(0, 10);
     days.set(day, [...(days.get(day) ?? []), e]);
   }
+  // Without clashes shown, the toggle is there even with none, hidden: the script shows it
+  // when Google's busy times take some out (F2b), adding to the count it holds.
   const toggle = showClashes
-    ? html`<a href="${WHATS_ON_PATH}">Hide what clashes</a>`
-    : hidden === 0
-      ? ""
-      : html`<a href="${WHATS_ON_PATH}?clashes=1">Show what clashes</a> <span class="muted">(${
-          hidden === 1 ? "1 event overlaps" : `${hidden} events overlap`
-        } something of yours)</span>`;
+    ? html`<p><a href="${WHATS_ON_PATH}">Hide what clashes</a></p>`
+    : html`<p data-clash-toggle="${hidden}"${hidden === 0 ? " hidden" : ""}><a href="${WHATS_ON_PATH}?clashes=1">Show what clashes</a> <span class="muted" data-clash-count>(${
+        hidden === 1 ? "1 event overlaps" : `${hidden} events overlap`
+      } something of yours)</span></p>`;
+  const free = html`<p class="muted" data-none${shown.length === 0 ? "" : " hidden"}>Nothing on when you're free in the next ${WHATS_ON_DAYS} days.</p>`;
   const body =
     all.length === 0
       ? html`<p class="muted">Nothing on in the next ${WHATS_ON_DAYS} days from the calendars you follow.</p>`
-      : shown.length === 0
-        ? html`<p class="muted">Nothing on when you're free in the next ${WHATS_ON_DAYS} days.</p>`
-        : html`${[...days].map(
-            ([day, events]) =>
-              html`<h2 class="day">${dayHeading(day, events[0]?.tzid ?? null, now)}</h2><ul class="on">${events.map(item)}</ul>`,
-          )}`;
-  return html`${FOLLOW_STYLE}${STYLE}<h1>What's on</h1>
+      : html`${free}${[...days].map(
+          ([day, events]) =>
+            html`<h2 class="day">${dayHeading(day, events[0]?.tzid ?? null, now)}</h2><ul class="on">${events.map(item)}</ul>`,
+        )}`;
+  const range = busyRange(now);
+  return html`${FOLLOW_STYLE}${STYLE}<div data-whats-on="${BUSY_PATH}" data-from="${range.from}" data-to="${range.to}" data-clashes="${showClashes ? "1" : "0"}"><h1>What's on</h1>
 <p class="muted">The next ${WHATS_ON_DAYS} days from the calendars you and your groups follow, when you're free: what overlaps something of yours is left out. <a href="${FOLLOWING_PATH}">Calendars you follow</a></p>
-${toggle === "" ? "" : html`<p>${toggle}</p>`}
-${body}`;
+${google ? html`<noscript><p class="small muted">Without JavaScript, your Google busy times aren't counted.</p></noscript>` : ""}
+${all.length === 0 ? "" : toggle}
+${body}</div>${all.length === 0 ? "" : whatsOnBusyAssets()}`;
 }
 
 function sheetPage(e: OnEvent & { readonly cancelled: boolean }, me: SignedIn): Html {
@@ -173,7 +191,11 @@ export function inviteBody(e: OnEvent): AskBody {
   };
 }
 
-export function registerWhatsOnRoutes(app: Hono<AppEnv>, deps: WhatsOnDeps): void {
+export function registerWhatsOnRoutes(
+  app: Hono<AppEnv>,
+  deps: WhatsOnDeps,
+  options: WhatsOnOptions,
+): void {
   const notFound = (c: Context<AppEnv>) =>
     c.html(
       page(
@@ -189,7 +211,7 @@ export function registerWhatsOnRoutes(app: Hono<AppEnv>, deps: WhatsOnDeps): voi
     if (me instanceof Response) return me;
     c.header("Cache-Control", "private, no-store");
     const clashes = c.req.query("clashes") === "1";
-    return c.html(page(c, "What's on", await whatsOnPage(deps, me, clashes)));
+    return c.html(page(c, "What's on", await whatsOnPage(deps, me, clashes, options.google)));
   });
 
   app.get(`${WHATS_ON_PATH}/:calendar`, async (c) => {
