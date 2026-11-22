@@ -602,8 +602,9 @@ it("in Hours a timed event has a grip at each end; dragging one moves it by whol
   expect(await (await b.request(`${f.path}?v=hours&d=2101-12-17`)).text()).toContain(
     'data-grip="0:0" data-ends="both"',
   );
-  // An end that isn't a real time yet, or is before or at the start, as typed: no grips.
-  for (const to of ["25:00", "19:00", "20:00"]) {
+  // An end that isn't a real time yet, or is at the start, as typed: no grips. (rc58: one
+  // before the start is the next day.)
+  for (const to of ["25:00", "20:00"]) {
     await f.send({ ...now, o0e0from: "20:00", o0e0to: to, act: "save" });
     expect(await (await b.request(`${f.path}?v=hours&d=2101-12-17`)).text()).not.toContain(
       'class="grip"',
