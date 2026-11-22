@@ -7,6 +7,7 @@ import { findAskDraft } from "../../src/plans/ask.js";
 import { FOLLOWING_PATH } from "../../src/web/routes/following.js";
 import { sheetPath, WHATS_ON_PATH } from "../../src/web/routes/whats-on.js";
 import { addAccount, type Browser, browser, home, post } from "../property/one-browser.js";
+import { harness } from "./google-harness.js";
 
 // What's on when you're free (DESIGN §10 rc58): the next two weeks of what you follow, by day,
 // what clashes with something of yours left out unless asked for; a followed event's sheet
@@ -105,7 +106,10 @@ it("asks you to sign in, writes nothing, and is linked from home", async () => {
   expect(res.headers.get("cache-control")).toBe("private, no-store");
   const page = await res.text();
   expect(page).toContain("<h1>What's on</h1>");
-  expect(page).toContain("Nothing on in the next 14 days from the calendars you follow.");
+  // Nothing on: no toggle and no script, as there is nothing to take out (F2b).
+  expect(page.replace(/\s+/g, " ")).toContain(
+    '<a href="/following">Calendars you follow</a></p> <p class="muted">Nothing on in the next 14 days from the calendars you follow.</p></div> </body>',
+  );
   expect(b.writes).toBe(before);
 });
 
@@ -369,4 +373,22 @@ it("Invite people keeps to what an Ask holds", async () => {
   const body = (await findAskDraft(b.storage, { id, authorId: ann.id }))?.body;
   expect(body?.title).toBe("T".repeat(200));
   expect(body?.location).toBe("L".repeat(200));
+});
+
+it("gives the page's script the days to ask Google about, and says when it can't (F2b)", async () => {
+  const { b } = await following();
+  const page = await text(b, WHATS_ON_PATH);
+  // The same UTC days the server counted your own busy times over, a day either side.
+  expect(page).toContain('data-whats-on="/busy" data-from="2026-11-20" data-to="2026-12-06"');
+  expect(page).toContain("globalThis.WhenDoWeWhatsOnBusy");
+  expect(await text(b, `${WHATS_ON_PATH}?clashes=1`)).toContain('data-clashes="1"');
+  // An instance with no Google client has no Google busy times to miss.
+  expect(page).not.toContain("<noscript>");
+  const g = await harness();
+  const withGoogle = await g.page(WHATS_ON_PATH);
+  expect(withGoogle).toContain(
+    '<noscript><p class="small muted">Without JavaScript, your Google busy times aren\'t counted.</p></noscript>',
+  );
+  // Nothing on: nothing to take out, so no script.
+  expect(withGoogle).not.toContain("globalThis.WhenDoWeWhatsOnBusy");
 });
