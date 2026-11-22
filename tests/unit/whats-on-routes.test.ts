@@ -129,8 +129,8 @@ it("lists what's on by day, in the calendar's own time, escaped, cancelled left 
   // In order: tonight, tomorrow, the festival.
   expect(page.indexOf("Social &lt;b&gt;")).toBeLessThan(page.indexOf("Late jam"));
   expect(page.indexOf("Late jam")).toBeLessThan(page.indexOf("Festival"));
-  // Nothing clashes, so nothing to show.
-  expect(page).not.toContain("Show what clashes");
+  // Nothing clashes, so nothing to show — until the page's script finds Google's (F2b).
+  expect(page).toContain('<p data-clash-toggle="0" hidden><a href="/whats-on?clashes=1">');
 });
 
 it("leaves out what overlaps something of yours, and shows it dimmed when asked", async () => {
@@ -154,7 +154,7 @@ it("leaves out what overlaps something of yours, and shows it dimmed when asked"
   expect(page).not.toContain("Social &lt;b&gt;");
   expect(page).toContain("Late jam");
   expect(page).toContain(
-    `<a href="${WHATS_ON_PATH}?clashes=1">Show what clashes</a> <span class="muted">(1 event overlaps something of yours)</span>`,
+    `<p data-clash-toggle="1"><a href="${WHATS_ON_PATH}?clashes=1">Show what clashes</a> <span class="muted" data-clash-count>(1 event overlaps something of yours)</span></p>`,
   );
   const all = await text(b, `${WHATS_ON_PATH}?clashes=1`);
   expect(all).toContain('class="fc-f1 clash"');
@@ -181,7 +181,9 @@ it("says when everything clashes, and counts more than one", async () => {
     now: NOW,
   });
   const page = await text(b, WHATS_ON_PATH);
-  expect(page).toContain("Nothing on when you're free in the next 14 days.");
+  expect(page).toContain(
+    '<p class="muted" data-none>Nothing on when you\'re free in the next 14 days.</p>',
+  );
   expect(page).toContain("(7 events overlap something of yours)");
 });
 
@@ -272,9 +274,9 @@ it("draws each kind of time, and only what each event has", async () => {
   const { b, calendarId } = await following();
   const page = squash(await text(b, WHATS_ON_PATH));
   expect(page).toContain("<title>What&#39;s on · WhenDoWe</title>");
-  // Nothing clashes: nothing between the page's line and its first day.
+  // Nothing clashes: between the page's line and its first day, only what the script may show.
   expect(page).toContain(
-    '<h1>What\'s on</h1> <p class="muted">The next 14 days from the calendars you and your groups follow, when you\'re free: what overlaps something of yours is left out. <a href="/following">Calendars you follow</a></p> <h2 class="day">Today',
+    '<div data-whats-on="/busy" data-from="2026-11-20" data-to="2026-12-06" data-clashes="0"><h1>What\'s on</h1> <p class="muted">The next 14 days from the calendars you and your groups follow, when you\'re free: what overlaps something of yours is left out. <a href="/following">Calendars you follow</a></p> <p data-clash-toggle="0" hidden><a href="/whats-on?clashes=1">Show what clashes</a> <span class="muted" data-clash-count>(0 events overlap something of yours)</span></p> <p class="muted" data-none hidden>Nothing on when you\'re free in the next 14 days.</p><h2 class="day">Today',
   );
   // No place, no clash: nothing after its calendar.
   expect(page).toContain(
