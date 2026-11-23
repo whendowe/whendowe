@@ -33,6 +33,8 @@ function event(overrides: Partial<CanonicalEventRow> = {}): CanonicalEventRow {
     updatedAt: NOW,
     retainDays: 365,
     verifiedAt: null,
+    followedFrom: null,
+    followedUntil: null,
     ...overrides,
   };
 }

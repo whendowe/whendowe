@@ -89,9 +89,17 @@ export const canonicalEvent = sqliteTable(
     retainDays: integer("retain_days").notNull().default(365),
     // rc42: verified — answers count only from a mailed link or signed in. Null = not verified.
     verifiedAt: text("verified_at"),
+    // rc56/rc59: an event you went to from a followed calendar, "<calendar_id>/<uid>", and the
+    // revision its source last wrote (a number as text); it follows while that is its revision.
+    followedFrom: text("followed_from"),
+    followedUntil: text("followed_until"),
   },
   (t) => [
     index("canonical_event_group_idx").on(t.groupId),
+    // rc59: one event per person per followed event, so two taps of Going make one.
+    uniqueIndex("canonical_event_followed_uq")
+      .on(t.ownerId, t.followedFrom)
+      .where(sql`${t.followedFrom} IS NOT NULL`),
     check(
       "canonical_event_origin_chk",
       sql`${t.origin} IN ('user_edit', 'imported_from_calendar')`,

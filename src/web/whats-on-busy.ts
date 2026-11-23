@@ -6,6 +6,9 @@ import { html } from "./layout.js";
 // UTC and takes out what overlaps Google's busy times — or, when clashes are shown, dims it and
 // says "You have something then" — and a line says whether Google's busy times were counted.
 //
+// An event you're going to (rc59) is skipped: your Google copy of it is one of Google's busy
+// times, and it would clash with itself.
+//
 // Only timed busy times are used. Google's are always timed (busyFromSpans); whole days are
 // your own WhenDoWe events, which the server counted already, so an all-day event — which
 // clashes only with whole days (rc58) — is never touched here.
@@ -74,7 +77,7 @@ const SCRIPT = html`<script>
       }
       var list = spans(data.busy);
       if (list.length === 0) return;
-      var items = box.querySelectorAll(".on > li:not(.clash)"), more = 0;
+      var items = box.querySelectorAll(".on > li:not(.clash):not([data-going])"), more = 0;
       for (var i = 0; i < items.length; i++) {
         var li = items[i];
         if (!clashes(list, li.getAttribute("data-start"), li.getAttribute("data-end"))) continue;

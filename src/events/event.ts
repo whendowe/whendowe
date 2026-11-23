@@ -291,6 +291,12 @@ export async function createEvent(
      * members, and where someone is both, the terms named here win.
      */
     readonly people?: readonly GroupDefault[];
+    /**
+     * rc59: made by Going, from a followed event, "<calendar_id>/<uid>" (following/going.ts).
+     * It follows that event while its revision is the one its source last wrote, 1 here.
+     * A second for the same person and followed event is refused by a unique index.
+     */
+    readonly followedFrom?: string;
   },
 ): Promise<CanonicalEvent> {
   const others = await takingPart(storage, input);
@@ -311,10 +317,10 @@ export async function createEvent(
       sql: `INSERT INTO canonical_event
               (id, revision, origin, owner_id, group_id, title, description, location, all_day,
                start_local, end_local, tzid, rrule, status, created_at, updated_at, retain_days,
-               verified_at)
+               verified_at, followed_from, followed_until)
             VALUES (?, 1, 'user_edit', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                     -- Kept as long as its group keeps events (§10 rc21 *Retention*).
-                    coalesce((SELECT retain_days FROM person_group WHERE id = ?), 365), ?)`,
+                    coalesce((SELECT retain_days FROM person_group WHERE id = ?), 365), ?, ?, ?)`,
       params: [
         id,
         input.creatorId,
@@ -332,6 +338,8 @@ export async function createEvent(
         input.now,
         input.group?.group.id ?? null,
         verified ? input.now : null,
+        input.followedFrom ?? null,
+        input.followedFrom === undefined ? null : "1",
       ],
     },
     {

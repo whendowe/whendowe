@@ -206,7 +206,9 @@ it("a followed event's sheet: what it is, a link only if it is web, for its foll
   expect(sheet).toContain(
     '<a href="https://club.example/social?id=1" rel="noreferrer noopener">https://club.example/social?id=1</a>',
   );
-  expect(sheet).toContain("From Swing &lt;school&gt;.");
+  expect(sheet).toContain(
+    "From Swing &lt;school&gt;. It isn't an event of yours: nobody is asked anything about it.</p>",
+  );
   expect(sheet).toContain(`action="${WHATS_ON_PATH}/${calendarId}/invite"`);
   expect(sheet).toContain('<input type="hidden" name="e" value="tonight" />');
   expect(sheet).not.toContain("You have something then");
@@ -391,4 +393,89 @@ it("gives the page's script the days to ask Google about, and says when it can't
   );
   // Nothing on: nothing to take out, so no script.
   expect(withGoogle).not.toContain("globalThis.WhenDoWeWhatsOnBusy");
+});
+
+it("Going makes an event of yours, a POST with its CSRF; the sheet and the page then say so (rc59)", async () => {
+  const { b, csrf, calendarId } = await following();
+  const going = `${WHATS_ON_PATH}/${calendarId}/going`;
+  const sheet = await text(b, sheetPath({ calendarId, uid: "tonight" }));
+  expect(squash(sheet)).toContain(
+    `<form method="post" action="${going}"> <input type="hidden" name="csrf" value="${csrf}" /> <input type="hidden" name="e" value="tonight" /> <p><button type="submit">Going</button> <span class="muted">Make it an event of yours, in your calendar. Nobody is told.</span></p> </form>`,
+  );
+  const before = b.writes;
+  expect((await b.request(going, post({ csrf: "wrong", e: "tonight" }))).status).toBe(403);
+  expect(b.writes).toBe(before);
+  const res = await b.request(going, post({ csrf, e: "tonight" }));
+  expect(res.status).toBe(303);
+  const id = /^\/events\/(.+)$/.exec(res.headers.get("location") ?? "")?.[1] ?? "";
+  expect(await text(b, `/events/${id}`)).toContain("Social &lt;b&gt;night&lt;/b&gt;");
+  // Again: your event, not a second one.
+  const again = await b.request(going, post({ csrf, e: "tonight" }));
+  expect(again.headers.get("location")).toBe(`/events/${id}`);
+  // The sheet says you're going, and offers Going no more; Invite people stays.
+  const now = await text(b, sheetPath({ calendarId, uid: "tonight" }));
+  expect(now).toContain(
+    `<p><strong>You're going.</strong> It's <a href="/events/${id}">your event</a> now, in your calendar.</p>`,
+  );
+  expect(now).not.toContain(going);
+  expect(now).toContain("Invite people");
+  expect(now).toContain('aria-hidden="true"></span>From Swing &lt;school&gt;.</p>');
+  // What's on lists it as going, never as a clash with itself, and the script leaves it alone.
+  const page = squash(await text(b, WHATS_ON_PATH));
+  expect(page).toContain(
+    `<li class="fc-f1" data-going data-start="2026-11-21T18:00:00Z" data-end="2026-11-21T22:00:00Z">`,
+  );
+  expect(page).toContain(` · <a href="/events/${id}">You're going</a></li>`);
+  expect(page).not.toContain('Show what clashes</a> <span class="muted" data-clash-count>(1');
+  // Other events aren't marked.
+  expect(page.split('<li class="fc-f1" data-going').length).toBe(2);
+});
+
+it("Going: a cancelled event offers none, a moment can't be one, and others get not found", async () => {
+  const { b, csrf, calendarId } = await following();
+  const going = `${WHATS_ON_PATH}/${calendarId}/going`;
+  // Cancelled: no button, and a POST is not found.
+  expect(await text(b, sheetPath({ calendarId, uid: "gone" }))).not.toContain(going);
+  const before = b.writes;
+  expect((await b.request(going, post({ csrf, e: "gone" }))).status).toBe(404);
+  // A moment with no length: a line instead of the button, and a POST goes back to the sheet.
+  const bell = await text(b, sheetPath({ calendarId, uid: "bell" }));
+  expect(bell).toContain(
+    '<p class="muted">It has no length, so it can\'t be an event of yours.</p>',
+  );
+  expect(bell).not.toContain(going);
+  const moment = await b.request(going, post({ csrf, e: "bell" }));
+  expect(moment.status).toBe(303);
+  expect(moment.headers.get("location")).toBe(sheetPath({ calendarId, uid: "bell" }));
+  // Not followed, not there, no uid: not found.
+  expect((await b.request(going, post({ csrf, e: "nothing" }))).status).toBe(404);
+  expect((await b.request(going, post({ csrf }))).status).toBe(404);
+  expect(b.writes).toBe(before);
+  const carl = b.another();
+  await addAccount(carl, "carl@example.org");
+  const carlCsrf = (await home(carl)).csrf;
+  const signedIn = b.writes;
+  expect((await carl.request(going, post({ csrf: carlCsrf, e: "tonight" }))).status).toBe(404);
+  expect(b.writes).toBe(signedIn);
+  // Signed out: to sign in.
+  const out = await browser({ now: () => NOW });
+  expect((await out.request(going, post({ csrf: "x", e: "tonight" }))).status).toBe(303);
+});
+
+it("a cancelled event of yours from it: the sheet links to it, and the page lists it as before", async () => {
+  const { b, csrf, calendarId } = await following();
+  const going = `${WHATS_ON_PATH}/${calendarId}/going`;
+  const id = /^\/events\/(.+)$/.exec(
+    (await b.request(going, post({ csrf, e: "tonight" }))).headers.get("location") ?? "",
+  )?.[1];
+  await b.storage.query({
+    sql: "UPDATE canonical_event SET status = 'cancelled' WHERE id = ?",
+    params: [id ?? ""],
+  });
+  expect(await text(b, sheetPath({ calendarId, uid: "tonight" }))).toContain(
+    `<p>You cancelled <a href="/events/${id}">your event</a> from this.</p>`,
+  );
+  const page = await text(b, WHATS_ON_PATH);
+  expect(page).not.toContain('" data-going');
+  expect(page).not.toContain("You're going");
 });
