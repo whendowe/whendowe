@@ -200,6 +200,28 @@ function rezone(
     .toPlainDateTime();
 }
 
+/**
+ * rezone for a wall clock as text, as occurrences come, for one read of a feed. One that stays
+ * in its zone is used as it is, unparsed; one that moves is worked out once per time and zones,
+ * as a feed's series share their times (40 daily classes at 19:00 are 60 times, not 2400) and a
+ * zone's offset costs the polyfill most of a millisecond. It keeps up to 2000 occurrences.
+ */
+function rezoneText(
+  local: string,
+  from: string | null,
+  to: string | null,
+  seen: Map<string, string>,
+): string {
+  if (from === null || to === null || from === to) return local;
+  const key = `${from} ${to} ${local}`;
+  let found = seen.get(key);
+  if (found === undefined) {
+    found = rezone(Temporal.PlainDateTime.from(local), from, to).toString();
+    seen.set(key, found);
+  }
+  return found;
+}
+
 function instantOf(local: Temporal.PlainDateTime, zone: string): Temporal.Instant {
   return local.toZonedDateTime(zone, { disambiguation: "compatible" }).toInstant();
 }
@@ -337,6 +359,8 @@ function readEvent(props: Props, feedZone: string): Read {
 interface Window {
   readonly from: Temporal.Instant;
   readonly before: Temporal.Instant;
+  /** Wall clocks already moved between zones in this read (rezoneText). */
+  readonly rezoned: Map<string, string>;
 }
 
 function inWindow(
@@ -355,8 +379,8 @@ function inWindow(
 function row(
   e: Read,
   uid: string,
-  start: Temporal.PlainDateTime,
-  end: Temporal.PlainDateTime,
+  start: Temporal.PlainDateTime | string,
+  end: Temporal.PlainDateTime | string,
   status: FollowedEventRow["status"],
 ): FollowedEventRow {
   return {
@@ -399,8 +423,8 @@ function occurrences(
       row(
         master,
         `${master.uid}/${o.startLocal}`,
-        rezone(Temporal.PlainDateTime.from(o.startLocal), master.ruleZone, master.zone),
-        rezone(Temporal.PlainDateTime.from(o.endLocal), master.ruleZone, master.zone),
+        rezoneText(o.startLocal, master.ruleZone, master.zone, w.rezoned),
+        rezoneText(o.endLocal, master.ruleZone, master.zone, w.rezoned),
         master.fields.status,
       ),
     );
@@ -461,7 +485,7 @@ export function readFeed(text: string, now: string): ReadFeed {
 
   const feedZone = feedZoneOf(calendar.get("X-WR-TIMEZONE"));
   const from = Temporal.Instant.from(now);
-  const w: Window = { from, before: from.add({ hours: 24 * KEEP_DAYS }) };
+  const w: Window = { from, before: from.add({ hours: 24 * KEEP_DAYS }), rezoned: new Map() };
 
   let leftOut = 0;
   const masters = new Map<string, Read>();
