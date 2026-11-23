@@ -226,7 +226,7 @@ ${connect}`,
       ...(oauth === undefined ? {} : { googleBusy: googleBusySource(oauth, auth.capabilities) }),
     });
     registerOperatorRoutes(app, auth);
-    registerWhatsOnRoutes(app, auth);
+    registerWhatsOnRoutes(app, auth, { google: oauth !== undefined });
     registerFollowingRoutes(app, {
       ...auth,
       ...(options.publicGet === undefined ? {} : { publicGet: options.publicGet }),

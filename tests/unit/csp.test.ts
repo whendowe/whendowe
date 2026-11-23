@@ -9,6 +9,7 @@ import { CONTENT_SECURITY_POLICY, SCRIPT_HASHES } from "../../src/web/csp.js";
 import { SHARE_BUTTONS, ZONE_GUESS } from "../../src/web/layout.js";
 import { pickerAssets } from "../../src/web/picker.js";
 import { busyAssets, planAssets } from "../../src/web/plan-editor.js";
+import { whatsOnBusyAssets } from "../../src/web/whats-on-busy.js";
 
 // The CSP allows scripts by hash (DESIGN §13 rc21). These tests tie the hashes to the
 // scripts the pages actually ship, so changing a script without updating csp.ts fails
@@ -21,6 +22,7 @@ const SHIPPED = [
   planAssets().value,
   busyAssets().value,
   askDragAssets().value,
+  whatsOnBusyAssets().value,
 ];
 
 function bodyOf(assets: string): string {

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+import { answerBusy, asked } from "./busy.js";
 import { expect, type Page, test } from "./fixtures.js";
 
 // What's on when you're free (DESIGN §10 rc58), in a real browser: the next two weeks of what
@@ -34,6 +35,58 @@ test("what's on when you're free, and what clashes, dimmed", async ({ page }) =>
   await expect(social).toContainText("Friday social");
   await expect(social).toContainText("You have something then");
   await expect(page).toHaveScreenshot("whats-on-clashes.png", { fullPage: true });
+  expect(errors).toEqual([]);
+});
+
+// F2b: the page's script asks for Google's busy times (rc41) and takes out what overlaps them.
+// The beginners' class, Tuesday 19:00–20:30 in Prague, meets a Google busy hour from 18:00 UTC.
+const GOOGLE = [{ allDay: false, start: "2026-11-03T18:00", end: "2026-11-03T19:00" }];
+
+test("Google's busy times take out what overlaps them, or dim it when clashes are shown", async ({
+  page,
+}) => {
+  await answerBusy(page, { status: 200, busy: GOOGLE, google: "shown" });
+  const errors = await open(page, "whats-on");
+  await expect(page.locator(".busynote")).toHaveText("Your Google busy times are counted too.");
+  await expect(page.getByRole("link", { name: "Beginners' class" })).toBeHidden();
+  // Its day had nothing else: the heading goes too.
+  await expect(page.getByRole("heading", { name: "Tuesday 3 November" })).toBeHidden();
+  await expect(page.getByRole("link", { name: "Game night" })).toBeVisible();
+  // One left out by the server, one by Google.
+  await expect(page.locator("[data-clash-toggle]")).toContainText(
+    "(2 events overlap something of yours)",
+  );
+  // The same days the server counted, in UTC.
+  expect(await asked(page)).toEqual(["/busy?from=2026-10-23&to=2026-11-08&tz=UTC"]);
+  await expect(page).toHaveScreenshot("whats-on-google.png", { fullPage: true });
+
+  await open(page, "whats-on-clashes");
+  const clash = page.locator(".on > li.clash");
+  await expect(clash).toHaveCount(2);
+  await expect(clash.filter({ hasText: "Beginners' class" })).toContainText(
+    "You have something then",
+  );
+  expect(errors).toEqual([]);
+});
+
+test("says when Google's busy times couldn't be loaded, and takes nothing out", async ({
+  page,
+}) => {
+  await answerBusy(page, { status: 200, busy: [], google: "failed" });
+  const errors = await open(page, "whats-on");
+  await expect(page.locator(".busynote")).toHaveText("Couldn't load your Google busy times.");
+  await expect(page.getByRole("link", { name: "Beginners' class" })).toBeVisible();
+  await expect(page.locator("[data-clash-toggle]")).toContainText(
+    "(1 event overlaps something of yours)",
+  );
+  expect(errors).toEqual([]);
+});
+
+test("an answer that isn't one changes nothing", async ({ page }) => {
+  await answerBusy(page, { status: 500, busy: GOOGLE, google: "shown" });
+  const errors = await open(page, "whats-on");
+  await expect(page.getByRole("link", { name: "Beginners' class" })).toBeVisible();
+  await expect(page.locator(".busynote")).toHaveCount(0);
   expect(errors).toEqual([]);
 });
 

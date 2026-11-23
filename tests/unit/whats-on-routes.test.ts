@@ -7,6 +7,7 @@ import { findAskDraft } from "../../src/plans/ask.js";
 import { FOLLOWING_PATH } from "../../src/web/routes/following.js";
 import { sheetPath, WHATS_ON_PATH } from "../../src/web/routes/whats-on.js";
 import { addAccount, type Browser, browser, home, post } from "../property/one-browser.js";
+import { harness } from "./google-harness.js";
 
 // What's on when you're free (DESIGN §10 rc58): the next two weeks of what you follow, by day,
 // what clashes with something of yours left out unless asked for; a followed event's sheet
@@ -105,7 +106,10 @@ it("asks you to sign in, writes nothing, and is linked from home", async () => {
   expect(res.headers.get("cache-control")).toBe("private, no-store");
   const page = await res.text();
   expect(page).toContain("<h1>What's on</h1>");
-  expect(page).toContain("Nothing on in the next 14 days from the calendars you follow.");
+  // Nothing on: no toggle and no script, as there is nothing to take out (F2b).
+  expect(page.replace(/\s+/g, " ")).toContain(
+    '<a href="/following">Calendars you follow</a></p> <p class="muted">Nothing on in the next 14 days from the calendars you follow.</p></div> </body>',
+  );
   expect(b.writes).toBe(before);
 });
 
@@ -129,8 +133,8 @@ it("lists what's on by day, in the calendar's own time, escaped, cancelled left 
   // In order: tonight, tomorrow, the festival.
   expect(page.indexOf("Social &lt;b&gt;")).toBeLessThan(page.indexOf("Late jam"));
   expect(page.indexOf("Late jam")).toBeLessThan(page.indexOf("Festival"));
-  // Nothing clashes, so nothing to show.
-  expect(page).not.toContain("Show what clashes");
+  // Nothing clashes, so nothing to show — until the page's script finds Google's (F2b).
+  expect(page).toContain('<p data-clash-toggle="0" hidden><a href="/whats-on?clashes=1">');
 });
 
 it("leaves out what overlaps something of yours, and shows it dimmed when asked", async () => {
@@ -154,7 +158,7 @@ it("leaves out what overlaps something of yours, and shows it dimmed when asked"
   expect(page).not.toContain("Social &lt;b&gt;");
   expect(page).toContain("Late jam");
   expect(page).toContain(
-    `<a href="${WHATS_ON_PATH}?clashes=1">Show what clashes</a> <span class="muted">(1 event overlaps something of yours)</span>`,
+    `<p data-clash-toggle="1"><a href="${WHATS_ON_PATH}?clashes=1">Show what clashes</a> <span class="muted" data-clash-count>(1 event overlaps something of yours)</span></p>`,
   );
   const all = await text(b, `${WHATS_ON_PATH}?clashes=1`);
   expect(all).toContain('class="fc-f1 clash"');
@@ -181,7 +185,9 @@ it("says when everything clashes, and counts more than one", async () => {
     now: NOW,
   });
   const page = await text(b, WHATS_ON_PATH);
-  expect(page).toContain("Nothing on when you're free in the next 14 days.");
+  expect(page).toContain(
+    '<p class="muted" data-none>Nothing on when you\'re free in the next 14 days.</p>',
+  );
   expect(page).toContain("(7 events overlap something of yours)");
 });
 
@@ -272,9 +278,9 @@ it("draws each kind of time, and only what each event has", async () => {
   const { b, calendarId } = await following();
   const page = squash(await text(b, WHATS_ON_PATH));
   expect(page).toContain("<title>What&#39;s on · WhenDoWe</title>");
-  // Nothing clashes: nothing between the page's line and its first day.
+  // Nothing clashes: between the page's line and its first day, only what the script may show.
   expect(page).toContain(
-    '<h1>What\'s on</h1> <p class="muted">The next 14 days from the calendars you and your groups follow, when you\'re free: what overlaps something of yours is left out. <a href="/following">Calendars you follow</a></p> <h2 class="day">Today',
+    '<div data-whats-on="/busy" data-from="2026-11-20" data-to="2026-12-06" data-clashes="0"><h1>What\'s on</h1> <p class="muted">The next 14 days from the calendars you and your groups follow, when you\'re free: what overlaps something of yours is left out. <a href="/following">Calendars you follow</a></p> <p data-clash-toggle="0" hidden><a href="/whats-on?clashes=1">Show what clashes</a> <span class="muted" data-clash-count>(0 events overlap something of yours)</span></p> <p class="muted" data-none hidden>Nothing on when you\'re free in the next 14 days.</p><h2 class="day">Today',
   );
   // No place, no clash: nothing after its calendar.
   expect(page).toContain(
@@ -367,4 +373,22 @@ it("Invite people keeps to what an Ask holds", async () => {
   const body = (await findAskDraft(b.storage, { id, authorId: ann.id }))?.body;
   expect(body?.title).toBe("T".repeat(200));
   expect(body?.location).toBe("L".repeat(200));
+});
+
+it("gives the page's script the days to ask Google about, and says when it can't (F2b)", async () => {
+  const { b } = await following();
+  const page = await text(b, WHATS_ON_PATH);
+  // The same UTC days the server counted your own busy times over, a day either side.
+  expect(page).toContain('data-whats-on="/busy" data-from="2026-11-20" data-to="2026-12-06"');
+  expect(page).toContain("globalThis.WhenDoWeWhatsOnBusy");
+  expect(await text(b, `${WHATS_ON_PATH}?clashes=1`)).toContain('data-clashes="1"');
+  // An instance with no Google client has no Google busy times to miss.
+  expect(page).not.toContain("<noscript>");
+  const g = await harness();
+  const withGoogle = await g.page(WHATS_ON_PATH);
+  expect(withGoogle).toContain(
+    '<noscript><p class="small muted">Without JavaScript, your Google busy times aren\'t counted.</p></noscript>',
+  );
+  // Nothing on: nothing to take out, so no script.
+  expect(withGoogle).not.toContain("globalThis.WhenDoWeWhatsOnBusy");
 });

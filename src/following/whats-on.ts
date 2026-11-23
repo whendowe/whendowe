@@ -142,19 +142,26 @@ function onEvent(r: z.infer<typeof rowSchema>, c: Calendar, busy: readonly Busy[
 }
 
 /** Your busy times over the days around `now` that the page can reach, in UTC. */
-async function busyAround(storage: StoragePort, personId: string, now: string): Promise<Busy[]> {
+/**
+ * The busy times the page is checked against, as a GET /busy query (rc58): UTC days, with a
+ * day either side, as an event's own date may be a day off UTC's. The page's script asks for
+ * the same range, for Google's part.
+ */
+export function busyRange(now: string): {
+  readonly from: string;
+  readonly to: string;
+  readonly tz: "UTC";
+} {
   const today = Temporal.Instant.from(now).toZonedDateTimeISO("UTC").toPlainDate();
-  return ownBusy(
-    storage,
-    personId,
-    {
-      // A day either side: an event's own date may be a day off UTC's.
-      from: today.subtract({ days: 1 }).toString(),
-      to: today.add({ days: WHATS_ON_DAYS + 1 }).toString(),
-      tz: "UTC",
-    },
-    now,
-  );
+  return {
+    from: today.subtract({ days: 1 }).toString(),
+    to: today.add({ days: WHATS_ON_DAYS + 1 }).toString(),
+    tz: "UTC",
+  };
+}
+
+function busyAround(storage: StoragePort, personId: string, now: string): Promise<Busy[]> {
+  return ownBusy(storage, personId, busyRange(now), now);
 }
 
 const EVENT_COLUMNS = `e.calendar_id, e.uid, e.title, e.location, e.description, e.url,
