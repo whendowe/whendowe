@@ -5,6 +5,7 @@ import type { StoragePort } from "../db/port.js";
 import { stmt } from "../db/port.js";
 import { type Busy, ownBusy } from "../feeds/busy.js";
 import { type FollowColour, followsFor } from "./follow.js";
+import { followedKey, type Going, goingAll, goingTo } from "./going.js";
 
 // What's on when you're free (DESIGN §10 rc58): the next two weeks of what the calendars you
 // and your groups follow hold, at whatever time it is, each event once. What overlaps anything
@@ -37,8 +38,13 @@ export interface OnEvent {
   readonly calendarName: string;
   readonly calendarUrl: string;
   readonly colour: FollowColour;
-  /** It overlaps something of yours. */
+  /**
+   * It overlaps something of yours. Never one you're going to (rc59): your event from it is
+   * one of your busy times, and it would clash with itself.
+   */
   readonly clashes: boolean;
+  /** Your event from it, if you went (rc59). */
+  readonly going: Going | null;
 }
 
 const rowSchema = z.object({
@@ -114,7 +120,12 @@ async function calendarsOf(storage: StoragePort, personId: string): Promise<Map<
   return calendars;
 }
 
-function onEvent(r: z.infer<typeof rowSchema>, c: Calendar, busy: readonly Busy[]): OnEvent {
+function onEvent(
+  r: z.infer<typeof rowSchema>,
+  c: Calendar,
+  busy: readonly Busy[],
+  going: Going | null,
+): OnEvent {
   const allDay = r.all_day === 1;
   const timed = allDay
     ? { startUtc: null, endUtc: null }
@@ -138,10 +149,10 @@ function onEvent(r: z.infer<typeof rowSchema>, c: Calendar, busy: readonly Busy[
     calendarUrl: c.url,
     colour: c.colour,
   };
-  return { ...e, clashes: clashes(e, busy) };
+  const goes = going !== null && !going.cancelled;
+  return { ...e, clashes: !goes && clashes(e, busy), going };
 }
 
-/** Your busy times over the days around `now` that the page can reach, in UTC. */
 /**
  * The busy times the page is checked against, as a GET /busy query (rc58): UTC days, with a
  * day either side, as an event's own date may be a day off UTC's. The page's script asks for
@@ -160,6 +171,7 @@ export function busyRange(now: string): {
   };
 }
 
+/** Your busy times over the days around `now` that the page can reach, in UTC. */
 function busyAround(storage: StoragePort, personId: string, now: string): Promise<Busy[]> {
   return ownBusy(storage, personId, busyRange(now), now);
 }
@@ -186,9 +198,10 @@ export async function whatsOn(
   // Wall clocks differ by at most a day across zones, so a day's margin each way finds every
   // candidate by its stored text; each is then checked by its own instants.
   const utc = (i: Temporal.Instant) => i.toZonedDateTimeISO("UTC").toPlainDate();
-  const [calendars, busy, rows] = await Promise.all([
+  const [calendars, busy, going, rows] = await Promise.all([
     calendarsOf(storage, personId),
     busyAround(storage, personId, now),
+    goingAll(storage, personId),
     storage.query(
       stmt(
         `SELECT ${EVENT_COLUMNS} FROM followed_event e
@@ -210,7 +223,12 @@ export async function whatsOn(
     const r = rowSchema.parse(row);
     const calendar = calendars.get(r.calendar_id);
     if (calendar === undefined) continue;
-    const e = onEvent(r, calendar, busy);
+    const e = onEvent(
+      r,
+      calendar,
+      busy,
+      going.get(followedKey({ calendarId: r.calendar_id, uid: r.uid })) ?? null,
+    );
     if (e.startUtc !== null && e.endUtc !== null) {
       const s = Temporal.Instant.from(e.startUtc);
       const end = Temporal.Instant.from(e.endUtc);
@@ -258,6 +276,9 @@ export async function followedEvent(
   );
   if (row === undefined) return null;
   const r = rowSchema.extend({ status: z.enum(["confirmed", "cancelled"]) }).parse(row);
-  const busy = await busyAround(storage, personId, now);
-  return { ...onEvent(r, calendar, busy), cancelled: r.status === "cancelled" };
+  const [busy, going] = await Promise.all([
+    busyAround(storage, personId, now),
+    goingTo(storage, personId, { calendarId, uid }),
+  ]);
+  return { ...onEvent(r, calendar, busy, going), cancelled: r.status === "cancelled" };
 }

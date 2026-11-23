@@ -2,6 +2,7 @@
 import type { Context, Hono } from "hono";
 import { Temporal } from "temporal-polyfill";
 import type { StoragePort } from "../../db/port.js";
+import { go, goingFields } from "../../following/going.js";
 import {
   busyRange,
   followedEvent,
@@ -11,7 +12,7 @@ import {
 } from "../../following/whats-on.js";
 import { uuidv7 } from "../../ids.js";
 import { type AskBody, saveAskDraft, startAskDraft } from "../../plans/ask.js";
-import { BUSY_PATH, type Html, html } from "../layout.js";
+import { BUSY_PATH, EVENTS_PATH, type Html, html } from "../layout.js";
 import {
   type AppEnv,
   page,
@@ -101,12 +102,21 @@ const STYLE = html`<style>
   .sheet .description { white-space: pre-line; }
 </style>`;
 
+/** You're going to it (rc59), and haven't cancelled your event. */
+const goes = (e: OnEvent) => e.going !== null && !e.going.cancelled;
+
 function item(e: OnEvent): Html {
-  return html`<li class="fc-${e.colour}${e.clashes ? " clash" : ""}" data-start="${e.startUtc ?? ""}" data-end="${e.endUtc ?? ""}">
+  // An event you're going to is left alone by the page's script too: your Google copy of it is
+  // one of Google's busy times (rc59).
+  return html`<li class="fc-${e.colour}${e.clashes ? " clash" : ""}"${goes(e) ? " data-going" : ""} data-start="${e.startUtc ?? ""}" data-end="${e.endUtc ?? ""}">
 <span class="when">${timeText(e)}</span><a href="${sheetPath(e)}"><strong>${e.title}</strong></a>${
     e.location === null ? "" : html` <span class="muted">· ${e.location}</span>`
   }<br /><span class="muted"><span class="fc-dot" aria-hidden="true"></span>${e.calendarName}</span>${
     e.clashes ? html` <span class="muted">· You have something then</span>` : ""
+  }${
+    goes(e) && e.going !== null
+      ? html` · <a href="${EVENTS_PATH}/${e.going.eventId}">You're going</a>`
+      : ""
   }</li>`;
 }
 
@@ -148,6 +158,27 @@ ${all.length === 0 ? "" : toggle}
 ${body}</div>${all.length === 0 ? "" : whatsOnBusyAssets()}`;
 }
 
+/**
+ * Going, on a followed event's sheet (rc59): the button, or your event once you went — never
+ * the button again, as one followed event makes one event of yours.
+ */
+function goingPart(e: OnEvent & { readonly cancelled: boolean }, me: SignedIn): Html | string {
+  if (e.going !== null) {
+    const yours = html`<a href="${EVENTS_PATH}/${e.going.eventId}">your event</a>`;
+    return e.going.cancelled
+      ? html`<p>You cancelled ${yours} from this.</p>`
+      : html`<p><strong>You're going.</strong> It's ${yours} now, in your calendar.</p>`;
+  }
+  if (e.cancelled) return "";
+  if (goingFields(e) === null)
+    return html`<p class="muted">It has no length, so it can't be an event of yours.</p>`;
+  return html`<form method="post" action="${WHATS_ON_PATH}/${encodeURIComponent(e.calendarId)}/going">
+  <input type="hidden" name="csrf" value="${me.csrfToken}" />
+  <input type="hidden" name="e" value="${e.uid}" />
+  <p><button type="submit">Going</button> <span class="muted">Make it an event of yours, in your calendar. Nobody is told.</span></p>
+</form>`;
+}
+
 function sheetPage(e: OnEvent & { readonly cancelled: boolean }, me: SignedIn): Html {
   const day = dayText(e.startLocal.slice(0, 10));
   return html`${FOLLOW_STYLE}${STYLE}<div class="sheet fc-${e.colour}">
@@ -157,9 +188,10 @@ ${e.cancelled ? html`<p class="error">Cancelled.</p>` : ""}
 ${e.location === null ? "" : html`<p>${e.location}</p>`}
 ${e.description === null ? "" : html`<p class="description">${e.description}</p>`}
 ${feedLink(e.url)}
-<p class="muted"><span class="fc-dot" aria-hidden="true"></span>From ${e.calendarName}. It isn't an event of yours: nobody is asked anything about it.</p>
+<p class="muted"><span class="fc-dot" aria-hidden="true"></span>From ${e.calendarName}.${goes(e) ? "" : html` It isn't an event of yours: nobody is asked anything about it.`}</p>
 ${e.clashes ? html`<p class="muted">You have something then.</p>` : ""}
 </div>
+${goingPart(e, me)}
 ${
   e.cancelled
     ? ""
@@ -228,6 +260,27 @@ export function registerWhatsOnRoutes(
     );
     if (e === null) return notFound(c);
     return c.html(page(c, e.title, sheetPage(e, me)));
+  });
+
+  // Going makes an event of yours (rc59), so it is a POST (§13: GET never mutates).
+  app.post(`${WHATS_ON_PATH}/:calendar/going`, async (c) => {
+    const me = requireSignedIn(c);
+    if (me instanceof Response) return me;
+    const form = await c.req.parseBody();
+    if (!(await verifyFormCsrf(me, form))) return rejectedPage(c, form);
+    const uid = typeof form.e === "string" ? form.e : "";
+    const e = await followedEvent(
+      deps.storage,
+      me.personId,
+      c.req.param("calendar"),
+      uid,
+      deps.now(),
+    );
+    // A cancelled one offers no Going; one you went to before goes to your event.
+    if (e === null || (e.cancelled && e.going === null)) return notFound(c);
+    const went = await go(deps.storage, { personId: me.personId, event: e, now: deps.now() });
+    if (went.kind === "moment") return c.redirect(sheetPath(e), 303);
+    return c.redirect(`${EVENTS_PATH}/${went.eventId}`, 303);
   });
 
   // Starting an Ask writes a draft, so it is a POST (§13: GET never mutates).
