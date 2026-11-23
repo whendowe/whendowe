@@ -11,6 +11,7 @@ import { CONFIRM_PATH, SIGN_IN_PATH, SWITCH_PATH } from "../../src/web/routes/au
 import { FOLLOWING_PATH } from "../../src/web/routes/following.js";
 import { GROUPS_PATH } from "../../src/web/routes/groups.js";
 import { PLANS_PATH } from "../../src/web/routes/plans.js";
+import { sheetPath, WHATS_ON_PATH } from "../../src/web/routes/whats-on.js";
 import { loadMigrationSql } from "../conftest.js";
 
 // Renders the pages the browser tier drives (DESIGN §9 rc16) through the app itself —
@@ -407,6 +408,22 @@ await app.request(
     cookie,
   ),
 );
+// What's on when you're free (rc58): the two calendars' events, one of them clashing with
+// the table's game night; and the Lindy Hop social's sheet.
+const lindyCalendar = must(
+  String(
+    (
+      await client.execute({
+        sql: "SELECT id FROM followed_calendar WHERE url LIKE ?",
+        args: ["%lindy%"],
+      })
+    ).rows[0]?.id ?? "",
+  ),
+  "the lindy calendar",
+);
+pages["whats-on"] = WHATS_ON_PATH;
+pages["whats-on-clashes"] = `${WHATS_ON_PATH}?clashes=1`;
+pages["whats-on-sheet"] = sheetPath({ calendarId: lindyCalendar, uid: "social" });
 // The table's calendar shared with people outside it (rc36): two links, at both tiers.
 await app.request(
   `${group}/shared`,
