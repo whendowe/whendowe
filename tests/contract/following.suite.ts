@@ -916,8 +916,12 @@ export function runFollowingContract(makePort: () => Promise<StoragePort>): void
       const odd = ["UID:odd", "DTSTART:20261127T180000Z", "RDATE:20261128T180000Z", "SUMMARY:Odd"];
       await refreshCalendar(port, server(answer(200, CAL(SOCIAL, odd))).get, one.calendarId, T0);
       await refreshCalendar(port, server(answer(200, CAL(SOCIAL, CLASS))).get, two.calendarId, T0);
+      // Both calendars have the same name, so followsFor's own order between them is its last
+      // tiebreak, the follow's id, random within a millisecond: compare them by address.
       expect(
-        (await followsFor(port, ann)).map((f) => [f.url.slice(-6), f.kept, f.leftOut]),
+        (await followsFor(port, ann))
+          .map((f) => [f.url.slice(-6), f.kept, f.leftOut] as const)
+          .sort((x, y) => (x[0] < y[0] ? -1 : 1)),
       ).toEqual([
         ["-1.ics", 1, 1],
         ["-2.ics", 2, 0],
