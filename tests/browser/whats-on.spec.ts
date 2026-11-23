@@ -90,12 +90,43 @@ test("an answer that isn't one changes nothing", async ({ page }) => {
   expect(errors).toEqual([]);
 });
 
-test("a followed event's sheet, with Invite people", async ({ page }) => {
+test("a followed event's sheet, with Going and Invite people", async ({ page }) => {
   const errors = await open(page, "whats-on-sheet");
+  await expect(page.getByRole("button", { name: "Going" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Friday social" })).toBeVisible();
   await expect(page.getByText("From Lindy Hop.")).toBeVisible();
   await expect(page.getByRole("button", { name: "Invite people" })).toBeVisible();
   await expect(page).toHaveScreenshot("whats-on-sheet.png", { fullPage: true });
+  expect(errors).toEqual([]);
+});
+
+// Going (rc59): the DM went to the beginners' class. What's on lists it as going and links to
+// the event; the page's script leaves it alone though Google is busy then, as the Google copy
+// of it is.
+test("what you're going to is listed as going, and Google's busy times leave it alone", async ({
+  page,
+}) => {
+  await answerBusy(page, { status: 200, busy: GOOGLE, google: "shown" });
+  const errors = await open(page, "whats-on-going");
+  await expect(page.locator(".busynote")).toHaveText("Your Google busy times are counted too.");
+  const going = page.locator(".on > li[data-going]");
+  await expect(going).toHaveCount(1);
+  await expect(going).toContainText("Beginners' class");
+  await expect(going.getByRole("link", { name: "You're going" })).toHaveAttribute(
+    "href",
+    /^\/events\//,
+  );
+  await expect(going).not.toHaveClass(/clash/);
+  await expect(page.locator("[data-clash-toggle]")).toContainText(
+    "(1 event overlaps something of yours)",
+  );
+  await expect(page).toHaveScreenshot("whats-on-going.png", { fullPage: true });
+
+  await open(page, "whats-on-going-sheet");
+  await expect(page.getByText("You're going.")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Going" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Invite people" })).toBeVisible();
+  await expect(page).toHaveScreenshot("whats-on-going-sheet.png", { fullPage: true });
   expect(errors).toEqual([]);
 });
 
@@ -115,5 +146,9 @@ test.describe("without JavaScript (DESIGN rc15: every form works without it)", (
     await expect(invite).toHaveAttribute("method", "post");
     await expect(invite.locator('input[name="csrf"]')).toHaveCount(1);
     await expect(invite.locator('input[name="e"]')).toHaveValue("social");
+    const going = page.locator("form", { has: page.getByRole("button", { name: "Going" }) });
+    await expect(going).toHaveAttribute("method", "post");
+    await expect(going.locator('input[name="csrf"]')).toHaveCount(1);
+    await expect(going.locator('input[name="e"]')).toHaveValue("social");
   });
 });

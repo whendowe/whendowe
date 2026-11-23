@@ -1,10 +1,16 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, expect, it } from "vitest";
 import type { StoragePort } from "../../src/db/port.js";
-import { createEvent } from "../../src/events/event.js";
+import {
+  createEvent,
+  deleteEvent,
+  findEventForParticipant,
+  setCancelled,
+} from "../../src/events/event.js";
 import type { PublicGet } from "../../src/following/fetch.js";
 import { follow, recolourFollow, refreshCalendar } from "../../src/following/follow.js";
-import { followedEvent, whatsOn } from "../../src/following/whats-on.js";
+import { go, goingTo } from "../../src/following/going.js";
+import { followedEvent, type OnEvent, whatsOn } from "../../src/following/whats-on.js";
 import { createGroup, findGroupForMember } from "../../src/people/group.js";
 import { acceptInvite, createInvite } from "../../src/people/invite.js";
 import { findOrCreatePerson } from "../../src/people/person.js";
@@ -12,6 +18,7 @@ import { findOrCreatePerson } from "../../src/people/person.js";
 // What's on when you're free (DESIGN §10 rc58) on BOTH drivers: the next two weeks of what you
 // and your groups follow, each event once in your own follow's colour, cancelled ones left out,
 // what overlaps something of yours marked; and a followed event found only by its followers.
+// Going (rc59): a followed event made an event of yours, one per person, shown as going.
 
 const T0 = "2026-11-21T12:00:00.000Z";
 
@@ -230,6 +237,151 @@ export function runWhatsOnContract(makePort: () => Promise<StoragePort>): void {
         cancelled: true,
         colour: "f1",
       });
+    });
+  });
+
+  describe("going (rc59)", () => {
+    const followed = async (
+      port: StoragePort,
+      personId: string,
+      calendarId: string,
+      uid: string,
+    ) => {
+      const e = await followedEvent(port, personId, calendarId, uid, T0);
+      if (e === null) throw new Error(`no ${uid}`);
+      return e;
+    };
+    const yours = async (port: StoragePort, personId: string, eventId: string) => {
+      const access = await findEventForParticipant(port, eventId, personId);
+      if (access === null) throw new Error("not yours");
+      return access;
+    };
+
+    it("makes an event of yours, just you, with its title, place, description and time", async () => {
+      const port = await makePort();
+      const s = await school(port, "go");
+      const social = await followed(port, s.ann, s.calendarId, "social");
+      const went = await go(port, { personId: s.ann, event: social, now: T0 });
+      if (went.kind !== "made") throw new Error(went.kind);
+      const access = await yours(port, s.ann, went.eventId);
+      expect(access.event).toMatchObject({
+        title: "social",
+        location: "Hall",
+        description: null,
+        allDay: false,
+        startLocal: "2026-11-26T19:00:00",
+        endLocal: "2026-11-26T22:00:00",
+        tzid: "Europe/Prague",
+        rrule: null,
+        status: "scheduled",
+        groupId: null,
+        ownerId: s.ann,
+      });
+      // Nobody else is in it: not Bob, who follows the calendar through the group.
+      expect(await findEventForParticipant(port, went.eventId, s.bob)).toBeNull();
+      const [row] = await port.query({
+        sql: "SELECT followed_from, followed_until FROM canonical_event WHERE id = ?",
+        params: [went.eventId],
+      });
+      expect(row).toEqual({ followed_from: `${s.calendarId}/social`, followed_until: "1" });
+      expect(await goingTo(port, s.ann, social)).toEqual({
+        eventId: went.eventId,
+        cancelled: false,
+      });
+      expect(await goingTo(port, s.bob, social)).toBeNull();
+      // An event made otherwise came from nowhere, and follows nothing.
+      const mine = await createEvent(port, {
+        creatorId: s.ann,
+        group: null,
+        fields: {
+          title: "Mine",
+          description: null,
+          location: null,
+          allDay: false,
+          startLocal: "2026-12-03T19:00",
+          endLocal: "2026-12-03T20:00",
+          tzid: "Europe/Prague",
+        },
+        now: T0,
+      });
+      const [plain] = await port.query({
+        sql: "SELECT followed_from, followed_until FROM canonical_event WHERE id = ?",
+        params: [mine.id],
+      });
+      expect(plain).toEqual({ followed_from: null, followed_until: null });
+      // A whole-day one, as days.
+      const fest = await go(port, {
+        personId: s.ann,
+        event: await followed(port, s.ann, s.calendarId, "fest"),
+        now: T0,
+      });
+      if (fest.kind !== "made") throw new Error(fest.kind);
+      expect((await yours(port, s.ann, fest.eventId)).event).toMatchObject({
+        allDay: true,
+        startLocal: "2026-11-28",
+        endLocal: "2026-11-30",
+        tzid: null,
+      });
+    });
+
+    it("makes one per person, however many taps, and each follower their own", async () => {
+      const port = await makePort();
+      const s = await school(port, "once");
+      const social = await followed(port, s.ann, s.calendarId, "social");
+      // Two at once: both look first and find nothing, and the index makes the second the first.
+      const [a, b] = await Promise.all([
+        go(port, { personId: s.ann, event: social, now: T0 }),
+        go(port, { personId: s.ann, event: social, now: T0 }),
+      ]);
+      if (a.kind === "moment" || b.kind === "moment") throw new Error("moment");
+      expect(a.eventId).toBe(b.eventId);
+      expect([a.kind, b.kind].sort()).toEqual(["already", "made"]);
+      const again = await go(port, { personId: s.ann, event: social, now: T0 });
+      expect(again).toEqual({ kind: "already", eventId: a.eventId });
+      const [count] = await port.query({
+        sql: "SELECT count(*) AS n FROM canonical_event WHERE owner_id = ?",
+        params: [s.ann],
+      });
+      expect(count).toEqual({ n: 1 });
+      const bob = await go(port, { personId: s.bob, event: social, now: T0 });
+      expect(bob.kind).toBe("made");
+    });
+
+    it("refuses a moment with no length, which can't be an event", async () => {
+      const port = await makePort();
+      const s = await school(port, "moment", EDGES);
+      const moment = await followed(port, s.ann, s.calendarId, "moment");
+      expect(await go(port, { personId: s.ann, event: moment, now: T0 })).toEqual({
+        kind: "moment",
+      });
+    });
+
+    it("what's on shows what you're going to as going, never as a clash with itself", async () => {
+      const port = await makePort();
+      const s = await school(port, "shown");
+      const social = await followed(port, s.ann, s.calendarId, "social");
+      const went = await go(port, { personId: s.ann, event: social, now: T0 });
+      if (went.kind !== "made") throw new Error(went.kind);
+      const on = (list: readonly OnEvent[], uid: string) => list.find((e) => e.uid === uid);
+      expect(on(await whatsOn(port, s.ann, T0), "social")).toMatchObject({
+        clashes: false,
+        going: { eventId: went.eventId, cancelled: false },
+      });
+      expect(on(await whatsOn(port, s.ann, T0), "class")).toMatchObject({ going: null });
+      // Bob didn't go: his is his own.
+      expect(on(await whatsOn(port, s.bob, T0), "social")).toMatchObject({ going: null });
+      // Cancelled, it is no longer going, and nothing of yours is busy then.
+      const access = await yours(port, s.ann, went.eventId);
+      expect((await setCancelled(port, access, { cancelled: true, now: T0 })).kind).toBe("done");
+      expect(on(await whatsOn(port, s.ann, T0), "social")).toMatchObject({
+        clashes: false,
+        going: { eventId: went.eventId, cancelled: true },
+      });
+      // Deleted, it was never gone to, and Going makes a new one.
+      const cancelled = await yours(port, s.ann, went.eventId);
+      expect((await deleteEvent(port, cancelled, T0)).kind).toBe("deleted");
+      expect(on(await whatsOn(port, s.ann, T0), "social")).toMatchObject({ going: null });
+      expect((await go(port, { personId: s.ann, event: social, now: T0 })).kind).toBe("made");
     });
   });
 }

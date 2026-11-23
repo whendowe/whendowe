@@ -440,6 +440,22 @@ for (const [name, path] of Object.entries(pages)) {
   writeFileSync(new URL(`${name}.html`, OUT), await res.text());
 }
 
+// Going (rc59), after the pages above so they are drawn before it: the DM goes to the
+// beginners' class, and What's on and its sheet say so.
+const going = await app.request(
+  `${WHATS_ON_PATH}/${encodeURIComponent(lindyCalendar)}/going`,
+  asPost({ csrf: await csrfOf(cookie), e: "class" }, cookie),
+);
+if (going.status !== 303) throw new Error(`Going answered ${going.status}`);
+for (const [name, path] of [
+  ["whats-on-going", WHATS_ON_PATH],
+  ["whats-on-going-sheet", sheetPath({ calendarId: lindyCalendar, uid: "class" })],
+] as const) {
+  const res = await app.request(path, { headers: { cookie } });
+  if (res.status !== 200) throw new Error(`${path} answered ${res.status}`);
+  writeFileSync(new URL(`${name}.html`, OUT), await res.text());
+}
+
 // What the grandparents see: the details link opened with no account at all.
 const groupPage = await (await app.request(group, { headers: { cookie } })).text();
 const calendarLink = must(
