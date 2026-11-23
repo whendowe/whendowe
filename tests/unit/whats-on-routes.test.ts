@@ -2,6 +2,7 @@
 import { expect, it } from "vitest";
 import { createEvent } from "../../src/events/event.js";
 import type { PublicGet } from "../../src/following/fetch.js";
+import { refreshCalendar } from "../../src/following/follow.js";
 import { findOrCreatePerson } from "../../src/people/person.js";
 import { findAskDraft } from "../../src/plans/ask.js";
 import { FOLLOWING_PATH } from "../../src/web/routes/following.js";
@@ -478,4 +479,68 @@ it("a cancelled event of yours from it: the sheet links to it, and the page list
   const page = await text(b, WHATS_ON_PATH);
   expect(page).not.toContain('" data-going');
   expect(page).not.toContain("You're going");
+});
+
+/** The feed again, as a server would answer it, with `edit` applied to its text. */
+const servingWith =
+  (edit: (feed: string) => string): PublicGet =>
+  async () => ({
+    status: 200,
+    header: () => null,
+    body: {
+      getReader: () => {
+        const chunks = [new TextEncoder().encode(edit(FEED))];
+        return {
+          read: async () => {
+            const value = chunks.shift();
+            return value === undefined ? { done: true } : { done: false, value };
+          },
+          cancel: async () => {},
+        };
+      },
+    },
+  });
+
+it("your event's page: the calendar's changes in its history, and its cancelling (rc59, F3b)", async () => {
+  const { b, csrf, calendarId } = await following();
+  const id = /^\/events\/(.+)$/.exec(
+    (
+      await b.request(`${WHATS_ON_PATH}/${calendarId}/going`, post({ csrf, e: "tonight" }))
+    ).headers.get("location") ?? "",
+  )?.[1];
+  const moved = servingWith((f) => f.replace("LOCATION:Hall & bar", "LOCATION:Old Mill"));
+  await refreshCalendar(b.storage, moved, calendarId, NOW);
+  const page = squash(await text(b, `/events/${id}`));
+  expect(page).toContain("📍 Old Mill");
+  // By the name she follows it under, escaped; nobody's name, as nobody made it.
+  expect(page).toContain(
+    '<span class="muted">2026-11-21 12:00</span> · changed it in Swing &lt;school&gt;<ul><li>location: Hall &amp; bar → Old Mill</li></ul>',
+  );
+  // Nothing cancelled: nothing between the title and the time.
+  expect(page).toContain("</h1> <p>2026-11-21 19:00 – 23:00 · Europe/Prague</p>");
+  expect(page).not.toContain("cancelled this");
+  const cancelled = servingWith((f) =>
+    f.replace("LOCATION:Hall & bar", "LOCATION:Old Mill\r\nSTATUS:CANCELLED"),
+  );
+  await refreshCalendar(b.storage, cancelled, calendarId, NOW);
+  expect(await text(b, `/events/${id}`)).toContain(
+    "<p class=\"attn\">Swing &lt;school&gt; cancelled this. It's still yours: cancel or delete it if you're not going.</p>",
+  );
+  // Cancelled by her too: nothing more to say.
+  await b.storage.query({
+    sql: "UPDATE canonical_event SET status = 'cancelled' WHERE id = ?",
+    params: [id ?? ""],
+  });
+  expect(await text(b, `/events/${id}`)).not.toContain("cancelled this");
+  await b.storage.query({
+    sql: "UPDATE canonical_event SET status = 'scheduled' WHERE id = ?",
+    params: [id ?? ""],
+  });
+  // Once she stops following it, the history says "its calendar", and the page says no more.
+  const following_ = await text(b, FOLLOWING_PATH);
+  const followId = /action="\/following\/([^"/]+)\/stop"/.exec(following_)?.[1] ?? "";
+  expect((await b.request(`${FOLLOWING_PATH}/${followId}/stop`, post({ csrf }))).status).toBe(303);
+  const after = squash(await text(b, `/events/${id}`));
+  expect(after).toContain("· changed it in its calendar<ul>");
+  expect(after).not.toContain("cancelled this");
 });

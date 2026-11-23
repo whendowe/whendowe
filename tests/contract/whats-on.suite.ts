@@ -4,12 +4,19 @@ import type { StoragePort } from "../../src/db/port.js";
 import {
   createEvent,
   deleteEvent,
+  editEvent,
   findEventForParticipant,
+  listHistory,
   setCancelled,
 } from "../../src/events/event.js";
 import type { PublicGet } from "../../src/following/fetch.js";
-import { follow, recolourFollow, refreshCalendar } from "../../src/following/follow.js";
-import { go, goingTo } from "../../src/following/going.js";
+import {
+  follow,
+  recolourFollow,
+  refreshCalendar,
+  stopFollowing,
+} from "../../src/following/follow.js";
+import { cancelledBy, followSource, go, goingTo } from "../../src/following/going.js";
 import { followedEvent, type OnEvent, whatsOn } from "../../src/following/whats-on.js";
 import { createGroup, findGroupForMember } from "../../src/people/group.js";
 import { acceptInvite, createInvite } from "../../src/people/invite.js";
@@ -142,6 +149,9 @@ async function school(port: StoragePort, tag: string, feed = FEED) {
     carl: carl.id,
     membership,
     calendarId: own.calendarId,
+    ownFollowId: own.followId,
+    groupFollowId: forGroup.followId,
+    groupId: group.id,
   };
 }
 
@@ -382,6 +392,306 @@ export function runWhatsOnContract(makePort: () => Promise<StoragePort>): void {
       expect((await deleteEvent(port, cancelled, T0)).kind).toBe("deleted");
       expect(on(await whatsOn(port, s.ann, T0), "social")).toMatchObject({ going: null });
       expect((await go(port, { personId: s.ann, event: social, now: T0 })).kind).toBe("made");
+    });
+  });
+
+  describe("following the source (rc59, F3b)", () => {
+    const LATER_T = "2026-11-22T12:00:00.000Z";
+    /** The feed with the social moved an hour later, renamed and elsewhere. */
+    const MOVED = FEED.replace("DTSTART:20261126T180000Z", "DTSTART:20261126T190000Z")
+      .replace("DTEND:20261126T210000Z", "DTEND:20261126T220000Z")
+      .replace("SUMMARY:social", "SUMMARY:Social night")
+      .replace("LOCATION:Hall", "LOCATION:Old Mill");
+    const gone = async (port: StoragePort, s: { ann: string; calendarId: string }) => {
+      const social = await followedEvent(port, s.ann, s.calendarId, "social", T0);
+      if (social === null) throw new Error("social");
+      const went = await go(port, { personId: s.ann, event: social, now: T0 });
+      if (went.kind === "moment") throw new Error("moment");
+      return went.eventId;
+    };
+    const yours = async (port: StoragePort, personId: string, eventId: string) => {
+      const access = await findEventForParticipant(port, eventId, personId);
+      if (access === null) throw new Error("not yours");
+      return access;
+    };
+    const until = async (port: StoragePort, eventId: string) =>
+      (
+        await port.query({
+          sql: "SELECT followed_until FROM canonical_event WHERE id = ?",
+          params: [eventId],
+        })
+      )[0]?.followed_until;
+
+    it("a moved source moves yours, everything Going copied, logged as from its calendar", async () => {
+      const port = await makePort();
+      const s = await school(port, "moves");
+      const id = await gone(port, s);
+      await refreshCalendar(port, serving(MOVED), s.calendarId, LATER_T);
+      const access = await yours(port, s.ann, id);
+      expect(access.event).toMatchObject({
+        title: "Social night",
+        location: "Old Mill",
+        startLocal: "2026-11-26T20:00:00",
+        endLocal: "2026-11-26T23:00:00",
+        tzid: "Europe/Prague",
+        revision: 2,
+        status: "scheduled",
+      });
+      expect(await until(port, id)).toBe("2");
+      const [latest] = await listHistory(port, access);
+      expect(latest).toMatchObject({
+        revision: 2,
+        actorId: `calendar:${s.calendarId}`,
+        source: "inbound_sync",
+        actor: null,
+        at: LATER_T,
+      });
+      expect(Object.keys(latest?.change ?? {}).sort()).toEqual([
+        "endLocal",
+        "location",
+        "startLocal",
+        "title",
+      ]);
+      // Moved back, it follows again: still the source's.
+      await refreshCalendar(port, serving(FEED), s.calendarId, LATER_T);
+      expect((await yours(port, s.ann, id)).event).toMatchObject({
+        title: "social",
+        revision: 3,
+      });
+      expect(await until(port, id)).toBe("3");
+    });
+
+    it("once you change it, it is only yours", async () => {
+      const port = await makePort();
+      const s = await school(port, "mine");
+      const id = await gone(port, s);
+      const access = await yours(port, s.ann, id);
+      const edited = await editEvent(port, access, {
+        fields: { ...access.event, description: "With Bob" },
+        actorId: s.ann,
+        now: T0,
+      });
+      expect(edited.kind).toBe("updated");
+      await refreshCalendar(port, serving(MOVED), s.calendarId, LATER_T);
+      expect((await yours(port, s.ann, id)).event).toMatchObject({
+        title: "social",
+        description: "With Bob",
+        startLocal: "2026-11-26T19:00:00",
+        revision: 2,
+      });
+      expect(await until(port, id)).toBe("1");
+      // Cancelling is a change of yours too.
+      const port2 = await makePort();
+      const t = await school(port2, "cancel");
+      const id2 = await gone(port2, t);
+      const done = await setCancelled(port2, await yours(port2, t.ann, id2), {
+        cancelled: true,
+        now: T0,
+      });
+      expect(done.kind).toBe("done");
+      await refreshCalendar(port2, serving(MOVED), t.calendarId, LATER_T);
+      expect((await yours(port2, t.ann, id2)).event).toMatchObject({
+        title: "social",
+        status: "cancelled",
+      });
+    });
+
+    it("each follower's event follows on its own; others are untouched", async () => {
+      const port = await makePort();
+      const s = await school(port, "each");
+      const annId = await gone(port, s);
+      const bobSocial = await followedEvent(port, s.bob, s.calendarId, "social", T0);
+      if (bobSocial === null) throw new Error("social");
+      const bob = await go(port, { personId: s.bob, event: bobSocial, now: T0 });
+      if (bob.kind === "moment") throw new Error("moment");
+      // Bob makes his his own; Ann's still follows.
+      const bobAccess = await yours(port, s.bob, bob.eventId);
+      await editEvent(port, bobAccess, {
+        fields: { ...bobAccess.event, title: "Bob's social" },
+        actorId: s.bob,
+        now: T0,
+      });
+      const mine = await createEvent(port, {
+        creatorId: s.ann,
+        group: null,
+        fields: {
+          title: "social",
+          description: null,
+          location: null,
+          allDay: false,
+          startLocal: "2026-11-26T19:00",
+          endLocal: "2026-11-26T22:00",
+          tzid: "Europe/Prague",
+        },
+        now: T0,
+      });
+      await refreshCalendar(port, serving(MOVED), s.calendarId, LATER_T);
+      expect((await yours(port, s.ann, annId)).event.title).toBe("Social night");
+      expect((await yours(port, s.bob, bob.eventId)).event.title).toBe("Bob's social");
+      // An event of the same name and time that wasn't gone to is not the source's.
+      expect((await yours(port, s.ann, mine.id)).event).toMatchObject({
+        title: "social",
+        revision: 1,
+      });
+    });
+
+    it("a cancelled source changes nothing, and says so while you follow it", async () => {
+      const port = await makePort();
+      const s = await school(port, "cancelled");
+      // Another calendar of hers, listed before the school: the name is the school's.
+      const other = await follow(
+        port,
+        { kind: "person", personId: s.ann },
+        "https://club.example/aaa.ics",
+        T0,
+      );
+      if (!other.ok) throw new Error("follow");
+      await refreshCalendar(
+        port,
+        serving(FEED.replace("X-WR-CALNAME:Swing school", "X-WR-CALNAME:Aaa club")),
+        other.calendarId,
+        T0,
+      );
+      const id = await gone(port, s);
+      expect(await cancelledBy(port, s.ann, id)).toBeNull();
+      const CANCELLED = MOVED.replace("LOCATION:Old Mill", "LOCATION:Old Mill\r\nSTATUS:CANCELLED");
+      await refreshCalendar(port, serving(CANCELLED), s.calendarId, LATER_T);
+      expect((await yours(port, s.ann, id)).event).toMatchObject({
+        title: "social",
+        status: "scheduled",
+        revision: 1,
+      });
+      expect(await cancelledBy(port, s.ann, id)).toBe("Swing school");
+      // Not gone to, not there, or someone who follows nothing: nothing.
+      const mine = await createEvent(port, {
+        creatorId: s.ann,
+        group: null,
+        fields: {
+          title: "x",
+          description: null,
+          location: null,
+          allDay: true,
+          startLocal: "2026-12-03",
+          endLocal: "2026-12-04",
+          tzid: null,
+        },
+        now: T0,
+      });
+      expect(await cancelledBy(port, s.ann, mine.id)).toBeNull();
+      expect(await cancelledBy(port, s.ann, "no-such-event")).toBeNull();
+      expect(await cancelledBy(port, s.carl, id)).toBeNull();
+      // Dropped out of the feed altogether: it may only have ended, so nothing is said.
+      const DROPPED = FEED.split("BEGIN:VEVENT")
+        .filter((part) => !part.includes("UID:social"))
+        .join("BEGIN:VEVENT");
+      await refreshCalendar(port, serving(DROPPED), s.calendarId, LATER_T);
+      expect(await cancelledBy(port, s.ann, id)).toBeNull();
+      expect((await yours(port, s.ann, id)).event).toMatchObject({ title: "social", revision: 1 });
+    });
+
+    it("an edit of yours landing while the source's is written wins, and it is yours", async () => {
+      const inner = await makePort();
+      const s = await school(inner, "race");
+      const id = await gone(inner, s);
+      // The moment the source's change is written, an edit of Ann's lands first.
+      let raced = false;
+      const port: StoragePort = {
+        query: (q) => inner.query(q),
+        batch: async (stmts) => {
+          if (!raced && stmts.some((x) => x.sql.includes("SET followed_until"))) {
+            raced = true;
+            const access = await yours(inner, s.ann, id);
+            await editEvent(inner, access, {
+              fields: { ...access.event, description: "Mine now" },
+              actorId: s.ann,
+              now: T0,
+            });
+          }
+          return inner.batch(stmts);
+        },
+      };
+      const moved = await followSource(port, {
+        calendarId: s.calendarId,
+        source: {
+          uid: "social",
+          status: "confirmed",
+          title: "Social night",
+          location: "Hall",
+          description: null,
+          allDay: false,
+          startLocal: "2026-11-26T19:00:00",
+          endLocal: "2026-11-26T22:00:00",
+          tzid: "Europe/Prague",
+        },
+        now: LATER_T,
+      });
+      expect(raced).toBe(true);
+      expect(moved).toBe(0);
+      expect((await yours(inner, s.ann, id)).event).toMatchObject({
+        title: "social",
+        description: "Mine now",
+        revision: 2,
+      });
+      expect(await until(inner, id)).toBe("1");
+      // Not raced, it counts what it moved: one event here.
+      const t = await school(inner, "count");
+      await gone(inner, t);
+      expect(
+        await followSource(inner, {
+          calendarId: t.calendarId,
+          source: {
+            uid: "social",
+            status: "confirmed",
+            title: "Social night",
+            location: "Hall",
+            description: null,
+            allDay: false,
+            startLocal: "2026-11-26T19:00:00",
+            endLocal: "2026-11-26T22:00:00",
+            tzid: "Europe/Prague",
+          },
+          now: LATER_T,
+        }),
+      ).toBe(1);
+    });
+
+    it("stopping following keeps the event, and it follows no more", async () => {
+      const port = await makePort();
+      const s = await school(port, "stop");
+      const id = await gone(port, s);
+      const groupFollower = { kind: "group", groupId: s.groupId, actorId: s.ann } as const;
+      expect(await stopFollowing(port, { kind: "person", personId: s.ann }, s.ownFollowId)).toBe(
+        true,
+      );
+      expect(await stopFollowing(port, groupFollower, s.groupFollowId)).toBe(true);
+      expect((await yours(port, s.ann, id)).event.title).toBe("social");
+      // Followed again, it is a calendar of its own: the event isn't picked up again.
+      const again = await follow(
+        port,
+        { kind: "person", personId: s.ann },
+        "https://club.example/stop.ics",
+        LATER_T,
+      );
+      if (!again.ok) throw new Error("follow");
+      await refreshCalendar(port, serving(MOVED), again.calendarId, LATER_T);
+      expect((await yours(port, s.ann, id)).event).toMatchObject({ title: "social", revision: 1 });
+    });
+
+    it("a change that leaves no event, or only a link, changes nothing", async () => {
+      const port = await makePort();
+      const s = await school(port, "still");
+      const id = await gone(port, s);
+      // The link only: the cache changes, your event doesn't.
+      const LINK = FEED.replace("URL:https://club.example/s", "URL:https://club.example/t");
+      await refreshCalendar(port, serving(LINK), s.calendarId, LATER_T);
+      expect((await yours(port, s.ann, id)).event.revision).toBe(1);
+      // Now a moment with no length: it can't be an event, so yours stays.
+      const MOMENT = FEED.replace("DTEND:20261126T210000Z", "DTEND:20261126T180000Z");
+      await refreshCalendar(port, serving(MOMENT), s.calendarId, LATER_T);
+      expect((await yours(port, s.ann, id)).event).toMatchObject({
+        endLocal: "2026-11-26T22:00:00",
+        revision: 1,
+      });
     });
   });
 }
