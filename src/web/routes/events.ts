@@ -75,6 +75,7 @@ import {
   setAttendance,
   setOwnAnswersOnly,
 } from "../../events/response.js";
+import { calendarNameFor, cancelledBy } from "../../following/going.js";
 import type { HeldRunner } from "../../held.js";
 import { MailCapReachedError } from "../../mail/capped.js";
 import type { MailPort } from "../../mail/port.js";
@@ -1212,7 +1213,13 @@ export function verifiedField(
 /** One edit in the trail, already filtered to the fields this viewer may see. */
 function historyEntry(
   h: HistoryEntry & { readonly fields: [string, HistoryEntry["change"][string]][] },
+  /** rc59: the followed calendars that changed it, by actor, as this viewer follows them. */
+  calendars: ReadonlyMap<string, string | null>,
 ): Html {
+  const changes = html`<ul>${h.fields.map(([field, c]) => html`<li>${field}: ${renderHistoryValue(field, c.before)} → ${renderHistoryValue(field, c.after)}</li>`)}</ul>`;
+  // rc59: a change from where it was gone to, followed while it was still the source's.
+  if (calendars.has(h.actorId))
+    return html`<span class="muted">${h.at.slice(0, 16).replace("T", " ")}</span> · changed it in ${calendars.get(h.actorId) ?? "its calendar"}${changes}`;
   return html`<span class="muted">${h.at.slice(0, 16).replace("T", " ")}</span> · ${h.actor === null ? "someone" : who(h.actor)} ${
     h.revision === 1
       ? "created it"
@@ -1221,11 +1228,7 @@ function historyEntry(
         : h.source === "inbound_sync"
           ? "changed it in Google" // rc53: taken in from their calendar
           : "changed"
-  }${
-    h.revision === 1
-      ? ""
-      : html`<ul>${h.fields.map(([field, c]) => html`<li>${field}: ${renderHistoryValue(field, c.before)} → ${renderHistoryValue(field, c.after)}</li>`)}</ul>`
-  }`;
+  }${h.revision === 1 ? "" : changes}`;
 }
 
 /**
@@ -1322,9 +1325,25 @@ async function eventPage(
     ? await stoppedInPair(deps.storage, { kind: "event", id: event.id }, participation.personId)
     : null;
   const requests = await listVerifiedRequests(deps.storage, access, deps.now());
+  // rc59: an event gone to from a followed calendar — the calendar's changes in its history, by
+  // the name this viewer follows it under, and whether it cancelled the event.
+  const calendars = new Map<string, string | null>();
+  for (const h of edits) {
+    if (!h.actorId.startsWith("calendar:") || calendars.has(h.actorId)) continue;
+    const name = await calendarNameFor(
+      deps.storage,
+      participation.personId,
+      h.actorId.slice("calendar:".length),
+    );
+    calendars.set(h.actorId, name);
+  }
+  const cancelledFrom =
+    event.status === "cancelled"
+      ? null
+      : await cancelledBy(deps.storage, participation.personId, event.id);
   // One attributed trail, newest first (DESIGN rc15): edits and people changes together.
   const history = [
-    ...edits.map((h) => ({ at: h.at, entry: historyEntry(h) })),
+    ...edits.map((h) => ({ at: h.at, entry: historyEntry(h, calendars) })),
     // rc42: a receipt that didn't go out is in the history, for everyone who sees it.
     ...unsent.map((u) => ({
       at: u.at,
@@ -1357,6 +1376,11 @@ async function eventPage(
 <h1>${see("title") ? event.title : BUSY_LABEL}${statusBadge(access)}</h1>
 ${verifiedLine(event)}
 ${notice === null ? "" : html`<p class="error">${notice}</p>`}
+${
+  cancelledFrom === null
+    ? ""
+    : html`<p class="attn">${cancelledFrom} cancelled this. It's still yours: cancel or delete it if you're not going.</p>`
+}
 <p>${formatWhen(event)}</p>
 ${seriesSection(event, deps.now())}
 ${see("location") && event.location !== null ? html`<p>📍 ${event.location}</p>` : ""}

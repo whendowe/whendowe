@@ -6,6 +6,7 @@ import { findGroupForMember } from "../people/group.js";
 import { unfollowedSweep } from "../privacy/purge.js";
 import { PULL_EVERY_MINUTES, pullTurn } from "../reconcile/tick.js";
 import { type FetchOutcome, fetchFeed, type PublicGet } from "./fetch.js";
+import { followSource } from "./going.js";
 import { type FollowedEventRow, readFeed } from "./read.js";
 
 // Following a calendar (DESIGN §10 rc56/rc57): for yourself, or — by its organizers — for a
@@ -461,12 +462,17 @@ export async function refreshCalendar(
   const writes: SqlStatement[] = [];
   let added = 0;
   let changed = 0;
+  /** Events already kept that changed: the ones someone may have gone to (rc59). */
+  const moved: FollowedEventRow[] = [];
   for (const e of read.events) {
     const before = kept.get(e.uid);
     kept.delete(e.uid);
     if (before !== undefined && sameEvent(before, e)) continue;
     if (before === undefined) added++;
-    else changed++;
+    else {
+      changed++;
+      moved.push(e);
+    }
     writes.push(upsert(calendarId, e));
   }
   for (const uid of kept.keys()) {
@@ -499,6 +505,9 @@ export async function refreshCalendar(
     );
     await storage.batch(writes);
   }
+  // After the cache, so a failure here leaves it right; the next change tries again. Events you
+  // went to follow their source until you change them (F3b, rc59).
+  for (const e of moved) await followSource(storage, { calendarId, source: e, now });
   return { outcome: "fetched", added, changed, removed };
 }
 
