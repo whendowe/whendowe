@@ -193,21 +193,28 @@ function toRRule(input: ExpandInput, rrule: string): InstanceType<typeof RRule> 
   });
 }
 
-function localise(
-  occStart: Temporal.PlainDateTime,
-  duration: Temporal.Duration,
-  tzid: string | null,
-): Occurrence {
-  const occEnd = occStart.add(duration);
-  const utc = (t: Temporal.PlainDateTime) =>
-    tzid === null
-      ? null
-      : t.toZonedDateTime(tzid, { disambiguation: "compatible" }).toInstant().toString();
+function localise(startLocal: string, endLocal: string, tzid: string | null): Occurrence {
+  if (tzid === null) return { startLocal, endLocal, startUtc: null, endUtc: null };
+  const utc = (t: string) =>
+    Temporal.PlainDateTime.from(t)
+      .toZonedDateTime(tzid, { disambiguation: "compatible" })
+      .toInstant()
+      .toString();
+  // Worked out when asked for, once: a zone's offset costs the polyfill most of a
+  // millisecond, and most callers only want the wall clock (a feed read keeps 2000).
+  let start: string | undefined;
+  let end: string | undefined;
   return {
-    startLocal: occStart.toString(),
-    endLocal: occEnd.toString(),
-    startUtc: utc(occStart),
-    endUtc: utc(occEnd),
+    startLocal,
+    endLocal,
+    get startUtc() {
+      start ??= utc(startLocal);
+      return start;
+    },
+    get endUtc() {
+      end ??= utc(endLocal);
+      return end;
+    },
   };
 }
 
@@ -241,7 +248,7 @@ export function expandOccurrences(input: ExpandInput, limit: number): Occurrence
   for (const occStart of starts) {
     if (occurrences.length >= cap) break;
     if (exdates.has(occStart.toString())) continue;
-    occurrences.push(localise(occStart, duration, input.tzid));
+    occurrences.push(localise(occStart.toString(), occStart.add(duration).toString(), input.tzid));
   }
   return occurrences;
 }
@@ -270,11 +277,9 @@ export function upcomingOccurrences(
     throw new Error(`limit must be a positive integer, got ${limit}`);
   }
   const cap = Math.min(limit, MAX_OCCURRENCES);
-  const start = Temporal.PlainDateTime.from(input.startLocal);
-  const duration = start.until(Temporal.PlainDateTime.from(input.endLocal));
   const exdates = new Set(input.exdates);
   // The scan compares naive epoch numbers — the same wall-clock arithmetic rrule
-  // iterates in — and builds Temporal values only for what it keeps: a polyfilled
+  // iterates in — and builds no Temporal values at all for what it keeps: a polyfilled
   // Temporal per step costs ~0.15ms, which a Worker's CPU budget can't pay 20k times.
   const lengthMs = toNaive(input.endLocal).getTime() - toNaive(input.startLocal).getTime();
   const fromMs = toNaive(fromLocal).getTime();
@@ -284,8 +289,10 @@ export function upcomingOccurrences(
   const consider = (d: Date): boolean => {
     if (d.getTime() >= beforeMs) return false;
     if (d.getTime() + lengthMs > fromMs) {
-      const occStart = Temporal.PlainDateTime.from(fromNaive(d));
-      if (!exdates.has(occStart.toString())) found.push(localise(occStart, duration, input.tzid));
+      // Naive arithmetic, as rrule's: no zone, so a day is always 24 hours, as in a PlainDateTime.
+      const occStart = fromNaive(d);
+      const occEnd = fromNaive(new Date(d.getTime() + lengthMs));
+      if (!exdates.has(occStart)) found.push(localise(occStart, occEnd, input.tzid));
     }
     return found.length < cap;
   };
