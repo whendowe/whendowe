@@ -160,7 +160,9 @@ export function mailCapOf(c: Config): MailCap {
 }
 
 /** The instance's capability settings (DESIGN §10 rc43), for the app. */
-export function capabilityConfigOf(c: Config): CapabilityConfig {
+export function capabilityConfigOf(
+  c: Pick<Config, "CAPABILITIES_DEFAULT" | "OPERATOR_EMAILS">,
+): CapabilityConfig {
   return {
     default: c.CAPABILITIES_DEFAULT,
     operators: c.OPERATOR_EMAILS.split(",")

@@ -226,6 +226,9 @@ export const loginToken = sqliteTable(
     // rc51: the page that asked for sign-in, a path on this instance, checked when written
     // and again when read; the emailed link never carries it.
     nextPath: text("next_path"),
+    // rc60: how the link was handed out — null when it was mailed; `console` when a shell in
+    // the container printed it (sign-in-link). The session it makes says the same.
+    via: text("via"),
   },
   (t) => [
     // Rate limiting counts recent tokens per address.
@@ -1202,3 +1205,23 @@ export const followedEvent = sqliteTable(
     check("followed_event_status_chk", sql`${t.status} IN ('confirmed', 'cancelled')`),
   ],
 );
+
+// rc60 (DESIGN §10 *Running without email*): the setup link that makes an instance's first
+// owner. At most one is live: making one deletes the rest. Only the SHA-256 is kept (§13).
+export const setupToken = sqliteTable("setup_token", {
+  id: text("id").primaryKey(),
+  tokenHash: text("token_hash").notNull().unique(),
+  expiresAt: text("expires_at").notNull(),
+  consumedAt: text("consumed_at"),
+  createdAt: text("created_at").notNull(),
+});
+
+// rc60: operators kept by the instance, beside OPERATOR_EMAILS (rc43); either makes one.
+export const instanceOperator = sqliteTable("instance_operator", {
+  personId: text("person_id")
+    .primaryKey()
+    .references(() => person.id, { onDelete: "cascade" }),
+  addedAt: text("added_at").notNull(),
+  // Null: the setup link made them.
+  addedBy: text("added_by").references(() => person.id, { onDelete: "set null" }),
+});

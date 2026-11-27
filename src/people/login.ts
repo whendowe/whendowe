@@ -84,6 +84,7 @@ const linkSchema = z.object({
   email: z.string(),
   guest_id: z.string().nullable(),
   next_path: z.string().nullable(),
+  via: z.string().nullable(),
 });
 
 /**
@@ -94,6 +95,8 @@ export interface UsedLoginLink {
   readonly email: string;
   readonly guestId: string | null;
   readonly next: string | null;
+  /** rc60: `console` when a shell in the container made it; absent when it was mailed. */
+  readonly via?: "console";
 }
 
 /**
@@ -121,12 +124,17 @@ export async function consumeLoginLink(
   const rows = await storage.query({
     sql: `UPDATE login_token SET consumed_at = ?
           WHERE token_hash = ? AND consumed_at IS NULL AND expires_at > ?
-          RETURNING email, guest_id, next_path`,
+          RETURNING email, guest_id, next_path, via`,
     params: [options.now, await hashToken(token), options.now],
   });
   if (rows[0] === undefined) return null;
   const row = linkSchema.parse(rows[0]);
-  return { email: row.email, guestId: row.guest_id, next: row.next_path };
+  return {
+    email: row.email,
+    guestId: row.guest_id,
+    next: row.next_path,
+    ...(row.via === "console" ? { via: "console" as const } : {}),
+  };
 }
 
 /**

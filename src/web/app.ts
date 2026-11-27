@@ -38,6 +38,7 @@ import {
 import { registerOperatorRoutes } from "./routes/operator.js";
 import { chooseRunner, PLANS_PATH, registerPlanRoutes, voteLinksRunner } from "./routes/plans.js";
 import { registerRespondRoutes } from "./routes/respond.js";
+import { ownerNotice, registerSetupRoutes } from "./routes/setup.js";
 import { registerShareRoutes } from "./routes/share.js";
 import { registerWhatsOnRoutes, WHATS_ON_PATH } from "./routes/whats-on.js";
 import { type AppEnv, page, sessionMiddleware } from "./session.js";
@@ -142,6 +143,9 @@ export function createApp(options: AppOptions = {}): Hono<AppEnv> {
     app.use(sessionMiddleware(auth));
   }
 
+  // rc60: an instance with no operator says so to signed-out visitors, on home and sign-in.
+  const noOwner = auth === undefined ? undefined : ownerNotice(auth);
+
   app.get("/", async (c) => {
     const signedIn = c.get("signedIn");
     // Who is signed in, and the menu, are in every page's header (layout.ts, rc18).
@@ -197,7 +201,7 @@ export function createApp(options: AppOptions = {}): Hono<AppEnv> {
         c,
         signedIn === null ? "Home" : "Your events",
         signedIn === null || auth === undefined
-          ? html`${account}
+          ? html`${noOwner === undefined ? "" : await noOwner()}${account}
 <h1>WhenDoWe</h1>
 <p>One canonical event, projected into many calendars — with attribution.</p>
 <p class="muted">Milestone: MVP-1 — People</p>
@@ -213,7 +217,11 @@ ${connect}`,
   app.get("/healthz", (c) => c.json({ ok: true }));
 
   if (auth !== undefined) {
-    registerAuthRoutes(app, auth, { google: oauth !== undefined });
+    registerAuthRoutes(app, auth, {
+      google: oauth !== undefined,
+      ...(noOwner === undefined ? {} : { ownerNotice: noOwner }),
+    });
+    registerSetupRoutes(app, auth);
     registerAccountRoutes(app, auth, { calendars: calendarGrants(oauth) });
     registerGroupRoutes(app, auth);
     registerEventRoutes(app, auth);

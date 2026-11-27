@@ -13,6 +13,7 @@ import {
   revokeCapability,
 } from "../../people/capability.js";
 import { normalizeEmail } from "../../people/person.js";
+import { isKeptOperator, listKeptOperators } from "../../people/setup.js";
 import { type Html, html } from "../layout.js";
 import {
   type AppEnv,
@@ -42,6 +43,7 @@ function operatorPage(
   config: CapabilityConfig,
   grants: Awaited<ReturnType<typeof listGrants>>,
   changes: Awaited<ReturnType<typeof listCapabilityChanges>>,
+  kept: readonly string[],
   notice: Html | string,
 ): string {
   const csrf = html`<input type="hidden" name="csrf" value="${me.csrfToken}" />`;
@@ -55,6 +57,8 @@ function operatorPage(
         : "This instance gives capabilities only to the accounts granted here."
     }</p>
 ${notice}
+<h2>Operators</h2>
+<ul>${[...config.operators.map((e) => html`<li>${e} <span class="muted">· named in the instance's configuration</span></li>`), ...kept.filter((e) => !config.operators.includes(e)).map((e) => html`<li>${e}</li>`)]}</ul>
 <h2>Grant</h2>
 <form method="post" action="${OPERATOR_PATH}/grant">${csrf}
   <p><label>Email address<br /><input name="email" type="email" required /></label></p>
@@ -91,7 +95,10 @@ export function registerOperatorRoutes(app: Hono<AppEnv>, deps: AuthDeps): void 
   const operator = async (c: Context<AppEnv>): Promise<SignedIn | Response> => {
     const me = requireSignedIn(c);
     if (me instanceof Response) return me;
-    return isOperator(config, me.email) ? me : await c.notFound();
+    // rc60: an operator named in the configuration, or one the instance keeps (the setup link).
+    return isOperator(config, me.email) || (await isKeptOperator(deps.storage, me.personId))
+      ? me
+      : await c.notFound();
   };
   const render = async (
     c: Context<AppEnv>,
@@ -106,6 +113,7 @@ export function registerOperatorRoutes(app: Hono<AppEnv>, deps: AuthDeps): void 
         config,
         await listGrants(deps.storage),
         await listCapabilityChanges(deps.storage),
+        await listKeptOperators(deps.storage),
         notice,
       ),
       status,
