@@ -122,6 +122,7 @@ function waysIn(signedInAs: string | null): Html {
 <p>This instance doesn't send email, so signing in is by a link someone gives you:</p>
 <ul>
   <li><strong>Invited to a group?</strong> Ask whoever invited you for a new invite link.</li>
+  <li><strong>Signed in on another device?</strong> Open your account page there and use <em>Sign in on another device</em>.</li>
   <li><strong>Otherwise</strong>, ask whoever runs this instance for a sign-in link.</li>
 </ul>`;
 }

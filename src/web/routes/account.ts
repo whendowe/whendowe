@@ -11,6 +11,8 @@ import {
   setAccountHandle,
   setAppearance,
 } from "../../people/person.js";
+import { listSessions, type SessionSummary, type SessionVia } from "../../people/session.js";
+import { deviceSignInLink } from "../../people/setup.js";
 import {
   type CalendarGrants,
   copiesSchema,
@@ -43,16 +45,19 @@ import {
   type Html,
   html,
   KEEP_ACCOUNT_PATH,
+  SHARE_BUTTONS,
+  shareBox,
 } from "../layout.js";
 import {
   type AppEnv,
   page,
   rejectedPage,
   requireSignedIn,
+  type SignedIn,
   verifyFormCsrf,
   writeAccountsCookie,
 } from "../session.js";
-import type { AuthDeps } from "./auth.js";
+import { type AuthDeps, CONFIRM_PATH } from "./auth.js";
 import { feedSection } from "./feeds.js";
 
 // Your account (DESIGN §10 rc21 *Privacy basics*): the handle others see by default,
@@ -64,6 +69,8 @@ import { feedSection } from "./feeds.js";
 //   GET  /account/delete   what deleting it would take with it
 //   POST /account/delete   ask for it to be deleted, once you've typed your address:
 //                          signed out everywhere, emailed, deleted in 7 days (rc22)
+//   POST /account/device   Sign in on another device (rc60): a sign-in link for this account,
+//                          shown once on the page this POST returns, 15 minutes, used once
 //   POST /account/keep     keep it, signed in during the wait
 //   GET  /account/deletion the emailed link: keep it, or delete it now (GET renders)
 //   POST /account/deletion …and acts
@@ -161,12 +168,45 @@ function optOutSection(csrf: string, optOuts: readonly OptOutView[]): Html | str
   )}</ul>`;
 }
 
+/** rc60: Sign in on another device. A POST, so a page that shows the link can't be made by looking. */
+export const DEVICE_SIGN_IN_PATH = "/account/device";
+
+/** How each session was made (rc42, rc60), as the account page's list says it. */
+const MADE_BY: Record<SessionVia, string> = {
+  magic: "by an emailed sign-in link",
+  google: "with Google",
+  invite: "by a group invite",
+  setup: "by the setup link",
+  console: "by a sign-in link from whoever runs this instance",
+  device: "by Sign in on another device",
+};
+
+/** Where you're signed in (rc60): when each began and how, this browser marked. */
+function sessionsSection(sessions: readonly SessionSummary[], thisOne: string): Html {
+  return html`<h2>Where you're signed in</h2>
+<ul>${sessions.map(
+    (s) =>
+      html`<li>Since ${s.createdAt.slice(0, 16).replace("T", " ")} UTC, ${s.via === null ? "how isn't recorded" : MADE_BY[s.via]}${s.id === thisOne ? html` <strong>· this browser</strong>` : ""}</li>`,
+  )}</ul>`;
+}
+
+function deviceSection(csrf: string): Html {
+  return html`<h2>Sign in on another device</h2>
+<p class="muted">A link that signs this account in on your phone or another computer. It works once, for 15 minutes.</p>
+<form method="post" action="${DEVICE_SIGN_IN_PATH}">
+  <input type="hidden" name="csrf" value="${csrf}" />
+  <p><button type="submit">Make a sign-in link</button></p>
+</form>`;
+}
+
 function accountForm(
   csrf: string,
   handle: string,
   error: string | null,
   optOuts: readonly OptOutView[],
   feed: Html | string,
+  /** rc60: Sign in on another device, and where this account is signed in. */
+  signedIn: Html,
 ) {
   return html`<h1>Your name</h1>
 <p class="muted">This is the name people see in your groups, events and plans. Nobody sees your email address unless you choose to show it, one group, event or plan at a time.</p>
@@ -177,6 +217,7 @@ ${error === null ? "" : html`<p class="error">${error}</p>`}
   <p><button type="submit">Save</button></p>
 </form>
 ${feed}
+${signedIn}
 <h2>Your data</h2>
 <p><a href="${EXPORT_PATH}">Download everything about you</a> <span class="muted">(one file: your groups, events, plans and what you said in them)</span></p>
 <p><a href="${DELETE_ACCOUNT_PATH}">Delete your account</a></p>
@@ -598,6 +639,10 @@ ${button("delete", "Delete everything about this address")}`
     return c.redirect(ACCOUNT_PATH, 303);
   });
 
+  const signedInSections = async (me: SignedIn) =>
+    html`${deviceSection(me.csrfToken)}
+${sessionsSection(await listSessions(deps.storage, me.personId, deps.now()), me.sessionId)}`;
+
   app.get(ACCOUNT_PATH, async (c) => {
     const me = requireSignedIn(c);
     if (me instanceof Response) return me;
@@ -612,7 +657,32 @@ ${button("delete", "Delete everything about this address")}`
           null,
           await optOutsOf(deps.storage, me.email),
           await feedSection(deps, { personId: me.personId, groupId: null }, me.csrfToken),
+          await signedInSections(me),
         ),
+      ),
+    );
+  });
+
+  // rc60: Sign in on another device. The link is on the page this returns, and nowhere else.
+  app.post(DEVICE_SIGN_IN_PATH, async (c) => {
+    const me = requireSignedIn(c);
+    if (me instanceof Response) return me;
+    const form = await c.req.parseBody();
+    if (!(await verifyFormCsrf(me, form))) return rejectedPage(c, form);
+    const made = await deviceSignInLink(deps.storage, me.personId, { now: deps.now() });
+    if (!made.ok) return c.redirect(ACCOUNT_PATH, 303);
+    sensitive(c);
+    // From the configured origin, never the request's Host (§13).
+    const link = new URL(CONFIRM_PATH, deps.publicBaseUrl);
+    link.searchParams.set("t", made.token);
+    return c.html(
+      page(
+        c,
+        "Sign in on another device",
+        html`<h1>Sign in on another device</h1>
+<p><strong>Anyone with this link can sign in as you until it's used.</strong> Open it on the other device, or send it only to yourself. It works once, for the next 15 minutes, and making another stops this one working.</p>
+${shareBox("Your sign-in link", link.toString(), 2)}${SHARE_BUTTONS}
+<p><a href="${ACCOUNT_PATH}">Back</a></p>`,
       ),
     );
   });
@@ -635,6 +705,7 @@ ${button("delete", "Delete everything about this address")}`
             reason(parsed.error),
             await optOutsOf(deps.storage, me.email),
             await feedSection(deps, { personId: me.personId, groupId: null }, me.csrfToken),
+            await signedInSections(me),
           ),
         ),
         400,

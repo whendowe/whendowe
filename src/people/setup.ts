@@ -10,7 +10,8 @@ import { hashToken, issueToken } from "./tokens.js";
 // The first owner of an instance with no operator, and the shell's sign-in links (DESIGN §10
 // rc60 *Running without email*). Both are made by a command run in the container, which prints
 // the link to its own terminal: being able to run it is the proof of running the instance. No
-// token is ever logged (§13/§14).
+// token is ever logged (§13/§14). Also Sign in on another device: a link the signed-in account
+// makes for itself, shown once on its own page.
 
 /** A setup link lasts this long; running the command again makes a new one. */
 export const SETUP_TOKEN_TTL_MS = 30 * 60 * 1000;
@@ -185,6 +186,38 @@ export async function shellSignInLink(
           WHERE EXISTS (SELECT 1 FROM person WHERE email = ? AND erased_at IS NULL)
           RETURNING id`,
     params: [(options.newId ?? (() => uuidv7()))(), hash, email, expiresAt, options.now, email],
+  });
+  return rows.length === 0 ? { ok: false, reason: "no_account" } : { ok: true, token, expiresAt };
+}
+
+export type DeviceSignInResult =
+  | { readonly ok: true; readonly token: string; readonly expiresAt: string }
+  | { readonly ok: false; readonly reason: "no_account" };
+
+/**
+ * Sign in on another device (rc60): a sign-in link for the account it is pressed in, shown
+ * once, used once, in 15 minutes like an emailed one, recorded as `device`. Making another
+ * withdraws any earlier one still unused, so only the newest works.
+ */
+export async function deviceSignInLink(
+  storage: StoragePort,
+  personId: string,
+  options: { readonly now: string; readonly newId?: () => string },
+): Promise<DeviceSignInResult> {
+  const { token, hash } = await issueToken();
+  const expiresAt = plusMs(options.now, LOGIN_TOKEN_TTL_MS);
+  // Not one batch: the port's batch returns no rows. Withdrawing first is safe alone.
+  await storage.query({
+    sql: `UPDATE login_token SET consumed_at = ?
+          WHERE via = 'device' AND consumed_at IS NULL
+            AND email = (SELECT email FROM person WHERE id = ?)`,
+    params: [options.now, personId],
+  });
+  const rows = await storage.query({
+    sql: `INSERT INTO login_token (id, token_hash, email, expires_at, created_at, via)
+          SELECT ?, ?, email, ?, ?, 'device' FROM person WHERE id = ? AND erased_at IS NULL
+          RETURNING id`,
+    params: [(options.newId ?? (() => uuidv7()))(), hash, expiresAt, options.now, personId],
   });
   return rows.length === 0 ? { ok: false, reason: "no_account" } : { ok: true, token, expiresAt };
 }
