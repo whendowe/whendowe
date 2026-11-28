@@ -351,7 +351,7 @@ async function askedCount(deps: AuthDeps, me: SignedIn, draft: AskDraft): Promis
   return fromGroup.length + chosen.size + draft.body.emails.length;
 }
 
-function readBack(draft: AskDraft, asked: number, makes: boolean): Html {
+function readBack(draft: AskDraft, asked: number, makes: boolean, noMail: boolean): Html {
   const n = draft.body.options.length;
   const letters = [...LETTERS.slice(0, n)];
   const which =
@@ -366,7 +366,7 @@ function readBack(draft: AskDraft, asked: number, makes: boolean): Html {
     return html`<p class="readback">Nobody to ask, so asking makes ${what} an event at once and tells nobody.</p>`;
   const who =
     asked === 0 ? "nobody yet — add people below" : `${asked} ${asked === 1 ? "person" : "people"}`;
-  return html`<p class="readback">Asking emails ${who} one question: does ${which} suit for ${what}? ${
+  return html`<p class="readback">${noMail ? "Asking puts to" : "Asking emails"} ${who} one question: does ${which} suit for ${what}? ${
     n > 1 ? "One of them will happen." : n === 1 ? "If it suits, it happens." : ""
   }</p>`;
 }
@@ -762,6 +762,8 @@ function askPage(
     readonly seeing: number | null;
     /** rc49 (A5b): the option being edited on its week rows. */
     readonly editing: Editing | null;
+    /** rc60: this instance sends no email; asking gives you each person's link to copy. */
+    readonly noMail: boolean;
   },
 ): Html {
   const b = draft.body;
@@ -817,13 +819,13 @@ ${peoplePicker({
   exclude: input.people.inGroup,
 })}
 <p><label>Note <span class="muted">(optional — everyone asked sees it)</span><br /><textarea name="note" rows="2" maxlength="2000" class="wide">${b.note ?? ""}</textarea></label></p>
-${readBack(draft, input.asked, input.makesEvent)}
+${readBack(draft, input.asked, input.makesEvent, input.noMail)}
 <div class="row wrap"><button class="primary" type="submit" name="act" value="ask">${
     input.asked === 0
       ? "Ask"
-      : `Ask ${input.asked} ${input.asked === 1 ? "person" : "people"} by email`
+      : `Ask ${input.asked} ${input.asked === 1 ? "person" : "people"}${input.noMail ? "" : " by email"}`
   }</button><button type="submit" name="act" value="save">Save</button></div>
-${input.makesEvent ? "" : html`<p class="muted small">Asking emails them a minute later; until then you can undo it.</p>`}
+${input.makesEvent ? "" : html`<p class="muted small">${input.noMail ? "This instance doesn't send email: after asking, copy each person's own link and send it to them." : "Asking emails them a minute later; until then you can undo it."}</p>`}
 <p class="discard"><button class="link" type="submit" name="act" value="discard">Throw this question away</button></p>
 </form></div>${askDragAssets()}${input.editing === null ? "" : editorScript()}`;
 }
@@ -967,6 +969,7 @@ export function registerAskRoutes(app: Hono<AppEnv>, deps: AuthDeps): void {
           filter: (c.req.query("f") ?? "").slice(0, 64) || null,
           seeing: seeingOf(c.req.query("s"), draft.body),
           editing: editingOf(c.req.query("x"), c.req.query("e"), draft.body),
+          noMail: deps.noMail === true,
         }),
       ),
     );
@@ -1069,19 +1072,25 @@ export function registerAskRoutes(app: Hono<AppEnv>, deps: AuthDeps): void {
             filter,
             seeing: seeingOf(str(form, "s"), body),
             editing: editingOf(str(form, "x"), str(form, "e"), body),
+            noMail: deps.noMail === true,
           }),
         ),
         400,
       );
     }
     if (asked === null) return notFound(c);
-    // Emailing them waits a minute with Undo (A0): the thread page shows it.
-    await holdAction(deps.storage, {
-      actorId: me.personId,
-      threadId: asked.threadId,
-      kind: "vote_links",
-      now,
-    });
-    return c.redirect(`${PLANS_PATH}/${asked.threadId}`, 303);
+    // Emailing them waits a minute with Undo (A0): the thread page shows it. rc60: with no
+    // email nothing is held; the thread page lists each person's own link to copy.
+    if (deps.noMail !== true)
+      await holdAction(deps.storage, {
+        actorId: me.personId,
+        threadId: asked.threadId,
+        kind: "vote_links",
+        now,
+      });
+    return c.redirect(
+      `${PLANS_PATH}/${asked.threadId}${deps.noMail === true ? "#links" : ""}`,
+      303,
+    );
   });
 }

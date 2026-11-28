@@ -85,6 +85,7 @@ import {
   hasCapability,
   recentHistory,
   UNAVAILABLE,
+  VERIFY_NEEDS_MAIL,
 } from "../../people/capability.js";
 import { findGroupForMember, type GroupMembership, listMembers } from "../../people/group.js";
 import { knownAddresses, listKnownPeople } from "../../people/known.js";
@@ -172,6 +173,8 @@ export interface EventRouteDeps {
   readonly publicBaseUrl: string;
   /** rc43: who may turn verifying on; absent, everyone may. */
   readonly capabilities?: CapabilityConfig;
+  /** rc60: this instance sends no email (AuthDeps.noMail): links are copied, never mailed. */
+  readonly noMail?: boolean;
 }
 
 /**
@@ -198,15 +201,29 @@ export function mayLongHistory(
   return hasCapability(deps.storage, deps.capabilities ?? EVERYTHING, personId, "long_history");
 }
 
-/** rc43: whether this account may turn verifying on (anyone may take part in a verified one). */
-export function mayVerify(
-  deps: { readonly storage: StoragePort; readonly capabilities?: CapabilityConfig },
+/**
+ * Why this account may not turn verifying on, or null if it may (anyone may take part in a
+ * verified one). rc43: without the `verify` capability; rc60: on an instance with no email.
+ */
+export async function verifyRefusal(
+  deps: {
+    readonly storage: StoragePort;
+    readonly capabilities?: CapabilityConfig;
+    readonly noMail?: boolean;
+  },
   personId: string,
-): Promise<boolean> {
-  return hasCapability(deps.storage, deps.capabilities ?? EVERYTHING, personId, "verify");
+): Promise<string | null> {
+  if (deps.noMail === true) return VERIFY_NEEDS_MAIL;
+  return (await hasCapability(deps.storage, deps.capabilities ?? EVERYTHING, personId, "verify"))
+    ? null
+    : UNAVAILABLE.verify;
 }
 
 export const BUSY_LABEL = "Busy";
+
+/** rc60: where an emailing button would have been pressed, on an instance with no email. */
+const NO_MAIL_COPY_INSTEAD =
+  "This instance doesn't send email. Copy each person's own link instead, and send it to them.";
 
 /**
  * How an answer arrived, said after it (DESIGN §10 rc42): nothing for a signed-in answer or
@@ -816,7 +833,8 @@ async function responsesSection(
     : "";
   const action = actionFor(access);
   const sendLinks =
-    participation.editTier === "edit" && action !== null && stopped === null
+    // rc60: with no email, each person's own link is copied from Taking part instead.
+    participation.editTier === "edit" && action !== null && stopped === null && deps.noMail !== true
       ? html`<form method="post" action="${EVENTS_PATH}/${event.id}/links">
   <input type="hidden" name="csrf" value="${csrf}" />
   <p><button type="submit">${action === "attend" ? "Email everyone a link to say if they're coming" : "Email a link to agree or decline"}</button>
@@ -1177,9 +1195,9 @@ function verifiedKeeps(eventId: string): Html {
 }
 
 /** rc42: making an event verified, for its editors. One way for now: off needs everyone. */
-function verifyForm(eventId: string, csrf: string, allowed: boolean): Html {
-  if (!allowed)
-    return html`<p class="wd-verify"><button type="button" disabled>Verify answers here</button> <span class="muted">${UNAVAILABLE.verify}</span></p>`;
+function verifyForm(eventId: string, csrf: string, refusal: string | null): Html {
+  if (refusal !== null)
+    return html`<p class="wd-verify"><button type="button" disabled>Verify answers here</button> <span class="muted">${refusal}</span></p>`;
   return html`<details class="wd-verify"><summary>Verify answers here</summary>
 <form method="post" action="${EVENTS_PATH}/${eventId}/verify">
   <input type="hidden" name="csrf" value="${csrf}" />
@@ -1197,15 +1215,15 @@ export function verifiedField(
   checked: boolean,
   groupDefault: boolean,
   what: "event" | "poll" | "plan" = "event",
-  /** rc43: whether this account may turn verifying on; if not, the box shows disabled. */
-  allowed = true,
+  /** Why this account may not turn verifying on (verifyRefusal); if so, the box shows disabled. */
+  refusal: string | null = null,
 ): Html {
   const these = what === "event" ? "Events" : what === "poll" ? "Polls" : "Plans";
   if (groupDefault)
     return html`<p class="muted">${these} from this group are verified: answers count only from each person's own email, or signed in.</p>`;
-  if (!allowed)
+  if (refusal !== null)
     return html`<p><label><input type="checkbox" name="verified" disabled /> Verified: answers count only from each person's own email, or signed in</label><br />
-  <span class="muted">${UNAVAILABLE.verify}</span></p>`;
+  <span class="muted">${refusal}</span></p>`;
   return html`<p><label><input type="checkbox" name="verified"${checked ? html` checked` : ""} /> Verified: answers count only from each person's own email, or signed in</label><br />
   <span class="muted">Everyone on it then sees each other's email addresses, and nobody can remove anyone else.${what === "event" ? "" : " It can't be shared by a link."}</span></p>`;
 }
@@ -1243,6 +1261,8 @@ function peopleSection(
   picker: Html,
   /** rc51: the other of two who stopped this viewer's email, and this page's plain link. */
   stopped: { readonly who: StoppedInPair; readonly url: string } | null,
+  /** rc60: this instance sends no email, so a link is only ever copied. */
+  noMail: boolean,
 ): Html {
   const { event } = access;
   const editing = access.participation.editTier === "edit";
@@ -1268,7 +1288,7 @@ function peopleSection(
           : ""
       }${
         copyable(p) && p.ownAnswersOnly
-          ? html` <span class="muted">· takes answers only from their own email</span>`
+          ? html` <span class="muted">· ${noMail ? "answers only signed in" : "takes answers only from their own email"}</span>`
           : copyable(p)
             ? html` <form method="post" action="${EVENTS_PATH}/${event.id}/people/link" style="display:inline"><input type="hidden" name="csrf" value="${csrf}" /><input type="hidden" name="person" value="${p.personId}" /><button type="submit">Copy their link</button></form>`
             : ""
@@ -1284,7 +1304,7 @@ ${
     ? html`<form method="post" action="${EVENTS_PATH}/${event.id}/people">
   <input type="hidden" name="csrf" value="${csrf}" />
   ${picker}
-  <p><button type="submit">Add and email them a link</button></p>
+  <p><button type="submit">${noMail ? "Add them" : "Add and email them a link"}</button></p>
 </form>`
     : ""
 }`;
@@ -1395,10 +1415,10 @@ ${
 }
 ${await requestsSection(deps, access, csrf)}
 ${await proposalsSection(deps, access, csrf)}
-${people.length === 0 ? "" : peopleSection(access, people, csrf, participation.editTier === "edit" && TAKES_PEOPLE.has(event.status) ? peoplePicker({ chips: adding.chips, known: await listKnownPeople(deps.storage, participation.personId), levers: { terms: true, asking: false }, filter: adding.filter, lead: "Each gets an email with a link to answer, no account needed.", group: null, exclude: new Set(people.map((p) => p.personId)) }) : html``, stopped === null ? null : { who: stopped, url: new URL(`${EVENTS_PATH}/${event.id}`, deps.publicBaseUrl).toString() })}
+${people.length === 0 ? "" : peopleSection(access, people, csrf, participation.editTier === "edit" && TAKES_PEOPLE.has(event.status) ? peoplePicker({ chips: adding.chips, known: await listKnownPeople(deps.storage, participation.personId), levers: { terms: true, asking: false }, filter: adding.filter, lead: deps.noMail === true ? "Each can answer by a link you copy for them, no account needed." : "Each gets an email with a link to answer, no account needed.", group: null, exclude: new Set(people.map((p) => p.personId)) }) : html``, stopped === null ? null : { who: stopped, url: new URL(`${EVENTS_PATH}/${event.id}`, deps.publicBaseUrl).toString() }, deps.noMail === true)}
 ${see("participants") ? await appearanceSection(deps.storage, { kind: "event", id: event.id }, { personId: participation.personId, csrfToken: csrf }, `${EVENTS_PATH}/${event.id}/me`, "event") : ""}
 ${event.verifiedAt === null ? ownAnswersForm({ action: `${EVENTS_PATH}/${event.id}/own-answers`, hidden: { csrf }, on: participation.ownAnswersOnly, where: "here" }) : ""}
-${event.verifiedAt === null && participation.editTier === "edit" ? verifyForm(event.id, csrf, await mayVerify(deps, participation.personId)) : ""}
+${event.verifiedAt === null && participation.editTier === "edit" ? verifyForm(event.id, csrf, await verifyRefusal(deps, participation.personId)) : ""}
 ${requestSection(access, requests, await eventRetention(deps.storage, access), csrf)}
 ${await responsesSection(deps, access, csrf, stopped)}
 ${retentionSection({
@@ -1467,10 +1487,10 @@ export function registerEventRoutes(app: Hono<AppEnv>, deps: EventRouteDeps): vo
       membership === null
         ? html`<p><a href="/">← Your events</a></p>
 <h1>New event</h1>
-${eventForm(EVENTS_PATH, csrf, form.values, "", error, "Create event", "FULL", html`${await pickerFor(deps, meId, null, form.people, { terms: true, asking: true }, LEAD_ALONE)}${verifiedField(form.verified, false, "event", await mayVerify(deps, meId))}`)}`
+${eventForm(EVENTS_PATH, csrf, form.values, "", error, "Create event", "FULL", html`${await pickerFor(deps, meId, null, form.people, { terms: true, asking: true }, LEAD_ALONE)}${verifiedField(form.verified, false, "event", await verifyRefusal(deps, meId))}`)}`
         : html`<p><a href="/groups/${membership.group.id}">← ${membership.group.name}</a></p>
 <h1>New event for ${membership.group.name}</h1>
-${eventForm(`/groups/${membership.group.id}/events`, csrf, form.values, "", error, "Create event", "FULL", html`${await requestsFieldset(deps, membership, meId, form.asks)}${await pickerFor(deps, meId, membership, form.people, { terms: true, asking: true }, leadFor(membership))}${verifiedField(form.verified, await groupDefaultVerified(deps.storage, membership.group.id), "event", await mayVerify(deps, meId))}`)}`,
+${eventForm(`/groups/${membership.group.id}/events`, csrf, form.values, "", error, "Create event", "FULL", html`${await requestsFieldset(deps, membership, meId, form.asks)}${await pickerFor(deps, meId, membership, form.people, { terms: true, asking: true }, leadFor(membership))}${verifiedField(form.verified, await groupDefaultVerified(deps.storage, membership.group.id), "event", await verifyRefusal(deps, meId))}`)}`,
     );
 
   const createEventFrom = async (c: Context<AppEnv>, groupId: string | null) => {
@@ -1509,7 +1529,8 @@ ${eventForm(`/groups/${membership.group.id}/events`, csrf, form.values, "", erro
     const refusal = await peopleRefusal(deps, me.personId, chips);
     if (refusal !== null) return again(refusal);
     // rc43: a group's default verifies it whatever the creator holds; asking to needs `verify`.
-    if (verified && !(await mayVerify(deps, me.personId))) return again(UNAVAILABLE.verify, 403);
+    const unverifiable = verified ? await verifyRefusal(deps, me.personId) : null;
+    if (unverifiable !== null) return again(unverifiable, 403);
     try {
       const fields = toFields(values);
       // Fully valid BEFORE anyone is created for an address: a refused form creates no one.
@@ -1699,10 +1720,10 @@ ${eventForm(`${EVENTS_PATH}/${access.event.id}`, me.csrfToken, v, html`<input ty
       membership === null
         ? html`<p><a href="/">← Your events</a></p>
 <h1>Find a time</h1>
-${pollForm(POLLS_PATH, csrf, values, error, html`${await pickerFor(deps, meId, null, people, NO_LEVERS, POLL_ALONE)}${verifiedField(values.verified, false, "poll", await mayVerify(deps, meId))}`)}`
+${pollForm(POLLS_PATH, csrf, values, error, html`${await pickerFor(deps, meId, null, people, NO_LEVERS, POLL_ALONE)}${verifiedField(values.verified, false, "poll", await verifyRefusal(deps, meId))}`)}`
         : html`<p><a href="/groups/${membership.group.id}">← ${membership.group.name}</a></p>
 <h1>Find a time with ${membership.group.name}</h1>
-${pollForm(`/groups/${membership.group.id}/polls`, csrf, values, error, html`${await pickerFor(deps, meId, membership, people, NO_LEVERS, pollLeadFor(membership))}${verifiedField(values.verified, await groupDefaultVerified(deps.storage, membership.group.id), "poll", await mayVerify(deps, meId))}`)}`,
+${pollForm(`/groups/${membership.group.id}/polls`, csrf, values, error, html`${await pickerFor(deps, meId, membership, people, NO_LEVERS, pollLeadFor(membership))}${verifiedField(values.verified, await groupDefaultVerified(deps.storage, membership.group.id), "poll", await verifyRefusal(deps, meId))}`)}`,
     );
 
   const createPollFrom = async (c: Context<AppEnv>, groupId: string | null) => {
@@ -1730,8 +1751,8 @@ ${pollForm(`/groups/${membership.group.id}/polls`, csrf, values, error, html`${a
     if (!leversValid(form, false)) return again("Choose what each person can change and see.");
     const refusal = await peopleRefusal(deps, me.personId, chips);
     if (refusal !== null) return again(refusal);
-    if (values.verified && !(await mayVerify(deps, me.personId)))
-      return again(UNAVAILABLE.verify, 403);
+    const unverifiable = values.verified ? await verifyRefusal(deps, me.personId) : null;
+    if (unverifiable !== null) return again(unverifiable, 403);
     try {
       const input = toPollInput(values);
       validateCandidates(input.fields, input.candidates); // as above: valid before anyone is created
@@ -2052,8 +2073,9 @@ ${pollForm(`/groups/${membership.group.id}/polls`, csrf, values, error, html`${a
     const access = await findEventForParticipant(deps.storage, c.req.param("id"), me.personId);
     if (access === null || access.participation.visibility === "HIDDEN")
       return c.html(notFound(c), 404);
-    if (!(await mayVerify(deps, me.personId)))
-      return c.html(await eventPage(c, deps, access, me.csrfToken, UNAVAILABLE.verify), 403);
+    const unverifiable = await verifyRefusal(deps, me.personId);
+    if (unverifiable !== null)
+      return c.html(await eventPage(c, deps, access, me.csrfToken, unverifiable), 403);
     if ((await setVerified(deps.storage, access, deps.now())) === "forbidden")
       return c.html(
         await eventPage(c, deps, access, me.csrfToken, "Only people who can edit it verify it."),
@@ -2244,6 +2266,14 @@ ${pollForm(`/groups/${membership.group.id}/polls`, csrf, values, error, html`${a
         outcomes.push({ status: 422, notice: `Couldn't add ${label}.` });
         continue;
       }
+      // rc60: nothing is emailed; their own link is copied from Taking part when wanted.
+      if (deps.noMail === true) {
+        outcomes.push({
+          status: 200,
+          notice: `Added ${label}. To ask them, copy their link below and send it to them.`,
+        });
+        continue;
+      }
       const issued = await issueResponseLinks(deps.storage, access, {
         now: deps.now(),
         only: added.personId,
@@ -2359,7 +2389,9 @@ ${pollForm(`/groups/${membership.group.id}/polls`, csrf, values, error, html`${a
           deps,
           access,
           me.csrfToken,
-          `${them.shown.name} takes answers only from their own email. You can still send them their link by email.`,
+          deps.noMail === true
+            ? `${them.shown.name} takes answers only from their own email, and this instance doesn't send email, so they answer signed in.`
+            : `${them.shown.name} takes answers only from their own email. You can still send them their link by email.`,
         ),
         409,
       );
@@ -2408,6 +2440,9 @@ ${pollForm(`/groups/${membership.group.id}/polls`, csrf, values, error, html`${a
     const access = await findEventForParticipant(deps.storage, c.req.param("id"), me.personId);
     if (access === null || access.participation.visibility === "HIDDEN")
       return c.html(notFound(c), 404);
+    // rc60: the button isn't offered; a POST anyway issues nothing.
+    if (deps.noMail === true)
+      return c.html(await eventPage(c, deps, access, me.csrfToken, NO_MAIL_COPY_INSTEAD), 409);
     const issued = await issueResponseLinks(deps.storage, access, { now: deps.now() });
     if (issued.kind === "forbidden")
       return c.html(page(c, "Not allowed", html`<h1>Only the organizers can send these</h1>`), 403);
