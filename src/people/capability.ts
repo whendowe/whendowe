@@ -28,6 +28,12 @@ export const UNAVAILABLE: Record<Capability, string> = {
   long_history: "History older than 90 days isn't available to this account.",
 };
 
+/**
+ * rc60: on an instance that sends no email, every place verifying is turned on shows this
+ * instead. A receipt in the person's own inbox is what a verified answer rests on (rc42).
+ */
+export const VERIFY_NEEDS_MAIL = "Verifying needs email, which this instance doesn't send.";
+
 /** Without `calendar_sync`, where Google's busy times would show (rc44). */
 export const GOOGLE_BUSY_UNAVAILABLE = "Showing Google busy times isn't available to this account.";
 

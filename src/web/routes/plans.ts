@@ -14,7 +14,7 @@ import { SIGNED_IN } from "../../events/response.js";
 import { type HeldAction, type HeldRunner, heldOn, holdAction, undoHeld } from "../../held.js";
 import { MailCapReachedError } from "../../mail/capped.js";
 import type { MailPort } from "../../mail/port.js";
-import { type CapabilityConfig, UNAVAILABLE } from "../../people/capability.js";
+import type { CapabilityConfig } from "../../people/capability.js";
 import { findGroupForMember, listGroupsFor, listMembers } from "../../people/group.js";
 import { normalizeEmail } from "../../people/person.js";
 import type { PlanEventLike } from "../../plans/diff.js";
@@ -137,8 +137,8 @@ import {
   arrivalNote,
   EVENTS_PATH,
   mayLongHistory,
-  mayVerify,
   verifiedField,
+  verifyRefusal,
   visibleHistory,
 } from "./events.js";
 import {
@@ -171,6 +171,8 @@ export interface PlanRouteDeps {
   readonly mail: MailPort;
   /** rc43: who may turn verifying on; absent, everyone may. */
   readonly capabilities?: CapabilityConfig;
+  /** rc60: this instance sends no email (AuthDeps.noMail): vote links are copied, never mailed. */
+  readonly noMail?: boolean;
 }
 
 const threadPath = (t: string) => `${PLANS_PATH}/${t}`;
@@ -202,13 +204,15 @@ interface View {
   readonly trail: readonly MailTrailEntry[];
   /** rc51: the other of two stopped the viewer's email, and the thread's own plain link. */
   readonly stopped: { readonly who: StoppedInPair; readonly url: string } | null;
-  /** rc43: whether the viewer may turn verifying on. */
-  readonly mayVerify: boolean;
+  /** rc43/rc60: why the viewer may not turn verifying on, or null if they may. */
+  readonly verifyRefusal: string | null;
   /** rc43: whether the viewer sees history older than 90 days, and the moment it's counted from. */
   readonly longHistory: boolean;
   readonly now: string;
   /** rc46: what the viewer pressed here that is waiting its minute, or ran in the last day. */
   readonly held: readonly HeldAction[];
+  /** rc60: this instance sends no email, so vote links are only copied. */
+  readonly noMail: boolean;
 }
 
 async function load(deps: PlanRouteDeps, access: ThreadAccess, me: SignedIn): Promise<View> {
@@ -243,7 +247,8 @@ async function load(deps: PlanRouteDeps, access: ThreadAccess, me: SignedIn): Pr
             who: stopped,
             url: new URL(threadPath(access.thread.id), deps.publicBaseUrl).toString(),
           },
-    mayVerify: await mayVerify(deps, access.personId),
+    verifyRefusal: await verifyRefusal(deps, access.personId),
+    noMail: deps.noMail === true,
     longHistory: await mayLongHistory(deps, access.personId),
     now: deps.now(),
     held: await heldOn(deps.storage, {
@@ -559,7 +564,7 @@ function chooseButton(v: View, options: readonly Plan[], lead: string | null): H
     return "";
   if (v.held.some((h) => h.kind === "choose" && h.takenAt === null)) return "";
   return html`<form method="post" action="${planPath(t.id, p.id)}/accept"><input type="hidden" name="csrf" value="${v.csrf}" /><button class="primary" type="submit">Choose ${p.letter ?? ""} · ${optionLabel(p)}</button></form>
-<p class="small muted">Choosing emails everyone in it the result. You'll have a minute to undo it.</p>`;
+<p class="small muted">${v.noMail ? "Everyone in it sees the result here." : "Choosing emails everyone in it the result."} You'll have a minute to undo it.</p>`;
 }
 
 function planRow(v: View, p: Plan): Html {
@@ -697,9 +702,9 @@ ${shareBox("Message to paste", pasteMessage(v, v.sharedUrl))}${SHARE_BUTTONS}
  * can be removed, and the name is then free again.
  */
 /** rc42: making a thread verified, for whoever decides it. One way for now. */
-function verifyThreadForm(v: View, allowed: boolean): Html {
-  if (!allowed)
-    return html`<p class="wd-verify"><button type="button" disabled>Verify answers here</button> <span class="muted">${UNAVAILABLE.verify}</span></p>`;
+function verifyThreadForm(v: View): Html {
+  if (v.verifyRefusal !== null)
+    return html`<p class="wd-verify"><button type="button" disabled>Verify answers here</button> <span class="muted">${v.verifyRefusal}</span></p>`;
   return html`<details class="wd-verify"><summary>Verify answers here</summary>
 <form method="post" action="${threadPath(v.access.thread.id)}/verify">
   <input type="hidden" name="csrf" value="${v.csrf}" />
@@ -763,10 +768,10 @@ function ownLinksSection(v: View): Html | string {
   const open = v.plans.some((p) => p.status === "on_table");
   if (!open || others.length === 0 || t.organizerId !== v.access.personId) return "";
   return html`<section class="links" id="links"><h3 class="group-h">Their own links</h3>
-<p class="muted small">Each answers as that person. Copy one to send in a chat instead of by email.</p>
+<p class="muted small">Each answers as that person. ${v.noMail ? "This instance doesn't send email: copy each one and send it to them." : "Copy one to send in a chat instead of by email."}</p>
 ${others.map((m) =>
   m.ownAnswersOnly
-    ? html`<div class="row"><span><strong>${memberName(m)}</strong> <span class="muted">· takes answers only from their own email</span></span></div>`
+    ? html`<div class="row"><span><strong>${memberName(m)}</strong> <span class="muted">· ${v.noMail ? "answers only signed in" : "takes answers only from their own email"}</span></span></div>`
     : html`<div class="row"><span><strong>${memberName(m)}</strong></span><form method="post" action="${threadPath(t.id)}/links/copy"><input type="hidden" name="csrf" value="${v.csrf}" /><input type="hidden" name="person" value="${m.personId}" /><button class="link" type="submit">Copy ${memberName(m)}'s link</button></form></div>`,
 )}</section>`;
 }
@@ -884,6 +889,8 @@ ${
       v.access.members.length > 1 &&
       // rc51: the only other person stopped this mail; Copy link is above instead.
       v.stopped === null &&
+      // rc60: no email; each member's own link is copied below instead.
+      !v.noMail &&
       !v.held.some((h) => h.kind === "vote_links" && h.takenAt === null)
         ? html`<form method="post" action="${threadPath(t.id)}/links"><input type="hidden" name="csrf" value="${v.csrf}" /><button type="submit">Email vote links</button></form>`
         : ""
@@ -894,7 +901,7 @@ ${threadVerifiedLine(t)}
 ${t.verifiedAt === null && onTable.length > 0 && t.organizerId === v.access.personId ? shareSection(v) : ""}
 ${guestsSection(v)}
 ${t.verifiedAt === null ? ownLinksSection(v) : ""}
-${t.verifiedAt === null && deciders(v.access).includes(v.access.personId) ? verifyThreadForm(v, v.mayVerify) : ""}
+${t.verifiedAt === null && deciders(v.access).includes(v.access.personId) ? verifyThreadForm(v) : ""}
 ${threadRequestSection(v)}
 ${groups.map(([title, ps]) =>
   ps.length === 0 ? "" : html`<h3 class="group-h">${title}</h3>${ps.map((p) => planRow(v, p))}`,
@@ -1068,8 +1075,8 @@ ${shareBox("Message to paste", html`${t.name}: I've proposed “${p.name}” (${
     return html`${about}<div class="confirm"><p><strong>Accept “${p.name}” as a whole?</strong> ${tally(v, p)}${
       notVoted.length > 0 ? ` (not yet: ${notVoted.map(memberName).join(", ")})` : ""
     }. Other plans for the same time are replaced by it.</p>
-<p class="small">Accepting emails everyone in it the result. You'll have a minute to undo it.</p>
-<div class="row"><form method="post" action="${here}/accept">${csrf}<button class="primary" type="submit">Yes, accept and email everyone</button></form><a class="btn" href="${here}">Cancel</a></div></div>`;
+<p class="small">${v.noMail ? "Everyone in it sees the result here." : "Accepting emails everyone in it the result."} You'll have a minute to undo it.</p>
+<div class="row"><form method="post" action="${here}/accept">${csrf}<button class="primary" type="submit">${v.noMail ? "Yes, accept it" : "Yes, accept and email everyone"}</button></form><a class="btn" href="${here}">Cancel</a></div></div>`;
   }
   // rc46: each tap is saved; your answer tapped again takes it back. In a pair, a yes the
   // other has given already agrees the time, and the button says so.
@@ -1415,7 +1422,7 @@ ${
       )}</select></label>`
 }
 </fieldset>
-${verifiedField(values.verified === true, false, "plan", await mayVerify(deps, me.personId))}
+${verifiedField(values.verified === true, false, "plan", await verifyRefusal(deps, me.personId))}
 <div class="row"><button class="primary" type="submit">Start</button><a class="btn" href="${PLANS_PATH}">Cancel</a></div>
 </form>
 ${ZONE_GUESS}</div>`;
@@ -1546,8 +1553,8 @@ export function registerPlanRoutes(app: Hono<AppEnv>, deps: PlanRouteDeps): void
     };
     const again = async (error: string, status: 400 | 403 = 400) =>
       c.html(page(c, "Start planning", await newThreadForm(deps, me, values, error)), status);
-    if (values.verified && !(await mayVerify(deps, me.personId)))
-      return again(UNAVAILABLE.verify, 403);
+    const unverifiable = values.verified ? await verifyRefusal(deps, me.personId) : null;
+    if (unverifiable !== null) return again(unverifiable, 403);
     const bad = values.emails.filter((e) => {
       try {
         normalizeEmail(e);
@@ -1674,6 +1681,15 @@ export function registerPlanRoutes(app: Hono<AppEnv>, deps: PlanRouteDeps): void
     if (r instanceof Response) return r;
     if (r.access.thread.organizerId !== r.access.personId)
       return renderThread(c, r.access, r.me, "Only the organizer sends vote links.", 403);
+    // rc60: the button isn't offered; a POST anyway holds nothing.
+    if (deps.noMail === true)
+      return renderThread(
+        c,
+        r.access,
+        r.me,
+        "This instance doesn't send email. Copy each person's own link instead, and send it to them.",
+        409,
+      );
     const onTable = (await listPlans(deps.storage, r.access)).filter(
       (p) => p.status === "on_table",
     );
@@ -1755,7 +1771,9 @@ export function registerPlanRoutes(app: Hono<AppEnv>, deps: PlanRouteDeps): void
         c,
         r.access,
         r.me,
-        `${memberName(them)} takes answers only from their own email. You can still email them their link.`,
+        deps.noMail === true
+          ? `${memberName(them)} takes answers only from their own email, and this instance doesn't send email, so they answer signed in.`
+          : `${memberName(them)} takes answers only from their own email. You can still email them their link.`,
         409,
       );
     const issued = await issueVoteLinks(deps.storage, r.access, {
@@ -1933,8 +1951,8 @@ ${
   app.post(`${PLANS_PATH}/:thread/verify`, async (c) => {
     const r = await posting(c);
     if (r instanceof Response) return r;
-    if (!(await mayVerify(deps, r.me.personId)))
-      return renderThread(c, r.access, r.me, UNAVAILABLE.verify, 403);
+    const unverifiable = await verifyRefusal(deps, r.me.personId);
+    if (unverifiable !== null) return renderThread(c, r.access, r.me, unverifiable, 403);
     if ((await setThreadVerified(deps.storage, r.access, deps.now())) === "forbidden")
       return renderThread(c, r.access, r.me, "Only whoever decides it verifies it.", 403);
     return c.redirect(threadPath(r.access.thread.id), 303);
