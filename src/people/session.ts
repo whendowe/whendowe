@@ -31,8 +31,10 @@ export interface ResolvedSession {
 /**
  * How a session was made (DESIGN §10 rc42): a sign-in link, Google, or a group invite to an
  * address that had never signed in. A record for the history and the account page, never a gate.
+ * rc60: `setup`, the setup link that made the instance's first owner; `console`, a sign-in link
+ * a shell in the container printed.
  */
-export const sessionViaSchema = z.enum(["magic", "google", "invite"]);
+export const sessionViaSchema = z.enum(["magic", "google", "invite", "setup", "console"]);
 export type SessionVia = z.infer<typeof sessionViaSchema>;
 
 export async function createSession(

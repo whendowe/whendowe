@@ -17,7 +17,14 @@ import {
 import { findOrCreatePerson, findPersonByEmail, normalizeEmail } from "../../people/person.js";
 import { revokeSession } from "../../people/session.js";
 import { moveGuest } from "../../plans/share.js";
-import { html, PLANS_PATH, SIGN_OUT_ALL_PATH, SIGN_OUT_PATH, SWITCH_PATH } from "../layout.js";
+import {
+  type Html,
+  html,
+  PLANS_PATH,
+  SIGN_OUT_ALL_PATH,
+  SIGN_OUT_PATH,
+  SWITCH_PATH,
+} from "../layout.js";
 import {
   type AppEnv,
   page,
@@ -97,6 +104,8 @@ function sensitive(c: Context): void {
 export interface SignInOptions {
   /** Offer "Sign in with Google": the instance has Google credentials. */
   readonly google: boolean;
+  /** rc60: "This instance has no owner yet", while it has none (routes/setup.ts). */
+  readonly ownerNotice?: () => Promise<Html | string>;
 }
 
 /** The form; signed in, it adds another account rather than replacing this one. */
@@ -237,11 +246,16 @@ export function registerAuthRoutes(
   deps: AuthDeps,
   options: SignInOptions = { google: false },
 ): void {
-  app.get(SIGN_IN_PATH, (c) => {
+  app.get(SIGN_IN_PATH, async (c) => {
     if (!roomFor(c, null)) return tooManyAccounts(c);
     const next = backTo(c.req.query("next"));
+    const notice = options.ownerNotice === undefined ? "" : await options.ownerNotice();
     return c.html(
-      page(c, "Sign in", signInForm("", null, c.get("signedIn")?.email ?? null, options, next)),
+      page(
+        c,
+        "Sign in",
+        html`${notice}${signInForm("", null, c.get("signedIn")?.email ?? null, options, next)}`,
+      ),
     );
   });
 
@@ -319,7 +333,7 @@ export function registerAuthRoutes(
     if (used === null) return c.html(expiredPage(c), 400);
 
     const person = await findOrCreatePerson(deps.storage, used.email, { now });
-    if (!(await signInAs(c, deps, person.id, "magic"))) return tooManyAccounts(c);
+    if (!(await signInAs(c, deps, person.id, used.via ?? "magic"))) return tooManyAccounts(c);
     // Confirm with email (rc30): the link carries the guest, and using it moves its answers.
     if (used.guestId !== null) {
       const moved = await moveGuest(deps.storage, { guestId: used.guestId, personId: person.id });

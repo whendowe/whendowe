@@ -16,6 +16,7 @@ import { cappedMailPort } from "../../src/mail/capped.js";
 import { cloudflareRestMailPort } from "../../src/mail/cloudflare.js";
 import { consoleMailPort } from "../../src/mail/console.js";
 import { disabledMailPort, type MailPort } from "../../src/mail/port.js";
+import { hasOperator } from "../../src/people/setup.js";
 import { eraseDue } from "../../src/privacy/erasure.js";
 import { retentionPass } from "../../src/privacy/purge.js";
 import { isRetentionMinute } from "../../src/privacy/retention.js";
@@ -24,6 +25,7 @@ import { calendarGrants, createApp, heldRunners, reconnectMailer } from "../../s
 import type { AuthDeps } from "../../src/web/routes/auth.js";
 import type { OAuthRouteDeps } from "../../src/web/routes/oauth.js";
 import { buildOAuthDeps, pushTickPorts, tokenCipherFor } from "../../src/web/routes/oauth-deps.js";
+import { SETUP_COMMAND } from "../../src/web/routes/setup.js";
 import { nodePublicGet } from "./public-address.js";
 
 // Node entry (DESIGN.md §8): the same Hono app object as the Cloudflare worker,
@@ -173,6 +175,16 @@ async function purgePass(): Promise<void> {
   setTimeout(() => void purgePass(), PASS_INTERVAL_MS).unref();
 }
 setTimeout(() => void purgePass(), PASS_INTERVAL_MS).unref();
+
+// rc60: an instance with no operator says how to claim it. The line names a command, never a
+// token: the setup link is printed only to the terminal that runs it (deploy/node/cli.ts).
+if (!(await hasOperator(storage, auth.capabilities)))
+  console.log(
+    JSON.stringify({
+      reason: "no_owner",
+      message: `No owner yet. For your setup link, run: ${SETUP_COMMAND}`,
+    }),
+  );
 
 serve({ fetch: app.fetch, port: config.PORT }, (info) => {
   console.log(

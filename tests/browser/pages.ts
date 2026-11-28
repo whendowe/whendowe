@@ -557,6 +557,8 @@ writeFileSync(new URL("visible-elsewhere.html", OUT), await elsewhere.text());
 
 // Signed out, on an instance with Google credentials: the sign-in page offers Google
 // beside the email link (DESIGN §13 rc20). Placeholder credentials; nothing is called.
+// Like the hosted instance it stands for, it names its operators (rc43), so it has an owner
+// and the page says nothing about one (rc60).
 const withGoogle = createApp({
   auth: {
     storage: sqliteStoragePort(client),
@@ -564,6 +566,7 @@ const withGoogle = createApp({
     publicBaseUrl: "https://whendowe.example",
     secureCookies: false,
     now: () => NOW,
+    capabilities: { default: "all", operators: ["operator@example.org"] },
   },
   oauth: {
     storage: sqliteStoragePort(client),
