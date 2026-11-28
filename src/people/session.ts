@@ -32,9 +32,9 @@ export interface ResolvedSession {
  * How a session was made (DESIGN §10 rc42): a sign-in link, Google, or a group invite to an
  * address that had never signed in. A record for the history and the account page, never a gate.
  * rc60: `setup`, the setup link that made the instance's first owner; `console`, a sign-in link
- * a shell in the container printed.
+ * a shell in the container printed; `device`, one the account made where it was signed in.
  */
-export const sessionViaSchema = z.enum(["magic", "google", "invite", "setup", "console"]);
+export const sessionViaSchema = z.enum(["magic", "google", "invite", "setup", "console", "device"]);
 export type SessionVia = z.infer<typeof sessionViaSchema>;
 
 export async function createSession(
@@ -174,4 +174,37 @@ export async function revokeAllSessions(
       params: [now, personId],
     },
   ]);
+}
+
+/** One place an account is signed in (rc60), for the account page's list. */
+export interface SessionSummary {
+  readonly id: string;
+  readonly createdAt: string;
+  /** Null for a session made before rc42 recorded how. */
+  readonly via: SessionVia | null;
+}
+
+const summaryRowSchema = z.object({
+  id: z.string(),
+  created_at: z.string(),
+  via: z.string().nullable(),
+});
+
+/** Where this account is signed in now, newest first: unrevoked and unexpired. */
+export async function listSessions(
+  storage: StoragePort,
+  personId: string,
+  now: string,
+): Promise<SessionSummary[]> {
+  const rows = await storage.query({
+    sql: `SELECT id, created_at, via FROM session
+          WHERE person_id = ? AND revoked_at IS NULL AND expires_at > ?
+          ORDER BY created_at DESC, id DESC`,
+    params: [personId, now],
+  });
+  return rows.map((r) => {
+    const row = summaryRowSchema.parse(r);
+    const via = sessionViaSchema.safeParse(row.via);
+    return { id: row.id, createdAt: row.created_at, via: via.success ? via.data : null };
+  });
 }

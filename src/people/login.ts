@@ -95,8 +95,11 @@ export interface UsedLoginLink {
   readonly email: string;
   readonly guestId: string | null;
   readonly next: string | null;
-  /** rc60: `console` when a shell in the container made it; absent when it was mailed. */
-  readonly via?: "console";
+  /**
+   * rc60: `console` when a shell in the container made it, `device` when the account made it
+   * on its own page (Sign in on another device); absent when it was mailed.
+   */
+  readonly via?: "console" | "device";
 }
 
 /**
@@ -133,7 +136,7 @@ export async function consumeLoginLink(
     email: row.email,
     guestId: row.guest_id,
     next: row.next_path,
-    ...(row.via === "console" ? { via: "console" as const } : {}),
+    ...(row.via === "console" || row.via === "device" ? { via: row.via } : {}),
   };
 }
 
