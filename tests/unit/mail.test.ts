@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { createClient } from "@libsql/client";
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import { loadConfig, mailCapOf } from "../../src/config.js";
 import type { StoragePort } from "../../src/db/port.js";
 import { sqliteStoragePort } from "../../src/db/sqlite.js";
@@ -51,9 +51,17 @@ function recordingPort(): { port: MailPort; sent: MailMessage[] } {
 
 // --- fail closed by default -------------------------------------------------------
 
-it("defaults to the disabled adapter, which refuses to send", async () => {
+// rc60: "disabled" means this instance sends no email, so a send is dropped, not refused: there
+// was nothing to send. Still never printed, so no token reaches a log (§13).
+it("defaults to the disabled adapter, which sends nothing and prints nothing", async () => {
   expect(loadConfig({}).MAIL_PROVIDER).toBe("disabled");
-  await expect(disabledMailPort.send(MESSAGE)).rejects.toThrow(/not configured/);
+  const log = vi.spyOn(console, "log");
+  const error = vi.spyOn(console, "error");
+  await expect(disabledMailPort.send(MESSAGE)).resolves.toBeUndefined();
+  expect(log).not.toHaveBeenCalled();
+  expect(error).not.toHaveBeenCalled();
+  log.mockRestore();
+  error.mockRestore();
 });
 
 it("console adapter prints the message — explicit development opt-in only", async () => {
