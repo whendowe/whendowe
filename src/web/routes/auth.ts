@@ -90,6 +90,11 @@ export interface AuthDeps {
   readonly feedCipher?: TokenCipher;
   /** Capabilities (rc43): absent means everyone has everything, and no operators. */
   readonly capabilities?: CapabilityConfig;
+  /**
+   * rc60: this instance sends no email (MAIL_PROVIDER=disabled), so no page offers to email
+   * anything and every link that would have been emailed is copied instead. Absent: it does.
+   */
+  readonly noMail?: boolean;
 }
 
 const tokenSchema = z.string().min(1).max(256);
@@ -108,16 +113,37 @@ export interface SignInOptions {
   readonly ownerNotice?: () => Promise<Html | string>;
 }
 
+/**
+ * rc60: the ways in on an instance that sends no email, in place of the email form. Each is a
+ * link someone already in hands over; none is a form here.
+ */
+function waysIn(signedInAs: string | null): Html {
+  return html`<h1>${signedInAs === null ? "Sign in" : "Add another account"}</h1>
+<p>This instance doesn't send email, so signing in is by a link someone gives you:</p>
+<ul>
+  <li><strong>Invited to a group?</strong> Ask whoever invited you for a new invite link.</li>
+  <li><strong>Otherwise</strong>, ask whoever runs this instance for a sign-in link.</li>
+</ul>`;
+}
+
 /** The form; signed in, it adds another account rather than replacing this one. */
 function signInForm(
   email: string,
   error: string | null,
   signedInAs: string | null,
-  options: SignInOptions,
+  options: SignInOptions & { readonly noMail: boolean },
   next: string,
 ) {
   // Home is where every sign-in lands anyway: no field for it.
   const nextField = next === "/" ? "" : html`<input type="hidden" name="next" value="${next}" />`;
+  const google = options.google
+    ? html`<form method="post" action="${GOOGLE_SIGN_IN_PATH}">
+  ${nextField}
+  <p><button type="submit">Sign in with Google</button></p>
+</form>`
+    : "";
+  if (options.noMail)
+    return html`${waysIn(signedInAs)}${options.google ? html`<p class="muted">or</p>${google}` : ""}`;
   return html`${
     signedInAs === null
       ? html`<h1>Sign in</h1>
@@ -135,10 +161,7 @@ ${error === null ? "" : html`<p class="error">${error}</p>`}
 ${
   options.google
     ? html`<p class="muted">or</p>
-<form method="post" action="${GOOGLE_SIGN_IN_PATH}">
-  ${nextField}
-  <p><button type="submit">Sign in with Google</button></p>
-</form>`
+${google}`
     : ""
 }`;
 }
@@ -166,7 +189,8 @@ function expiredPage(c: Context<AppEnv>) {
   );
 }
 
-export type SendResult = "sent" | "rate_limited" | "capped" | "failed";
+/** `no_mail` (rc60): the instance sends no email, so no link was made. */
+export type SendResult = "sent" | "rate_limited" | "capped" | "failed" | "no_mail";
 
 /**
  * Issue a sign-in link for an address and email it. With a guest (rc30), using the link
@@ -174,10 +198,12 @@ export type SendResult = "sent" | "rate_limited" | "capped" | "failed";
  * With `next` (rc51), using it lands there; the caller has checked it with backTo.
  */
 export async function sendSignInLink(
-  deps: Pick<AuthDeps, "storage" | "mail" | "publicBaseUrl" | "now">,
+  deps: Pick<AuthDeps, "storage" | "mail" | "publicBaseUrl" | "now" | "noMail">,
   email: string,
   carries: { readonly guestId?: string; readonly next?: string } = {},
 ): Promise<SendResult> {
+  // Before a token exists: one nobody is sent would only wait to expire.
+  if (deps.noMail === true) return "no_mail";
   const issued = await issueLoginToken(deps.storage, email, {
     now: deps.now(),
     guestId: carries.guestId,
@@ -212,6 +238,8 @@ export async function sendSignInLink(
 
 /** The page for a link that wasn't sent, and why. */
 export function notSent(c: Context<AppEnv>, why: Exclude<SendResult, "sent">) {
+  if (why === "no_mail")
+    return c.html(page(c, "Sign in", waysIn(c.get("signedIn")?.email ?? null)), 400);
   if (why === "rate_limited")
     return c.html(
       page(
@@ -244,8 +272,10 @@ export function notSent(c: Context<AppEnv>, why: Exclude<SendResult, "sent">) {
 export function registerAuthRoutes(
   app: Hono<AppEnv>,
   deps: AuthDeps,
-  options: SignInOptions = { google: false },
+  given: SignInOptions = { google: false },
 ): void {
+  // rc60: with no email, the page lists the ways in instead of the form.
+  const options = { ...given, noMail: deps.noMail === true };
   app.get(SIGN_IN_PATH, async (c) => {
     if (!roomFor(c, null)) return tooManyAccounts(c);
     const next = backTo(c.req.query("next"));

@@ -295,7 +295,7 @@ export function registerAccountRoutes(
 <p>Everything that is yours goes: your name, your address, your answers, votes and notes, your drafts and your calendar connections. You're signed out of it everywhere.</p>
 <p>In other people's events and plans, what you changed stays, but it says <strong>${FORMER_MEMBER}</strong> — a different one in each, so nobody can tell they were all you.</p>
 ${loses.length === 0 ? "" : html`<p class="error">${loses.join(". ")}. To keep them for the others, make someone else an editor, or leave them to someone, first.</p>`}
-<p>It happens ${WAIT_DAYS} days after you confirm. You're signed out everywhere straight away, and we email you a link to keep the account, or to delete it at once. Nothing is kept to bring it back afterwards: <a href="${EXPORT_PATH}">download your data</a> first if you want it.</p>
+<p>It happens ${WAIT_DAYS} days after you confirm. You're signed out everywhere straight away, ${deps.noMail === true ? "and to keep the account you sign in again before then" : "and we email you a link to keep the account, or to delete it at once"}. Nothing is kept to bring it back afterwards: <a href="${EXPORT_PATH}">download your data</a> first if you want it.</p>
 <p class="muted">Copies in our backups are gone within 35 days after that.</p>
 <form method="post" action="${DELETE_ACCOUNT_PATH}">
   <input type="hidden" name="csrf" value="${me.csrfToken}" />
@@ -345,26 +345,28 @@ ${loses.length === 0 ? "" : html`<p class="error">${loses.join(". ")}. To keep t
     // From the configured origin, never the Host header (auth.ts explains why).
     const link = new URL(DELETION_LINK_PATH, deps.publicBaseUrl);
     link.searchParams.set("t", asked.token);
-    let mailed = true;
-    try {
-      await deps.mail.send({
-        to: me.email,
-        subject: `Your WhenDoWe account will be deleted on ${day}`,
-        cause: { kind: "self" },
-        text: [
-          `You asked to delete your WhenDoWe account, ${me.email}. It will be deleted on ${day}.`,
-          "",
-          "To keep it, or to delete it now instead:",
-          "",
-          link.toString(),
-          "",
-          "You've been signed out everywhere. If you didn't ask for this, open the link and keep your account: someone else may have used it.",
-        ].join("\n"),
-      });
-    } catch {
-      // The request stands either way (§10 rc22); the page says the email didn't go.
-      mailed = false;
-    }
+    // rc60: with no email there is nothing to send; signing in again keeps the account.
+    let mailed = deps.noMail !== true;
+    if (mailed)
+      try {
+        await deps.mail.send({
+          to: me.email,
+          subject: `Your WhenDoWe account will be deleted on ${day}`,
+          cause: { kind: "self" },
+          text: [
+            `You asked to delete your WhenDoWe account, ${me.email}. It will be deleted on ${day}.`,
+            "",
+            "To keep it, or to delete it now instead:",
+            "",
+            link.toString(),
+            "",
+            "You've been signed out everywhere. If you didn't ask for this, open the link and keep your account: someone else may have used it.",
+          ].join("\n"),
+        });
+      } catch {
+        // The request stands either way (§10 rc22); the page says the email didn't go.
+        mailed = false;
+      }
     // Its sessions are revoked; drop it from this browser too. Other accounts here stay.
     const { accounts } = signOutActive(c.get("accounts"));
     writeAccountsCookie(c, accounts, deps.secureCookies);
@@ -377,7 +379,9 @@ ${loses.length === 0 ? "" : html`<p class="error">${loses.join(". ")}. To keep t
 ${
   mailed
     ? html`<p>We've emailed ${me.email} a link to keep it, or to delete it now.</p>`
-    : html`<p class="error">We couldn't email you just now. To keep the account, sign in again before then.</p>`
+    : deps.noMail === true
+      ? html`<p>To keep it, sign in again before then. This instance doesn't send email, so ask whoever runs it for a sign-in link.</p>`
+      : html`<p class="error">We couldn't email you just now. To keep the account, sign in again before then.</p>`
 }
 <p><a href="/">Home</a></p>`,
       ),

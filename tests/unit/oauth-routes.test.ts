@@ -1386,6 +1386,37 @@ it("offers Google on the sign-in page only where Google is configured", async ()
   expect((await noGoogle.request(GOOGLE_SIGN_IN_PATH, form({}))).status).toBe(404);
 });
 
+it("without email, the sign-in page lists the ways in and still offers Google (rc60)", async () => {
+  const storage = await makeStorage();
+  const app = createApp({
+    auth: {
+      storage,
+      mail: { send: () => Promise.resolve() },
+      publicBaseUrl: "http://localhost:8080",
+      secureCookies: false,
+      now: () => new Date().toISOString(),
+      noMail: true,
+    },
+    oauth: {
+      storage,
+      cipher: await createTokenCipher([KEY], 1),
+      clientId: "cid.apps.googleusercontent.com",
+      clientSecret: "client-secret",
+      redirectUri: REDIRECT_URI,
+      now: () => NOW,
+      fetchImpl: googleFake(),
+      secureCookies: false,
+    },
+  });
+  const page = await (await app.request(SIGN_IN_PATH)).text();
+  expect(page).toContain("This instance doesn't send email");
+  expect(page).not.toContain('name="email"');
+  expect(page).toContain(
+    `</ul><p class="muted">or</p><form method="post" action="${GOOGLE_SIGN_IN_PATH}">`,
+  );
+  expect(page).toContain("Sign in with Google");
+});
+
 it("asks Google for openid email only, signed out, and seals a sign-in flow", async () => {
   const h = await harness();
   const { cookie, location } = await startSignIn(h);
