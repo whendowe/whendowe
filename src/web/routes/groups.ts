@@ -30,6 +30,8 @@ import {
   html,
   ownAnswersForm,
   retentionSection,
+  SHARE_BUTTONS,
+  shareBox,
   who,
 } from "../layout.js";
 import {
@@ -75,6 +77,8 @@ export interface GroupDeps {
   /** rc43: who may turn verifying on; absent, everyone may. */
   readonly capabilities?: CapabilityConfig;
   readonly now: () => string;
+  /** rc60: no email, so an invite is a link the inviter copies (AuthDeps.noMail). */
+  readonly noMail?: boolean;
 }
 
 const DAYS = INVITE_TTL_MS / (24 * 60 * 60 * 1000);
@@ -95,6 +99,7 @@ function inviteForm(
   csrf: string,
   notice: ReturnType<typeof html> | null,
   picker: InvitePicker,
+  noMail: boolean,
 ) {
   return html`<h2>Invite people</h2>
 ${notice}
@@ -105,11 +110,13 @@ ${notice}
     known: picker.known,
     levers: { terms: true, asking: false },
     filter: picker.filter,
-    lead: "Each gets an email with a link to join. What they can change and see is their default on this group's events.",
+    lead: noMail
+      ? "Each gets a link to join, for you to send them: this instance doesn't send email. What they can change and see is their default on this group's events."
+      : "Each gets an email with a link to join. What they can change and see is their default on this group's events.",
     group: null,
     exclude: picker.members,
   })}
-  <p><button type="submit">Send invites</button></p>
+  <p><button type="submit">${noMail ? "Make invite links" : "Send invites"}</button></p>
 </form>`;
 }
 
@@ -259,7 +266,7 @@ ${await feedSection(deps, { personId: me.personId, groupId: membership.group.id 
 ${await sharedLinksSection(deps, membership, me.csrfToken)}
 ${await appearanceSection(deps.storage, { kind: "group", id: membership.group.id }, me, `${GROUPS_PATH}/${membership.group.id}/me`, "group")}
 ${ownAnswersForm({ action: `${GROUPS_PATH}/${membership.group.id}/own-answers`, hidden: { csrf: me.csrfToken }, on: await defaultOwnAnswersOnly(deps.storage, membership.group.id, me.personId), where: "on new events from this group" })}
-${membership.role === "organizer" ? inviteForm(membership, me.csrfToken, null, await invitePicker(deps.storage, membership, me.personId)) : ""}
+${membership.role === "organizer" ? inviteForm(membership, me.csrfToken, null, await invitePicker(deps.storage, membership, me.personId), deps.noMail === true) : ""}
 ${retentionSection({
   days: await groupRetention(deps.storage, membership.group.id),
   subject: "Events made in this group are",
@@ -392,7 +399,11 @@ ${
       );
     }
 
+    // rc60: the page may carry invite links to copy.
+    if (deps.noMail === true) sensitive(c);
     type Status = 200 | 400 | 409 | 422 | 429 | 502 | 503;
+    /** `box`: the link to copy, after the line (rc60). */
+    type Outcome = { status: Status; notice: Html; box?: Html };
     const known = await listKnownPeople(deps.storage, me.personId);
     const typed = readChips(form, INVITES_PER_FORM);
     const reply = async (
@@ -406,10 +417,16 @@ ${
           c,
           membership.group.name,
           html`<p><a href="${GROUPS_PATH}/${membership.group.id}">← ${membership.group.name}</a></p>
-${inviteForm(membership, me.csrfToken, notice, {
-  ...(await invitePicker(deps.storage, membership, me.personId, chips, filter)),
-  known,
-})}`,
+${inviteForm(
+  membership,
+  me.csrfToken,
+  notice,
+  {
+    ...(await invitePicker(deps.storage, membership, me.personId, chips, filter)),
+    known,
+  },
+  deps.noMail === true,
+)}${deps.noMail === true ? SHARE_BUTTONS : ""}`,
         ),
         status,
       );
@@ -455,11 +472,7 @@ ${inviteForm(membership, me.csrfToken, notice, {
     const from =
       (await appearanceIn(deps.storage, { kind: "group", id: membership.group.id }, me.personId))
         ?.shown.name ?? "Someone";
-    const inviteOne = async (
-      email: string,
-      label: string,
-      chip: Chip,
-    ): Promise<{ status: Status; notice: Html }> => {
+    const inviteOne = async (email: string, label: string, chip: Chip): Promise<Outcome> => {
       const invite = await createInvite(deps.storage, membership, {
         email,
         invitedBy: me.personId,
@@ -478,6 +491,13 @@ ${inviteForm(membership, me.csrfToken, notice, {
       }
       const link = new URL(INVITE_PATH, deps.publicBaseUrl);
       link.searchParams.set("t", invite.token);
+      // rc60: no email, so the inviter is shown the link once, to copy into a chat.
+      if (deps.noMail === true)
+        return {
+          status: 200,
+          notice: html`<strong>${label}</strong>'s invite link. Send it only to them: it works once, for ${DAYS} days, and joining also signs in someone who has never signed in here.`,
+          box: shareBox(`${label}'s invite link`, link.toString(), 2),
+        };
       try {
         // The group name is user-written text inside an email from our domain. It is
         // plain text (no HTML to inject) and capped at 80 characters; within a group of
@@ -513,7 +533,7 @@ ${inviteForm(membership, me.csrfToken, notice, {
       return { status: 200, notice: html`Invite sent to <strong>${label}</strong>.` };
     };
 
-    const outcomes: { status: Status; notice: Html }[] = [];
+    const outcomes: Outcome[] = [];
     for (const chip of typed) {
       const label =
         chip.kind === "email"
@@ -533,8 +553,8 @@ ${inviteForm(membership, me.csrfToken, notice, {
     return reply(
       status,
       one !== undefined
-        ? html`<p${one.status === 200 ? "" : html` class="error"`}>${one.notice}</p>`
-        : html`<ul>${outcomes.map((o) => html`<li${o.status === 200 ? "" : html` class="error"`}>${o.notice}</li>`)}</ul>`,
+        ? html`<p${one.status === 200 ? "" : html` class="error"`}>${one.notice}</p>${one.box ?? ""}`
+        : html`<ul>${outcomes.map((o) => html`<li${o.status === 200 ? "" : html` class="error"`}>${o.notice}${o.box ?? ""}</li>`)}</ul>`,
     );
   });
 

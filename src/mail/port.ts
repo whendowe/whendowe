@@ -52,16 +52,15 @@ export interface MailPort {
 }
 
 /**
- * The adapter used when no provider is configured: it refuses every send.
+ * The adapter for an instance that sends no email (MAIL_PROVIDER=disabled, DESIGN §10 rc60
+ * *Running without email*): every send is dropped, silently. There was nothing to send, so
+ * nothing is queued, retried, counted against the cap or reported as failed; the routes offer a
+ * link to copy instead of mail (AuthDeps.noMail), so nothing a person asked for is dropped.
  *
- * Fail closed on purpose. The obvious alternative — fall back to the console
- * adapter — would make a misconfigured production instance print magic-link
- * tokens into its logs, where anyone who can read logs can sign in as anyone
- * (§13: never log tokens). Development opts in to the console explicitly.
+ * It never prints, on purpose: the obvious alternative, falling back to the console adapter,
+ * would put sign-in tokens into the logs, where anyone who can read them could sign in as
+ * anyone (§13: never log tokens). Development opts in to the console explicitly.
  */
 export const disabledMailPort: MailPort = {
-  send: () =>
-    Promise.reject(
-      new Error("mail is not configured (MAIL_PROVIDER is 'disabled'); refusing to send"),
-    ),
+  send: () => Promise.resolve(),
 };

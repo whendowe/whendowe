@@ -75,7 +75,7 @@ const MAX_CLAIMS = 8;
 
 export type ShareRouteDeps = Pick<
   AuthDeps,
-  "storage" | "now" | "secureCookies" | "mail" | "publicBaseUrl"
+  "storage" | "now" | "secureCookies" | "mail" | "publicBaseUrl" | "noMail"
 >;
 
 // --- The claim cookie: pure ---------------------------------------------------------------
@@ -219,8 +219,9 @@ async function sharePage(
   )}
 </form>`;
   // A guest's answer is kept by this browser only; the page offers to keep it for good.
+  // rc60: with no email there is no sign-in link to send; the keep link below stays.
   const keep =
-    who.kind === "claim" && q.open
+    who.kind === "claim" && q.open && deps.noMail !== true
       ? html`<h2>Keep your answer</h2>
 <form class="stack" method="post" action="${SHARE_PATH}/confirm">
   <input type="hidden" name="t" value="${token}" />${claimField}

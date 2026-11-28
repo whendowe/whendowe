@@ -40,7 +40,7 @@ function buildMail(c: Config, s: StoragePort): MailPort {
   let inner: MailPort;
   switch (c.MAIL_PROVIDER) {
     case "disabled":
-      // Fail closed: refuse rather than print tokens into logs (src/mail/port.ts).
+      // Sends nothing and prints nothing, never a token (src/mail/port.ts, rc60).
       return disabledMailPort;
     case "console":
       inner = consoleMailPort();
@@ -89,6 +89,8 @@ const auth: AuthDeps = {
       : await tokenCipherFor(config.TOKEN_ENCRYPTION_KEY),
   // Capabilities (rc43): who may use what, and the operators who decide.
   capabilities: capabilityConfigOf(config),
+  // rc60: an instance with no mail provider sends no email; its links are copied instead.
+  noMail: config.MAIL_PROVIDER === "disabled",
 };
 /** A followed link's GET (rc57): every address the name has checked in the connection's lookup. */
 const publicGet = nodePublicGet();

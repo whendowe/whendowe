@@ -87,7 +87,7 @@ function buildMail(c: Config, env: Env, s: StoragePort): MailPort {
   let inner: MailPort;
   switch (c.MAIL_PROVIDER) {
     case "disabled":
-      return disabledMailPort; // fail closed (src/mail/port.ts)
+      return disabledMailPort; // sends nothing, prints nothing (src/mail/port.ts, rc60)
     case "console":
       inner = consoleMailPort();
       break;
@@ -151,6 +151,8 @@ async function build(env: Env): Promise<Built> {
         : await tokenCipherFor(config.TOKEN_ENCRYPTION_KEY),
     // Capabilities (rc43): who may use what, and the operators who decide.
     capabilities: capabilityConfigOf(config),
+    // rc60: an instance with no mail provider sends no email; its links are copied instead.
+    noMail: config.MAIL_PROVIDER === "disabled",
   };
   // rc53: a push notification asks the connection's Durable Object to read, which coalesces
   // pokes (connection-do.ts); the request is answered without waiting for the read.
